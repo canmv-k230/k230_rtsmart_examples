@@ -21,9 +21,9 @@ file(GLOB APP_SOURCES ${rtsp_server_root}/*.cpp)
 set(BIN rtspServer)
 
 include_directories(${PROJECT_SOURCE_DIR})
-include_directories(${k230_sdk}/src/big/mpp/userapps/api/)
-include_directories(${k230_sdk}/src/big/mpp/include)
-include_directories(${k230_sdk}/src/big/mpp/include/comm)
+include_directories(${k230_mpp_root}/userapps/api/)
+include_directories(${k230_mpp_root}/include)
+include_directories(${k230_mpp_root}/include/comm)
 include_directories(${k230_sdk}/src/common/cdk/user/component/datafifo/include)
 
 include_directories(${IPCMSG_ROOT}/include)
@@ -34,7 +34,7 @@ include_directories(/usr/local/include)
 include_directories(${MW_ROOT}/rtsp_server/include)
 
 link_directories(${k230_sdk}/src/common/cdk/user/component/datafifo/slave/lib)
-link_directories(${k230_sdk}/src/big/mpp/userapps/lib)
+link_directories(${k230_mpp_root}/userapps/lib)
 
 link_directories(${IPCMSG_ROOT}/host/lib)
 link_directories(${MAPI_ROOT}/mediaclient/lib)

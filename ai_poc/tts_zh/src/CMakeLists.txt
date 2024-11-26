@@ -2,9 +2,9 @@ set(src main.cc ai_base.cc hifigan.cc fastspeech1.cc fastspeech2.cc VoxCommon.cp
 set(bin tts_zh.elf)
 include_directories(${PROJECT_SOURCE_DIR})
 include_directories(${nncase_sdk_root}/riscv64/rvvlib/include)
-include_directories(${k230_sdk}/src/big/mpp/userapps/api/)
-include_directories(${k230_sdk}/src/big/mpp/include)
-include_directories(${k230_sdk}/src/big/mpp/include/comm)
+include_directories(${k230_mpp_root}/userapps/api/)
+include_directories(${k230_mpp_root}/include)
+include_directories(${k230_mpp_root}/include/comm)
 link_directories(${nncase_sdk_root}/riscv64/rvvlib/)
 
 
