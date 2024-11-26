@@ -73,18 +73,17 @@ ifeq ($(CONFIG_RTT_AI_EXAMPLES_MODE_LCD),y)
 	BUILD_OUT := k230_bin_lcd
 endif
 
-# List of directories to process (define your directories here)
-dirs := $(dir-y)
-
 # Default target
 all:
+	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC)/*
+
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_AI_EXAMPLES),y)
 	@$(foreach dir,$(dirs), \
 		echo "Building in directory: $(dir) with BUILD_ARG=$(BUILD_ARG)"; \
 		./build_app_sub_rtos_only.sh $(dir) $(BUILD_ARG);\
 		if [ -d $(BUILD_OUT) ]; then \
-			echo "Copying $(BUILD_OUT) to $(RTT_EXAMPLES_ELF_INSTALL_PATH)"; \
-			cp -r $(BUILD_OUT)/* $(RTT_EXAMPLES_ELF_INSTALL_PATH); \
+			echo "Copying $(BUILD_OUT) to $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC)"; \
+			cp -r $(BUILD_OUT)/* $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC); \
 		else \
 			echo "No build output found in $(dir)/$(BUILD_OUT), skipping copy."; \
 		fi;)
@@ -92,6 +91,6 @@ endif
 	@echo "Make AI samples done."
 
 clean:
-	@rm -rf out
-	@rm -rf k230_bin, k230_bin_lcd
+	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC)/*
+	@rm -rf out k230_bin k230_bin_lcd
 	@echo "Clean ai samples done."
