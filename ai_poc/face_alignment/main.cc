@@ -118,7 +118,7 @@ void video_proc(char *argv[])
             face_align.inference();
             vector<float> vertices;
             face_align.post_process({ISP_CHN0_WIDTH, ISP_CHN0_HEIGHT},vertices,false); 
-            #if defined(CONFIG_BOARD_K230D_CANMV)
+            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
             {
                 ScopedTiming st("osd draw", atoi(argv[8]));
                 cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
