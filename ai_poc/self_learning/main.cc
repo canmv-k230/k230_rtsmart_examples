@@ -1051,7 +1051,7 @@ int main(int argc, char *argv[])
             set_read_block_mode(true);
             set_terminal_mode(true);
         }
-        #elif defined(CONFIG_BOARD_K230D_CANMV)
+        #elif defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
         {
             std::thread thread_isp(video_proc_k230d, argv);
             while(!reg_stop)

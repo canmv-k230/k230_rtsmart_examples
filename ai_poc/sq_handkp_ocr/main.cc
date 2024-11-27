@@ -85,7 +85,7 @@ int ocr_process(OCRBox &ocrbox, OCRReco &ocrreco,cv::Mat ori_img, cv::Mat& osd_f
         {
             cv::Point tmp = ocrbox_results[i].vertices[j];
 
-            #if defined(CONFIG_BOARD_K230D_CANMV)
+            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
             {
                 tmp.x = (1.0*(tmp.x+xmin)/SENSOR_WIDTH)*osd_height;
                 tmp.y = (1.0*(tmp.y+ymin)/SENSOR_HEIGHT)*osd_width;
@@ -212,7 +212,7 @@ void video_proc(char *argv[])
 
                 cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
 
-                #if defined(CONFIG_BOARD_K230D_CANMV)
+                #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
                 {
                     cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
                     for (auto r: results)

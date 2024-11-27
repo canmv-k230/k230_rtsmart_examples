@@ -4,7 +4,7 @@ set(bin translate_en_ch.elf)
 include_directories(${PROJECT_SOURCE_DIR})
 include_directories(${nncase_sdk_root}/riscv64/rvvlib/include)
 
-link_directories(${PROJECT_SOURCE_DIR}/../../big/kmodel/ai_poc/utils/)
+link_directories(${PROJECT_SOURCE_DIR}/../../libs/kmodel/ai_poc/utils/)
 link_directories(${nncase_sdk_root}/riscv64/rvvlib/)
 
 add_executable(${bin} ${src})
