@@ -2,7 +2,14 @@ include mkenv.mk
 
 include $(SDK_SRC_ROOT_DIR)/.config
 
-dirs := ai_poc
+dir-y :=
+
+dir-$(CONFIG_RTT_ENABLE_BUILD_AI_EXAMPLES) += ai_poc
+dir-$(CONFIG_RTT_ENABLE_BUILD_KPU_RUN_EXAMPLES) += kpu_run_yolov8
+dir-$(CONFIG_RTT_ENABLE_BUILD_AI2D_EXAMPLES) += usage_ai2d
+
+# Add directories to the build system
+dirs := $(sort $(dir-y))
 
 .PHONY: all clean
 
