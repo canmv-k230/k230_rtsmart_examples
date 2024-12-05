@@ -1,7 +1,5 @@
 include ../mkenv.mk
 
-include $(SDK_SRC_ROOT_DIR)/.config
-
 dir-y :=
 
 dir-$(CONFIG_RTT_AI2D_AFFINE) += test_affine

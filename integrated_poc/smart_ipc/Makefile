@@ -3,6 +3,8 @@ include ../../mkenv.mk
 include $(MPP_SRC_DIR)/middleware/mpp.mk
 include $(MPP_SRC_DIR)/middleware/rt-smart.mk
 
+include ../toolchain.mk
+
 CURRECT_DIR_NAME=$(shell basename `pwd`)
 LOCAL_SRC_DIR = $(shell pwd)
 BIN = $(LOCAL_SRC_DIR)/$(CURRECT_DIR_NAME).elf
@@ -29,6 +31,8 @@ WERROR_FLAGS = -Wno-register -Wno-multichar -Wno-pessimizing-move -Wno-deprecate
 CXX_FLAGS = $(WERROR_FLAGS) \
 			$(LIVE555_COMPILE_OPTS) \
 
+LINKFLAG = -T ../link.lds
+
 SRCS = $(wildcard $(LOCAL_SRC_DIR)/*.c) $(wildcard $(LOCAL_SRC_DIR)/face_detection/*.c)
 OBJS = $(patsubst %.c,%.o,$(SRCS))
 CPP_SRCS = $(wildcard $(LOCAL_SRC_DIR)/*.cpp) $(wildcard $(LOCAL_SRC_DIR)/face_detection/*.cpp)
@@ -50,11 +54,11 @@ $(OBJS): %.o : %.c
 
 $(CPP_OBJS): %.o : %.cpp
 	@echo CXX $@
-	@$(CPP) $(CC_CFLAGS_EX) $(CXX_FLAGS) $(INCPATH) $(BSP_CFLGAS) $(RTSMART_CFLAGS) $(MPP_USER_CFLGAS) -c $< -o $@
+	@$(CXX) $(CC_CFLAGS_EX) $(CXX_FLAGS) $(INCPATH) $(BSP_CFLGAS) $(RTSMART_CFLAGS) $(MPP_USER_CFLGAS) -c $< -o $@
 
 $(BIN): $(OBJS) $(CPP_OBJS)
 	@echo LD $@
-	$(CPP) -o $(BIN) $(LINKFLAG) -Wl,--whole-archive -Wl,--no-whole-archive -n --static $^ -L$(LIBPATH) -Wl,--start-group $(LIBS) -Wl,--end-group
+	$(CXX) -o $(BIN) $(LINKFLAG) -n --static $^ -L$(LIBPATH) -Wl,--start-group $(LIBS) -Wl,--end-group
 
 clean:
 	echo "${PWD}/Makefile clean"

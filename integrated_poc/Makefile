@@ -1,7 +1,5 @@
 include ../mkenv.mk
 
-include $(SDK_SRC_ROOT_DIR)/.config
-
 dir-y :=
 
 # Directory assignment based on Kconfig options
