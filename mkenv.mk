@@ -17,5 +17,8 @@ $(shell if [ ! -e $(RTT_EXAMPLES_ELF_INSTALL_PATH_KPU_RUN_YOLOV8) ];then mkdir -
 export RTT_EXAMPLES_ELF_INSTALL_PATH_USAGE_AI2D := $(SDK_RTSMART_SRC_DIR)/examples/elf/usage_ai2d/
 $(shell if [ ! -e $(RTT_EXAMPLES_ELF_INSTALL_PATH_USAGE_AI2D) ];then mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_USAGE_AI2D); fi)
 
+export RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC := $(SDK_RTSMART_SRC_DIR)/examples/elf/integrated_poc/
+$(shell if [ ! -e $(RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC) ];then mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC); fi)
+
 include $(SDK_TOOLS_DIR)/toolchain_rtsmart.mk
 export PATH:=$(CROSS_COMPILE_DIR):$(PATH)
