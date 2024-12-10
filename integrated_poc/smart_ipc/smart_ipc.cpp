@@ -24,7 +24,10 @@ void MySmartIPC::OnVEncData(k_u32 chn_id, void *data, size_t size, k_venc_pack_t
 
 void MySmartIPC::OnAIFrameData(k_u32 chn_id, k_video_frame_info*frame_info)
 {
-    ScopedTiming st("ai total time", 1);
+    if (!started_) return;
+
+    ScopedTiming st("ai total time", 0);
+    //copy AI frame(ai_frame_vaddr_) data from vicap chn to this memory, then do AI analysis
     {
         ScopedTiming st("isp copy", 0);
         auto vbvaddr = kd_mpi_sys_mmap_cached(frame_info->v_frame.phys_addr[0], ai_frame_size_);
@@ -32,25 +35,36 @@ void MySmartIPC::OnAIFrameData(k_u32 chn_id, k_video_frame_info*frame_info)
         kd_mpi_sys_munmap(vbvaddr, ai_frame_size_);
     }
 
+    // ai analyse to get detect result
     detect_result_.clear();
     face_detection_->pre_process();
     face_detection_->inference();
     // 旋转后图像
     face_detection_->post_process({input_config_.ai_width, input_config_.ai_height}, detect_result_);
 
+    //copy detect result to osd frame
     cv::Mat osd_frame(input_config_.osd_height, input_config_.osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
     {
         ScopedTiming st("osd draw", 0);
-        face_detection_->draw_result(osd_frame,detect_result_,false);
+        if (input_config_.vo_connect_type == LT9611_MIPI_4LAN_1920X1080_30FPS)
+        {
+            face_detection_->draw_result(osd_frame,detect_result_,false);
+        }
+        else if (input_config_.vo_connect_type == ST7701_V1_MIPI_2LAN_480X800_30FPS)
+        {
+            cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
+            face_detection_->draw_result(osd_frame,detect_result_,false);
+            cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
+        }
     }
 
+    //copy osd frame data to osd_vaddr_,for osd draw
     {
         ScopedTiming st("osd copy", 0);
         memcpy(osd_vaddr_, osd_frame.data, input_config_.osd_width * input_config_.osd_height * 4);
         // 显示通道插入帧
         media_.osd_draw_frame();
     }
-
 }
 
 int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream_url/*= "test"*/, int port/*= 8554*/)
@@ -58,10 +72,10 @@ int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream
     ScopedTiming st = ScopedTiming("MySmartIPC::Init", 1);
     //init rtsp server
     input_config_ = config;
-    if (rtsp_server_.Init(port, this) < 0) {
+    if (rtsp_server_.Init(port, nullptr) < 0) {
         return -1;
     }
-    // enable audio-track and backchannel-track
+    // enable audio-track
     SessionAttr session_attr;
     session_attr.with_audio = true;
     session_attr.with_audio_backchannel = false;
@@ -87,7 +101,7 @@ int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream
     feature_config_.enable_ai_analysis = true;
     feature_config_.on_ai_frame_data = this;
     feature_config_.enable_render = true;
-    feature_config_.enable_audio_encoder = false;
+    feature_config_.enable_audio_encoder = true;
     feature_config_.on_aenc_data = this;
 
     media_.configure_media_features(config, feature_config_);
@@ -128,11 +142,11 @@ int MySmartIPC::Stop()
 
 int MySmartIPC::_ai_analyse_init()
 {
-    //alloc osd frame
+    //alloc one osd frame for draw osd
     media_.osd_alloc_frame(&osd_vaddr_);
 
-    // alloc memory for ai input frame
-    size_t size = 3 * input_config_.ai_width * input_config_.ai_height;//3 for rgb888
+    // Allocate memory for AI input frame to copy AI frame data from ISP to this memory
+    size_t size = 3 * input_config_.ai_width * input_config_.ai_height;//3 for rgb888p
     ai_frame_size_ = size;
     int ret = kd_mpi_sys_mmz_alloc_cached(&ai_frame_paddr_, &ai_frame_vaddr_, "allocate", "anonymous", size);
     if (ret)
@@ -144,7 +158,7 @@ int MySmartIPC::_ai_analyse_init()
     {
         ScopedTiming st("@@@@@@@@face detection init", 1);
         //init face detection
-        face_detection_ = new FaceDetection("face_detection_320.kmodel",0.6,0.2,{3, input_config_.ai_height,input_config_.ai_width},reinterpret_cast<uintptr_t>(ai_frame_vaddr_), reinterpret_cast<uintptr_t>(ai_frame_paddr_),0);
+        face_detection_ = new FaceDetection(input_config_.kmodel_file.c_str(),input_config_.obj_thresh, input_config_.nms_thresh,{3, input_config_.ai_height,input_config_.ai_width},reinterpret_cast<uintptr_t>(ai_frame_vaddr_), reinterpret_cast<uintptr_t>(ai_frame_paddr_),0);
     }
 
     return 0;

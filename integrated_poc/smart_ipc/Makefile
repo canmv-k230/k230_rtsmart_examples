@@ -44,8 +44,6 @@ all:$(BIN)
 	@mkdir -p $(BIN_DIR)
 	@cp $(BIN) $(BIN_DIR)
 	@cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/face_detection_320.kmodel $(BIN_DIR)
-	echo "$$$$$$$$$$$$$$$$$$$$list cpp objs"
-	echo $(CPP_OBJS)
 	@rm -rf $(BIN) $(OBJS) $(CPP_OBJS)
 
 $(OBJS): %.o : %.c

@@ -6,13 +6,9 @@
 #include "face_detection.h"
 #include <vector>
 
-class MySmartIPC :public IOnBackChannel,  public IOnAEncData, public IOnVEncData,public IOnAIFrameData {
+class MySmartIPC :public IOnAEncData, public IOnVEncData,public IOnAIFrameData {
   public:
     MySmartIPC();
-
-    virtual void OnBackChannelData(std::string &session_name, const uint8_t *data, size_t size, uint64_t timestamp) override {
-        ;
-    }
     // IOnAEncData
     virtual void OnAEncData(k_u32 chn_id, k_u8*pdata,size_t size,k_u64 time_stamp);
     // IOnVEncData

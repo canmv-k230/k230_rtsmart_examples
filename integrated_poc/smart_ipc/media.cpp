@@ -484,6 +484,9 @@ int KdMedia::configure_media_features(const KdMediaInputConfig &input_config, co
 
 int KdMedia::enable_media_features()
 {
+    // Audio codec initialization takes a long time, so it is executed in a separate thread
+    pthread_create(&start_ai_aenc_tid_, NULL, start_ai_aenc_thread, this);
+
     //init vicap
     _init_vi_cap();
 
@@ -502,30 +505,41 @@ int KdMedia::enable_media_features()
     //start dump frame for ai analysis
     _start_dump_frame_for_ai_analysis();
 
-
     //init venc
     _init_venc();
 
-    //init ai aenc
-    _init_ai_aenc();
-
     //start vicap venc
     _start_venc();
-
-    //start ai and aenc
-    _start_ai_aenc();
 
     return 0;
 }
 
 int KdMedia::disable_media_features()
 {
+    //stop dump frame for ai analysis
+    _stop_dump_frame_for_ai_analysis();
+
+    //stop venc
+    _stop_venc();
+    _deinit_venc();
+
+    //stop vo
+    _deinit_vo_layer_osd();
+
+    //stop ai,aenc
+    _stop_ai_aenc();
+    _deinit_ai_aenc();
+
+    //stop vi cap
+    _stop_vi_cap();
+    _deinit_vi_cap();
+
     return 0;
 }
 
 int KdMedia::destroy_media_features()
 {
-    return 0;
+    return _deinit_vb_pool();
 }
 
 int KdMedia::_init_vb_pool()
@@ -543,8 +557,8 @@ int KdMedia::_init_vb_pool()
         if (feature_config_.enable_video_encoder)
         {
             pool_index ++;
-            //VB for YUV420SP input to venc
-            vb_config.comm_pool[pool_index].blk_cnt = VICAP_CHN_MIN_FRAME_COUNT + 2;//3 for vicap and 2 for venc input
+            //VB vicap for YUV420SP input to venc
+            vb_config.comm_pool[pool_index].blk_cnt = VICAP_CHN_MIN_FRAME_COUNT;
             vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
             vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.venc_width*input_config_.venc_height * 3 / 2, MEM_ALIGN_4K);//must align 4k
         }
@@ -553,7 +567,7 @@ int KdMedia::_init_vb_pool()
         if (feature_config_.enable_render)
         {
             pool_index ++;
-            //VB for YUV420SP output to vo
+            //VB vicap for YUV420SP output to vo
             vb_config.comm_pool[pool_index].blk_cnt = VICAP_CHN_MIN_FRAME_COUNT;
             vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
             vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.vo_width * input_config_.vo_height * 3 / 2, MEM_ALIGN_1K);
@@ -563,7 +577,7 @@ int KdMedia::_init_vb_pool()
         if (feature_config_.enable_ai_analysis)
         {
             pool_index ++;
-            //VB for RGB888 output to ai
+            //VB vicap for RGB888 output to ai
             vb_config.comm_pool[pool_index].blk_cnt = VICAP_CHN_MIN_FRAME_COUNT;
             vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
             vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.ai_width * input_config_.ai_height * 3 , MEM_ALIGN_1K);
@@ -588,9 +602,16 @@ int KdMedia::_init_vb_pool()
         vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
     }
 
-    // vb for venc output
+    // vb for venc
     if (feature_config_.enable_video_encoder)
     {
+        //venc input hold 2 vb
+        pool_index ++;
+        vb_config.comm_pool[pool_index].blk_cnt = 2;
+        vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
+        vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.venc_width*input_config_.venc_height * 3 / 2, MEM_ALIGN_4K);//must align 4k
+
+        // vb for venc output
         pool_index ++;
         vb_config.comm_pool[pool_index].blk_cnt = 2;
         vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.venc_width*input_config_.venc_height/2,MEM_ALIGN_4K);
@@ -663,7 +684,7 @@ int KdMedia::_init_vi_cap()
 
         vi_chn_attr_info.out_width = MEM_ALIGN_UP(input_config_.vo_width, 16);
         vi_chn_attr_info.out_height = input_config_.vo_height;
-        vi_chn_attr_info.pixel_format = PIXEL_FORMAT_YVU_PLANAR_420;// PIXEL_FORMAT_YUV_SEMIPLANAR_420
+        vi_chn_attr_info.pixel_format = vi_chn_render_pixel_format_;// PIXEL_FORMAT_YUV_SEMIPLANAR_420
         vi_chn_attr_info.vicap_dev = vi_dev_id_;
         vi_chn_attr_info.buffer_num = VICAP_CHN_MIN_FRAME_COUNT;
         vi_chn_attr_info.vicap_chn = vi_chn_render_id_;
@@ -685,7 +706,7 @@ int KdMedia::_init_vi_cap()
 
     }
 
-    //set chn1 output rgb888 for ai analysis
+    //set chn1 output rgb888p for ai analysis
     if (feature_config_.enable_ai_analysis)
     {
         vicap_chn_index++;
@@ -700,7 +721,7 @@ int KdMedia::_init_vi_cap()
 
         vi_chn_attr_info.out_width = MEM_ALIGN_UP(input_config_.ai_width, 16);
         vi_chn_attr_info.out_height = input_config_.ai_height;
-        vi_chn_attr_info.pixel_format = PIXEL_FORMAT_BGR_888_PLANAR;
+        vi_chn_attr_info.pixel_format = vi_chn_ai_pixel_format_;
         vi_chn_attr_info.vicap_dev = vi_dev_id_;
         vi_chn_attr_info.buffer_num = VICAP_CHN_MIN_FRAME_COUNT;
         vi_chn_attr_info.vicap_chn = vi_chn_ai_id_;
@@ -736,7 +757,7 @@ int KdMedia::_init_vi_cap()
 
         vi_chn_attr_info.out_width = MEM_ALIGN_UP(input_config_.venc_width, 16);
         vi_chn_attr_info.out_height = input_config_.venc_height;
-        vi_chn_attr_info.pixel_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+        vi_chn_attr_info.pixel_format = vi_chn_venc_pixel_format_;
         vi_chn_attr_info.vicap_dev = vi_dev_id_;
         vi_chn_attr_info.buffer_num = VICAP_CHN_MIN_FRAME_COUNT;
         vi_chn_attr_info.alignment = 12;//must align 4k
@@ -758,6 +779,12 @@ int KdMedia::_init_vi_cap()
         }
 
     }
+
+    return 0;
+}
+
+int KdMedia::_deinit_vi_cap()
+{
 
     return 0;
 }
@@ -798,16 +825,20 @@ int KdMedia::_init_layer(k_vo_layer chn_id)
     k_vo_video_layer_attr attr;
 
     memset(&info, 0, sizeof(info));
-    #if 0
-    info.act_size.width = input_config_.vo_height;
-    info.act_size.height = input_config_.vo_width;
-    info.format = PIXEL_FORMAT_YVU_PLANAR_420;
-    info.func = K_ROTATION_90;
-    #else
-    info.act_size.width = input_config_.vo_width;
-    info.act_size.height = input_config_.vo_height;
-    info.format = PIXEL_FORMAT_YVU_PLANAR_420;
-    #endif
+    if (input_config_.vo_connect_type == LT9611_MIPI_4LAN_1920X1080_30FPS)
+    {
+        info.act_size.width = input_config_.vo_width;
+        info.act_size.height = input_config_.vo_height;
+        info.format = vi_chn_render_pixel_format_;
+        info.func = K_ROTATION_0;
+    }
+    else if (input_config_.vo_connect_type == ST7701_V1_MIPI_2LAN_480X800_30FPS)
+    {
+        info.act_size.width = input_config_.vo_height;
+        info.act_size.height = input_config_.vo_width;
+        info.format = vi_chn_render_pixel_format_;
+        info.func = K_ROTATION_90;
+    }
     info.global_alptha = 0xff;
     info.offset.x = 0;//(1080-w)/2,
     info.offset.y = 0;//(1920-h)/2;
@@ -843,6 +874,11 @@ int KdMedia::_init_layer(k_vo_layer chn_id)
     return 0;
 }
 
+int KdMedia::_deinit_layer(k_vo_layer chn_id)
+{
+    return kd_mpi_vo_disable_video_layer(vo_layer_chn_id_);
+}
+
 int KdMedia::_init_osd(k_vo_osd osd_id)
 {
     osd_info osd;
@@ -854,7 +890,7 @@ int KdMedia::_init_osd(k_vo_osd osd_id)
     osd.offset.y = 0;
     osd.global_alptha = 0xff;
     // osd.global_alptha = 0x32;
-    osd.format = PIXEL_FORMAT_ARGB_8888;
+    osd.format = osd_format_;
 
     k_vo_video_osd_attr attr;
 
@@ -902,6 +938,17 @@ int KdMedia::_init_osd(k_vo_osd osd_id)
     return 0;
 }
 
+int KdMedia::_deinit_osd(k_vo_osd osd_id)
+{
+    if (osd_vb_handle_ != VB_INVALID_HANDLE)
+    {
+        kd_mpi_vo_osd_disable(osd_id_);
+        kd_mpi_vb_release_block(osd_vb_handle_);
+        osd_vb_handle_ = VB_INVALID_HANDLE;
+    }
+    return 0;
+}
+
 int KdMedia::_init_vo_layer_osd()
 {
     if (!feature_config_.enable_render)
@@ -939,11 +986,26 @@ int KdMedia::_init_vo_layer_osd()
 
 int KdMedia::_deinit_vo_layer_osd()
 {
-    if (osd_vb_handle_ != VB_INVALID_HANDLE)
+    k_s32 ret = 0;
+    //vi unbind vo
+    if (0 != kd_sample_vi_unbind_vo(vi_dev_id_, vi_chn_render_id_, K_VO_DISPLAY_DEV_ID, vo_layer_chn_id_))
     {
-        kd_mpi_vo_osd_disable(osd_id_);
-        kd_mpi_vb_release_block(osd_vb_handle_);
-        osd_vb_handle_ = VB_INVALID_HANDLE;
+        printf("vi unbind vo failed\n");
+        return -1;
+    }
+
+    //deinit osd
+    if (0 != _deinit_osd(osd_id_))
+    {
+        printf("deinit osd failed\n");
+        return -1;
+    }
+
+    //deinit layer
+    if (0 != _deinit_layer(vo_layer_chn_id_))
+    {
+        printf("deinit layer failed\n");
+        return -1;
     }
 
     return 0;
@@ -1028,6 +1090,8 @@ int KdMedia::_init_ai_aenc()
         return 0;
     }
 
+    if (ai_initialized_)
+        return 0;
     k_aio_dev_attr aio_dev_attr;
     memset(&aio_dev_attr, 0, sizeof(aio_dev_attr));
     aio_dev_attr.audio_type = KD_AUDIO_INPUT_TYPE_I2S;
@@ -1056,11 +1120,37 @@ int KdMedia::_init_ai_aenc()
         return -1;
     }
 
+    ai_started_ = false;
+    ai_initialized_ = true;
     return 0;
 }
 
 int KdMedia::_deinit_ai_aenc()
 {
+    k_s32 ret;
+    if (!feature_config_.enable_audio_encoder)
+    {
+        return 0;
+    }
+
+    if (ai_started_)
+    {
+        printf("KdMedia::DestroyAiAEnc called, FAILED, stop first!!!\n");
+        return -1;
+    }
+
+    if (ai_initialized_)
+    {
+        ret = kd_mpi_aenc_destroy_chn(aenc_handle_);
+        if (ret != K_SUCCESS)
+        {
+            printf("kd_mpi_aenc_destroy_chn failed:0x%x\n", ret);
+            ai_initialized_ = false;
+            return K_FAILED;
+        }
+    }
+
+    ai_initialized_ = false;
 
     return 0;
 }
@@ -1072,6 +1162,7 @@ int KdMedia::_start_vi_cap()
 
 int KdMedia::_stop_vi_cap()
 {
+    kd_sample_vicap_stop(vi_dev_id_);
     return 0;
 }
 
@@ -1086,8 +1177,10 @@ int KdMedia::_start_venc()
     if (!start_get_video_stream_)
     {
         start_get_video_stream_ = true;
-        pthread_create(&venc_tid_, NULL, venc_stream_threads, this);
+        pthread_create(&venc_tid_, NULL, venc_stream_thread, this);
     }
+
+    //from vicap chn to venc chn，without ai analysis
     kd_sample_vi_bind_venc(vi_dev_id_, vi_chn_venc_id_, venc_chn_id_);
 
     return 0;
@@ -1095,6 +1188,20 @@ int KdMedia::_start_venc()
 
 int KdMedia::_stop_venc()
 {
+    if (!feature_config_.enable_video_encoder)
+    {
+        return 0;
+    }
+
+    if (start_get_video_stream_)
+    {
+        start_get_video_stream_ = false;
+        pthread_join(venc_tid_, NULL);
+    }
+    // unbind vi to venc
+    kd_sample_vi_unbind_venc(vi_dev_id_, vi_chn_venc_id_, venc_chn_id_);
+    // stop  encoder channel
+    kd_mpi_venc_stop_chn(venc_chn_id_);
     return 0;
 }
 
@@ -1144,7 +1251,7 @@ int KdMedia::_start_ai_aenc()
         pthread_join(get_audio_stream_tid_, NULL);
         get_audio_stream_tid_ = 0;
     }
-    pthread_create(&get_audio_stream_tid_, NULL, aenc_chn_get_stream_threads, this);
+    pthread_create(&get_audio_stream_tid_, NULL, aenc_chn_get_stream_thread, this);
 
     ai_started_ = true;
     return 0;
@@ -1186,6 +1293,12 @@ int KdMedia::_stop_ai_aenc()
         }
 
         ai_started_ = false;
+
+        if (start_ai_aenc_tid_ != 0)
+        {
+            pthread_join(start_ai_aenc_tid_, NULL);
+            start_ai_aenc_tid_ = 0;
+        }
     }
 
     return 0;
@@ -1214,16 +1327,21 @@ int KdMedia::_start_dump_frame_for_ai_analysis()
         pthread_join(ai_analysis_frame_tid_, NULL);
         ai_analysis_frame_tid_ = 0;
     }
-    pthread_create(&ai_analysis_frame_tid_, NULL, ai_analysis_frame_threads, this);
+    pthread_create(&ai_analysis_frame_tid_, NULL, ai_analysis_frame_thread, this);
     return 0;
 }
 
-int _stop_dump_frame_for_ai_analysis()
+int KdMedia::_stop_dump_frame_for_ai_analysis()
 {
+    if (start_dump_ai_analysis_frame_)
+    {
+        start_dump_ai_analysis_frame_ = false;
+        pthread_join(ai_analysis_frame_tid_, NULL);
+    }
     return 0;
 }
 
-void *KdMedia::aenc_chn_get_stream_threads(void *arg)
+void *KdMedia::aenc_chn_get_stream_thread(void *arg)
 {
     KdMedia *pthis = (KdMedia*)arg;
     k_handle aenc_hdl = pthis->aenc_handle_;
@@ -1252,7 +1370,7 @@ void *KdMedia::aenc_chn_get_stream_threads(void *arg)
     return NULL;
 }
 
-void *KdMedia::venc_stream_threads(void *arg)
+void *KdMedia::venc_stream_thread(void *arg)
 {
     KdMedia *pthis = (KdMedia*)arg;
     k_u32 venc_chn = pthis->venc_chn_id_;
@@ -1294,7 +1412,7 @@ void *KdMedia::venc_stream_threads(void *arg)
     return NULL;
 }
 
-void *KdMedia::ai_analysis_frame_threads(void *arg)
+void *KdMedia::ai_analysis_frame_thread(void *arg)
 {
     k_s32 ret = 0;
     KdMedia *pthis = (KdMedia*)arg;
@@ -1324,6 +1442,14 @@ void *KdMedia::ai_analysis_frame_threads(void *arg)
     return NULL;
 }
 
+void *KdMedia::start_ai_aenc_thread(void *arg)
+{
+    KdMedia *pthis = (KdMedia*)arg;
+    pthis->_init_ai_aenc();
+    pthis->_start_ai_aenc();
+    return NULL;
+}
+
 int KdMedia::osd_alloc_frame(void **osd_vaddr)
 {
     k_u64 phys_addr = 0;
@@ -1335,7 +1461,7 @@ int KdMedia::osd_alloc_frame(void **osd_vaddr)
     osd_vf_info_.v_frame.width = input_config_.osd_width;
     osd_vf_info_.v_frame.height = input_config_.osd_height;
     osd_vf_info_.v_frame.stride[0] = input_config_.osd_width;
-    osd_vf_info_.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
+    osd_vf_info_.v_frame.pixel_format = osd_format_;
 
     if (osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_ABGR_8888 || osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_ARGB_8888)
         size = osd_vf_info_.v_frame.height * osd_vf_info_.v_frame.width * 4;
@@ -1392,4 +1518,9 @@ int KdMedia::osd_alloc_frame(void **osd_vaddr)
 int KdMedia::osd_draw_frame()
 {
     return kd_mpi_vo_chn_insert_frame(osd_id_+3, &osd_vf_info_);
+}
+
+int KdMedia::osd_send_venc_frame()
+{
+    return kd_mpi_venc_send_frame(venc_chn_id_, &osd_vf_info_,-1);//-1 block send
 }
