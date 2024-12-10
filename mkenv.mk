@@ -22,5 +22,8 @@ $(shell if [ ! -e $(RTT_EXAMPLES_ELF_INSTALL_PATH_USAGE_AI2D) ];then mkdir -p $(
 export RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC := $(SDK_RTSMART_SRC_DIR)/examples/elf/integrated_poc/
 $(shell if [ ! -e $(RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC) ];then mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC); fi)
 
+export RTT_EXAMPLES_ELF_INSTALL_PATH_FACE_DETECTION := $(SDK_RTSMART_SRC_DIR)/examples/elf/face_detection/
+$(shell if [ ! -e $(RTT_EXAMPLES_ELF_INSTALL_PATH_FACE_DETECTION) ];then mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_FACE_DETECTION); fi)
+
 include $(SDK_TOOLS_DIR)/toolchain_rtsmart.mk
 export PATH:="$(CROSS_COMPILE_DIR):$(PATH)"

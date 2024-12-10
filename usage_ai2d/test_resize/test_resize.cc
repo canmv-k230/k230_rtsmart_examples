@@ -11,7 +11,6 @@
 #include <nncase/runtime/interpreter.h>
 #include <nncase/runtime/runtime_op_utility.h>
 #include <nncase/functional/ai2d/ai2d_builder.h>
-// #include "utils.h"
 
 using std::string;
 using std::vector;
@@ -52,7 +51,7 @@ int main(int argc, char *argv[])
     memcpy(reinterpret_cast<char *>(input_buf.data()), chw_vec.data(), chw_vec.size());
     hrt::sync(ai2d_in_tensor, sync_op_t::sync_write_back, true).expect("write back input failed");
 
-    // padding参数
+    // resize参数
     int out_w=640;
     int out_h=320;
     int size=out_w*out_h;
