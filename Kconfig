@@ -291,5 +291,9 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
 
             endif
 
+        menuconfig RTT_ENABLE_BUILD_FACE_DETECTION
+            bool "Enable build face detection examples"
+            default n
+
     endif
     

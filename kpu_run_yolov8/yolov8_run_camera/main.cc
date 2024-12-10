@@ -43,6 +43,7 @@
 #include "k_connector_comm.h"
 #include "mpi_connector_api.h"
 #include "k_autoconf_comm.h"
+#include "mpi_sensor_api.h"
 
 using std::string;
 using std::vector;
@@ -207,7 +208,7 @@ void nms(std::vector<Bbox> &bboxes,  float confThreshold, float nmsThreshold, st
 	{
 		if (bboxes[i].confidence < confThreshold)
 			continue;
-		indices.push_back(bboxes[i].index);
+		indices.push_back(i);
 		for (int j = i + 1; j < updated_size;)
 		{
 			float iou = get_iou_value(bboxes[i].box, bboxes[j].box);
@@ -395,10 +396,24 @@ int vicap_start()
 
     // 配置Sensor部分
     k_vicap_sensor_type sensor_type = OV5647_MIPI_CSI0_1920X1080_30FPS_10BIT_LINEAR;
+
+    k_vicap_probe_config probe_cfg;
+    k_vicap_sensor_info sensor_info;
+
+    probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI + 1;
+    probe_cfg.width = ISP_INPUT_WIDTH;
+    probe_cfg.height = ISP_INPUT_HEIGHT;
+    probe_cfg.fps = 30;
+
+    if(0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
+        printf("sample_vicap, can't probe sensor on %d, output %dx%d@%d\n", probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
+
+        return -1;
+    }
+    sensor_type =  sensor_info.sensor_type;
+
     //初始化dev_id
     vicap_dev = VICAP_DEV_ID_0;
-    //配置sensor dev
-    k_vicap_sensor_info sensor_info;
     memset(&sensor_info, 0, sizeof(k_vicap_sensor_info));
     ret = kd_mpi_vicap_get_sensor_info(sensor_type, &sensor_info);
     if (ret) {

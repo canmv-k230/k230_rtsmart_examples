@@ -151,7 +151,7 @@ void nms(std::vector<Bbox> &bboxes,  float confThreshold, float nmsThreshold, st
 	{
 		if (bboxes[i].confidence < confThreshold)
 			continue;
-		indices.push_back(bboxes[i].index);
+		indices.push_back(i);
 		for (int j = i + 1; j < updated_size;)
 		{
 			float iou = get_iou_value(bboxes[i].box, bboxes[j].box);

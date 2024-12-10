@@ -11,7 +11,6 @@
 #include <nncase/runtime/interpreter.h>
 #include <nncase/runtime/runtime_op_utility.h>
 #include <nncase/functional/ai2d/ai2d_builder.h>
-// #include "utils.h"
 
 using std::string;
 using std::vector;
