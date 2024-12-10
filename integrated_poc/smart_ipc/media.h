@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <memory>
+#include <string>
 #include "k_vicap_comm.h"
 #include "k_venc_comm.h"
 #include "k_connector_comm.h"
@@ -18,29 +19,30 @@ enum class KdMediaVideoType {
 };
 
 struct KdMediaInputConfig {
-  bool video_valid = false;
-  k_vicap_sensor_type sensor_type = SENSOR_TYPE_MAX;
-  int sensor_num = 1;
-  KdMediaVideoType video_type = KdMediaVideoType::kVideoTypeH265;
-  int venc_width = 1280;
-  int venc_height = 720;
-  int bitrate_kbps = 4000;
+  k_vicap_sensor_type sensor_type = SENSOR_TYPE_MAX; // Sensor type
+  KdMediaVideoType video_type = KdMediaVideoType::kVideoTypeH264; // Venc type
+  int venc_width = 1280; // Video encoder width
+  int venc_height = 720; // Video encoder height
+  int bitrate_kbps = 2000; // Bitrate in kbps
 
-  int audio_samplerate = 8000;
-  int audio_channel_cnt = 1;
-  int pitch_shift_semitones = 0; // [-12, 12]
+  int audio_samplerate = 8000; // Audio sample rate
+  int audio_channel_cnt = 1; // Number of audio channels
 
-  int vo_width = 1920;
-  int vo_height = 1080;
+  int vo_width = 1920; // Video output width
+  int vo_height = 1080; // Video output height
 
-  int ai_width = 1280;
-  int ai_height = 720;
+  int ai_width = 1280; // AI analysis width
+  int ai_height = 720; // AI analysis height
 
-  int osd_width = 1920;
-  int osd_height = 1080;
+  int osd_width = 1920; // OSD width
+  int osd_height = 1080; // OSD height
 
-  k_connector_type vo_connect_type = LT9611_MIPI_4LAN_1920X1080_30FPS;
-};
+  k_connector_type vo_connect_type = LT9611_MIPI_4LAN_1920X1080_30FPS; // Video output connector type
+
+  std::string kmodel_file="face_detection_320.kmodel"; // Kmodel file path
+  float obj_thresh = 0.6; // Object detection threshold
+  float nms_thresh = 0.4; // Non-maximum suppression threshold
+};;
 
 class IOnAEncData {
   public:
@@ -107,6 +109,7 @@ class KdMedia {
 
   int osd_alloc_frame(void **osd_vaddr);
   int osd_draw_frame();
+  int osd_send_venc_frame();
 
   private:
   /**
@@ -159,11 +162,25 @@ class KdMedia {
   int _init_layer(k_vo_layer chn_id);
 
   /**
+   * @brief Deinitialize video output layer.
+   * @param chn_id Channel ID for the video output layer.
+   * @return Status of the initialization operation.
+   */
+  int _deinit_layer(k_vo_layer chn_id);
+
+  /**
    * @brief Initialize On-Screen Display (OSD).
    * @param osd_id OSD ID.
    * @return Status of the initialization operation.
    */
   int _init_osd(k_vo_osd osd_id);
+
+  /**
+   * @brief Deinitialize On-Screen Display (OSD).
+   * @param osd_id OSD ID.
+   * @return Status of the initialization operation.
+   */
+  int _deinit_osd(k_vo_osd osd_id);
 
   /**
    * @brief Initialize video output layer and OSD.
@@ -242,53 +259,67 @@ class KdMedia {
    * @param arg Arguments for the thread function.
    * @return Pointer to the result.
    */
-  static void *aenc_chn_get_stream_threads(void *arg);
+  static void *aenc_chn_get_stream_thread(void *arg);
 
   /**
    * @brief Thread function to get video encoder stream.
    * @param arg Arguments for the thread function.
    * @return Pointer to the result.
    */
-  static void *venc_stream_threads(void *arg);
+  static void *venc_stream_thread(void *arg);
 
   /**
    * @brief Thread function to analyze AI frames.
    * @param arg Arguments for the thread function.
    * @return Pointer to the result.
    */
-  static void *ai_analysis_frame_threads(void *arg);
+  static void *ai_analysis_frame_thread(void *arg);
+
+  /**
+   * @brief Thread function to start ai,aenc.
+   * Audio codec initialization takes too long, so this part is started in a thread.
+   * @param arg Arguments for the thread function.
+   * @return Pointer to the result.
+   */
+  static void *start_ai_aenc_thread(void *arg);
 
   private:
-  KdMediaInputConfig input_config_;
-  KdMediaFeatureConfig feature_config_;
+  KdMediaInputConfig input_config_; // Media input configuration
+  KdMediaFeatureConfig feature_config_; // Media feature configuration
 
-  k_u32 osd_vb_handle_{VB_INVALID_HANDLE};
-  int osd_pool_id_{-1};
-  k_vo_layer vo_layer_chn_id_{K_VO_LAYER1};
-  k_vo_osd osd_id_{K_VO_OSD3};
-  k_video_frame_info osd_vf_info_;
+  k_u32 osd_vb_handle_{VB_INVALID_HANDLE}; // OSD video buffer handle
+  int osd_pool_id_{-1}; // OSD pool ID
+  k_vo_layer vo_layer_chn_id_{K_VO_LAYER1}; // Video output layer channel ID
+  k_vo_osd osd_id_{K_VO_OSD3}; // OSD ID
+  k_pixel_format osd_format_{PIXEL_FORMAT_ARGB_8888}; // OSD pixel format
+  k_video_frame_info osd_vf_info_; // OSD video frame information
 
-  k_vicap_dev_set_info vcap_dev_info_;
-  k_vicap_dev vi_dev_id_{VICAP_DEV_ID_0};
-  k_vicap_chn vi_chn_render_id_{VICAP_CHN_ID_0};
-  k_vicap_chn vi_chn_ai_id_{VICAP_CHN_ID_0};
-  k_vicap_chn vi_chn_venc_id_{VICAP_CHN_ID_0};
+  k_vicap_dev_set_info vcap_dev_info_; // Video capture device settings
+  k_vicap_dev vi_dev_id_{VICAP_DEV_ID_0}; // Video capture device ID
+  k_vicap_chn vi_chn_render_id_{VICAP_CHN_ID_0}; // Video capture render channel ID
+  k_pixel_format vi_chn_render_pixel_format_{PIXEL_FORMAT_YVU_PLANAR_420}; // Render channel pixel format
+  k_vicap_chn vi_chn_ai_id_{VICAP_CHN_ID_0}; // AI channel ID
+  k_pixel_format vi_chn_ai_pixel_format_{PIXEL_FORMAT_BGR_888_PLANAR}; // AI channel pixel format
+  k_vicap_chn vi_chn_venc_id_{VICAP_CHN_ID_0}; // Video encoder channel ID
+  k_pixel_format vi_chn_venc_pixel_format_{PIXEL_FORMAT_YUV_SEMIPLANAR_420}; // Video encoder pixel format
 
-  k_u32 venc_chn_id_{0};
-  pthread_t venc_tid_;
-  bool start_get_video_stream_{false};
+  k_u32 venc_chn_id_{0}; // Video encoder channel ID
+  pthread_t venc_tid_; // Video encoder thread ID
+  bool start_get_video_stream_{false}; // Flag to start getting video stream
 
-  pthread_t ai_analysis_frame_tid_{0};
-  bool start_dump_ai_analysis_frame_{false};
+  pthread_t ai_analysis_frame_tid_{0}; // AI analysis frame thread ID
+  bool start_dump_ai_analysis_frame_{false}; // Flag to start dumping AI frames
 
-  int audio_frame_divisor_{25};
-  k_u32 ai_dev_{0};
-  k_u32 ai_chn_{0};
-  k_handle aenc_handle_{0};
-  k_audio_stream audio_stream_;
-  pthread_t get_audio_stream_tid_{0};
-  bool start_get_audio_stream_{false};
-  bool ai_started_{false};
+  int audio_frame_divisor_{25}; // Audio frame divisor
+  k_u32 ai_dev_{0}; // Audio input device ID
+  k_u32 ai_chn_{0}; // Audio input channel ID
+  k_handle aenc_handle_{0}; // Audio encoder handle
+  k_audio_stream audio_stream_; // Audio stream data
+  pthread_t get_audio_stream_tid_{0}; // Audio stream thread ID
+  pthread_t start_ai_aenc_tid_{0}; // Start AI and AENC thread ID
+  bool start_get_audio_stream_{false}; // Flag to start getting audio stream
+  bool ai_started_{false}; // AI started flag
+  bool ai_initialized_{false}; // AI initialized flag
 };
 
 #endif // _KD_MEDIA_H
