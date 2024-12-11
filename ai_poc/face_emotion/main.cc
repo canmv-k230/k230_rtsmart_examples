@@ -115,7 +115,7 @@ void video_proc(char *argv[])
 
             FaceEmotionInfo emo_result;  
             face_emo.post_process(emo_result);
-            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
             {
                 ScopedTiming st("osd draw", atoi(argv[6]));
                 cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);

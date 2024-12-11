@@ -108,7 +108,7 @@ void video_proc(char *argv[])
         hd.post_process(results);
 
         cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
         {
             cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
         }
@@ -149,7 +149,7 @@ void video_proc(char *argv[])
             hr.inference();
             std::string text1 = hr.post_process();
 
-            #if defined(CONFIG_BOARD_K230D_CANMV)
+            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
             {
                 int rect_x = (float)r.x1/ SENSOR_WIDTH * osd_height;
                 int rect_y = (float)r.y1/ SENSOR_HEIGHT * osd_width;
@@ -196,7 +196,7 @@ void video_proc(char *argv[])
             #endif
         }
 
-        #if defined(CONFIG_BOARD_K230D_CANMV)
+        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
         {
             cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
         }

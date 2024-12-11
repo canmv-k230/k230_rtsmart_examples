@@ -109,6 +109,18 @@
 #define osd_id                              K_VO_OSD3
 #define osd_width                           (480)
 #define osd_height                          (800)
+#elif defined(CONFIG_BOARD_K230_CANMV_LCKFB)
+#define SENSOR_CHANNEL (3)     
+#define SENSOR_HEIGHT (720)
+#define SENSOR_WIDTH (1280)
+#define ISP_CHN0_WIDTH  (800)
+#define ISP_CHN0_HEIGHT (480)
+#define ISP_INPUT_WIDTH (1920)
+#define ISP_INPUT_HEIGHT (1080)
+#define vicap_install_osd                   (1)
+#define osd_id                              K_VO_OSD3
+#define osd_width                           (480)
+#define osd_height                          (800)
 #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
     #if defined(STUDIO_HDMI)
     #define SENSOR_CHANNEL (3)     
@@ -238,7 +250,7 @@ k_vb_blk_handle vo_insert_frame(k_video_frame_info *vf_info, void **pic_vaddr)
     else if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_YVU_PLANAR_420)
         size = vf_info->v_frame.height * vf_info->v_frame.width * 3 / 2;
 
-    size = size + 4096;         // 强制4K ，后边得删了
+    size = VICAP_ALIGN_UP(size, VICAP_ALIGN_1K);
 
     printf("vb block size is %x \n", size);
 
@@ -358,7 +370,7 @@ static k_s32 sample_connector_init(void)
 	k_connector_type connector_type = LT9611_MIPI_4LAN_1920X1080_30FPS;
 #elif defined(CONFIG_BOARD_K230_CANMV_V2)
     k_connector_type connector_type = LT9611_MIPI_4LAN_1920X1080_30FPS;
-#elif defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+#elif defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     k_connector_type connector_type = ST7701_V1_MIPI_2LAN_480X800_30FPS;
 #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
     #if defined(STUDIO_HDMI)
@@ -405,7 +417,7 @@ static k_s32 vo_layer_vdss_bind_vo_config(void)
 
     sample_connector_init();
 
-    #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+    #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     info.act_size.width = ISP_CHN0_HEIGHT;//1080;//640;//1080;
     info.act_size.height = ISP_CHN0_WIDTH;//1920;//480;//1920;
     info.format = PIXEL_FORMAT_YVU_PLANAR_420;
@@ -481,7 +493,7 @@ int vivcap_start()
     sensor_type = OV5647_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR_V2;
     #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
     sensor_type = GC2093_MIPI_CSI2_1920X1080_60FPS_10BIT_LINEAR;
-    #elif defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+    #elif defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     sensor_type=GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR;
     #else
     sensor_type = IMX335_MIPI_2LANE_RAW12_2592X1944_30FPS_LINEAR;
@@ -507,22 +519,22 @@ int vivcap_start()
     vicap_dev = VICAP_DEV_ID_0;
     memset(&config, 0, sizeof(config));
     config.max_pool_cnt = 64;
-    #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+    #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     //VB for YUV420SP output
     config.comm_pool[0].blk_cnt = 4;
     config.comm_pool[0].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[0].blk_size = VICAP_ALIGN_UP((ISP_CHN0_WIDTH * ISP_CHN0_HEIGHT * 3 / 2), VICAP_ALIGN_1K);
     //VB for RGB888 output
-    config.comm_pool[1].blk_cnt = 5;
+    config.comm_pool[1].blk_cnt = 4;
     config.comm_pool[1].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[1].blk_size = VICAP_ALIGN_UP((SENSOR_HEIGHT * SENSOR_WIDTH * 3 ), VICAP_ALIGN_1K);
     #else
     //VB for YUV420SP output
-    config.comm_pool[0].blk_cnt = 5;
+    config.comm_pool[0].blk_cnt = 4;
     config.comm_pool[0].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[0].blk_size = VICAP_ALIGN_UP((ISP_CHN0_WIDTH * ISP_CHN0_HEIGHT * 3 / 2), VICAP_ALIGN_1K);
     //VB for RGB888 output
-    config.comm_pool[1].blk_cnt = 5;
+    config.comm_pool[1].blk_cnt = 4;
     config.comm_pool[1].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[1].blk_size = VICAP_ALIGN_UP((SENSOR_HEIGHT * SENSOR_WIDTH * 3 ), VICAP_ALIGN_1K);
     #endif
@@ -555,17 +567,17 @@ int vivcap_start()
 
     if(vicap_install_osd == 1)
     {
-        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
         memset(&pool_config, 0, sizeof(pool_config));
-        pool_config.blk_size = VICAP_ALIGN_UP((osd_width * osd_height * 4 * 2), VICAP_ALIGN_1K);
-        pool_config.blk_cnt = 2;
+        pool_config.blk_size = VICAP_ALIGN_UP((osd_width * osd_height * 4), VICAP_ALIGN_1K);
+        pool_config.blk_cnt = 3;
         pool_config.mode = VB_REMAP_MODE_NOCACHE;
         pool_id = kd_mpi_vb_create_pool(&pool_config);      // osd0 - 3 argb 320 x 240
         g_pool_id = pool_id;
         #else
         memset(&pool_config, 0, sizeof(pool_config));
-        pool_config.blk_size = VICAP_ALIGN_UP((osd_width * osd_height * 4 * 2), VICAP_ALIGN_1K);
-        pool_config.blk_cnt = 4;
+        pool_config.blk_size = VICAP_ALIGN_UP((osd_width * osd_height * 4), VICAP_ALIGN_1K);
+        pool_config.blk_cnt = 3;
         pool_config.mode = VB_REMAP_MODE_NOCACHE;
         pool_id = kd_mpi_vb_create_pool(&pool_config);      // osd0 - 3 argb 320 x 240
         g_pool_id = pool_id;
@@ -584,7 +596,7 @@ int vivcap_start()
     memset(&dev_attr, 0, sizeof(k_vicap_dev_attr));
     dev_attr.acq_win.h_start = 0;
     dev_attr.acq_win.v_start = 0;
-    #if defined (CONFIG_BOARD_K230_CANMV)  || defined(CONFIG_BOARD_K230_CANMV_V2) || defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_01STUDIO) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+    #if defined (CONFIG_BOARD_K230_CANMV)  || defined(CONFIG_BOARD_K230_CANMV_V2) || defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_01STUDIO) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     dev_attr.acq_win.width = ISP_INPUT_WIDTH;
     dev_attr.acq_win.height = ISP_INPUT_HEIGHT;
     #else
@@ -617,7 +629,7 @@ int vivcap_start()
     chn_attr.out_win.height = ISP_CHN0_HEIGHT;
 
 
-    #if defined(CONFIG_BOARD_K230_CANMV)  || defined(CONFIG_BOARD_K230_CANMV_V2) || defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_01STUDIO) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+    #if defined(CONFIG_BOARD_K230_CANMV)  || defined(CONFIG_BOARD_K230_CANMV_V2) || defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_01STUDIO) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     chn_attr.crop_win = dev_attr.acq_win;
     #else
     // chn_attr.crop_win = dev_attr.acq_win;
@@ -663,7 +675,7 @@ int vivcap_start()
     chn_attr.out_win.height = SENSOR_HEIGHT;
     // chn_attr.crop_win = dev_attr.acq_win;
 
-    #if defined(CONFIG_BOARD_K230_CANMV)  || defined(CONFIG_BOARD_K230_CANMV_V2) || defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_01STUDIO) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+    #if defined(CONFIG_BOARD_K230_CANMV)  || defined(CONFIG_BOARD_K230_CANMV_V2) || defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_01STUDIO) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     chn_attr.crop_win = dev_attr.acq_win;
     #else   
     chn_attr.crop_win.h_start = 768;

@@ -2,7 +2,8 @@
 
 多目标检测采用了yolov8网络结构。使用该应用，可得到图像或视频中的每个目标的检测框。
 
-# 2.应用使用说明
+# 2. 应用使用说明
+
 
 ## 2.1 使用帮助
 
@@ -27,7 +28,9 @@ debug_mode   是否需要调试，0、1、2分别表示不调试、简单调试�
 操作说明：
 将摄像头置于检测目标前即可在显示屏中观察到该目标的检测效果。
 ```
+
 ## 2.2 效果展示
+
 <img src="https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/object_detect_yolov8n/person.jpg" alt="image.jpg" width="45%" height="45%" /> <img src="https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/object_detect_yolov8n/bird.jpg" alt="image0.jpg" width="45%" height="45%" />
 
 
