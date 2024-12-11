@@ -113,7 +113,7 @@ void video_proc(char *argv[])
             fg.pre_process(det_results[i].sparse_kps.points);
             fg.inference();
             fg.post_process(fg_result);
-            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
             {
                 ScopedTiming st("osd draw", atoi(argv[6]));
                 cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
