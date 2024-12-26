@@ -852,7 +852,7 @@ int KdMedia::_init_layer(k_vo_layer chn_id)
     info.size = info.act_size.height * info.act_size.width * 3 / 2;
     //set pixel format
     attr.pixel_format = info.format;
-    if (info.format != PIXEL_FORMAT_YVU_PLANAR_420)
+    if (info.format != PIXEL_FORMAT_YUV_SEMIPLANAR_420)
     {
         printf("input pix format failed \n");
         return -1;
@@ -1473,7 +1473,7 @@ int KdMedia::osd_alloc_frame(void **osd_vaddr)
         size = osd_vf_info_.v_frame.height * osd_vf_info_.v_frame.width * 3;
     else if (osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_ARGB_1555 || osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_ABGR_1555)
         size = osd_vf_info_.v_frame.height * osd_vf_info_.v_frame.width * 2;
-    else if (osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_YVU_PLANAR_420)
+    else if (osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_YUV_SEMIPLANAR_420)
         size = osd_vf_info_.v_frame.height * osd_vf_info_.v_frame.width * 3 / 2;
 
     size = MEM_ALIGN_UP(size, MEM_ALIGN_4K);
@@ -1505,7 +1505,7 @@ int KdMedia::osd_alloc_frame(void **osd_vaddr)
     osd_vf_info_.mod_id = K_ID_VO;
     osd_vf_info_.pool_id = osd_pool_id_;
     osd_vf_info_.v_frame.phys_addr[0] = phys_addr;
-    if (osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_YVU_PLANAR_420)
+    if (osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_YUV_SEMIPLANAR_420)
         osd_vf_info_.v_frame.phys_addr[1] = phys_addr + (osd_vf_info_.v_frame.height * osd_vf_info_.v_frame.stride[0]);
     *osd_vaddr = virt_addr;
 

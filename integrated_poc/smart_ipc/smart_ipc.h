@@ -9,12 +9,6 @@
 class MySmartIPC :public IOnAEncData, public IOnVEncData,public IOnAIFrameData {
   public:
     MySmartIPC();
-    // IOnAEncData
-    virtual void OnAEncData(k_u32 chn_id, k_u8*pdata,size_t size,k_u64 time_stamp);
-    // IOnVEncData
-    virtual void OnVEncData(k_u32 chn_id, void *data, size_t size, k_venc_pack_type type,uint64_t timestamp);
-    // IOnAIFrameData
-    virtual void OnAIFrameData(k_u32 chn_id, k_video_frame_info*frame_info);
     //init
     int Init(const KdMediaInputConfig &config, const std::string &stream_url = "test", int port = 8554);
     //deinit
@@ -23,6 +17,14 @@ class MySmartIPC :public IOnAEncData, public IOnVEncData,public IOnAIFrameData {
     int Start();
     //stop
     int Stop();
+
+  protected:
+    // IOnAEncData
+    virtual void OnAEncData(k_u32 chn_id, k_u8*pdata,size_t size,k_u64 time_stamp);
+    // IOnVEncData
+    virtual void OnVEncData(k_u32 chn_id, void *data, size_t size, k_venc_pack_type type,uint64_t timestamp);
+    // IOnAIFrameData
+    virtual void OnAIFrameData(k_u32 chn_id, k_video_frame_info*frame_info);
 
   private:
     int _ai_analyse_init();
