@@ -297,7 +297,7 @@ class KdMedia {
   k_vicap_dev_set_info vcap_dev_info_; // Video capture device settings
   k_vicap_dev vi_dev_id_{VICAP_DEV_ID_0}; // Video capture device ID
   k_vicap_chn vi_chn_render_id_{VICAP_CHN_ID_0}; // Video capture render channel ID
-  k_pixel_format vi_chn_render_pixel_format_{PIXEL_FORMAT_YVU_PLANAR_420}; // Render channel pixel format
+  k_pixel_format vi_chn_render_pixel_format_{PIXEL_FORMAT_YUV_SEMIPLANAR_420}; // Render channel pixel format
   k_vicap_chn vi_chn_ai_id_{VICAP_CHN_ID_0}; // AI channel ID
   k_pixel_format vi_chn_ai_pixel_format_{PIXEL_FORMAT_BGR_888_PLANAR}; // AI channel pixel format
   k_vicap_chn vi_chn_venc_id_{VICAP_CHN_ID_0}; // Video encoder channel ID
