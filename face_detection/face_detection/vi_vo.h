@@ -238,7 +238,7 @@ k_vb_blk_handle vo_insert_frame(k_video_frame_info *vf_info, void **pic_vaddr)
     else if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_YVU_PLANAR_420)
         size = vf_info->v_frame.height * vf_info->v_frame.width * 3 / 2;
 
-    size = size + 4096;         // 强制4K ，后边得删了
+    size=VICAP_ALIGN_UP(size, VICAP_ALIGN_1K);
 
     printf("vb block size is %x \n", size);
 
@@ -676,7 +676,7 @@ int vivcap_start()
     chn_attr.scale_enable = K_FALSE;
     // chn_attr.dw_enable = K_FALSE;
     chn_attr.chn_enable = K_TRUE;
-    chn_attr.pix_format = PIXEL_FORMAT_BGR_888_PLANAR;
+    chn_attr.pix_format = PIXEL_FORMAT_RGB_888_PLANAR;
     chn_attr.buffer_num = VICAP_MAX_FRAME_COUNT;//at least 3 buffers for isp
     chn_attr.buffer_size = config.comm_pool[1].blk_size;
 

@@ -17,7 +17,6 @@ export OPENCV_SRC_DIR="${SDK_RTSMART_SRC_DIR}/libs/opencv/"
 # set cross build toolchain
 export PATH=$PATH:~/.kendryte/k230_toolchains/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin
 
-clear
 rm -rf out
 rm -rf k230_bin
 mkdir out
