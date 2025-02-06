@@ -1,0 +1,1 @@
+./yolo.elf -ai_frame_width 640 -ai_frame_height 360 -display_mode 0 -model_type yolov8 -task_type detect -task_mode video -kmodel_path yolov8n.kmodel -labels_txt_filepath coco_labels.txt -conf_thres 0.35 -nms_thres 0.65 -mask_thres 0.5 -debug_mode 0

@@ -25,5 +25,8 @@ $(shell if [ ! -e $(RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC) ];then mkdir 
 export RTT_EXAMPLES_ELF_INSTALL_PATH_FACE_DETECTION := $(SDK_RTSMART_SRC_DIR)/examples/elf/face_detection/
 $(shell if [ ! -e $(RTT_EXAMPLES_ELF_INSTALL_PATH_FACE_DETECTION) ];then mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_FACE_DETECTION); fi)
 
+export RTT_EXAMPLES_ELF_INSTALL_PATH_YOLO := $(SDK_RTSMART_SRC_DIR)/examples/elf/yolo/
+$(shell if [ ! -e $(RTT_EXAMPLES_ELF_INSTALL_PATH_YOLO) ];then mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_YOLO); fi)
+
 include $(SDK_TOOLS_DIR)/toolchain_rtsmart.mk
 export PATH:="$(CROSS_COMPILE_DIR):$(PATH)"

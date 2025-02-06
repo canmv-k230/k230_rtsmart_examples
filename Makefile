@@ -7,6 +7,7 @@ dir-$(CONFIG_RTT_ENABLE_BUILD_KPU_RUN_EXAMPLES) += kpu_run_yolov8
 dir-$(CONFIG_RTT_ENABLE_BUILD_AI2D_EXAMPLES) += usage_ai2d
 dir-$(CONFIG_RTT_ENABLE_BUILD_INTEGRATED_EXAMPLES) += integrated_poc
 dir-$(CONFIG_RTT_ENABLE_BUILD_FACE_DETECTION) += face_detection
+dir-$(CONFIG_RTT_ENABLE_BUILD_YOLO) += YOLO
 
 # Add directories to the build system
 dirs := $(sort $(dir-y))

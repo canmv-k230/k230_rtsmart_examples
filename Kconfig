@@ -295,5 +295,9 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
             bool "Enable build face detection examples"
             default n
 
+        menuconfig RTT_ENABLE_BUILD_YOLO
+            bool "Enable build YOLO examples"
+            default n
+
     endif
     
