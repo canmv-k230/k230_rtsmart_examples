@@ -94,6 +94,12 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
                 config.osd_height = 800;
                 config.vo_width = 800;
                 config.vo_height = 480;
+            } else if(0x02 == n) {
+                config.vo_connect_type = HX8377_V2_MIPI_4LAN_1080X1920_30FPS;
+                config.osd_width = 1088;
+                config.osd_height = 1920;
+                config.vo_width = 1088;
+                config.vo_height = 1920;
             } else {
                 Usage();
             }

@@ -56,6 +56,10 @@ void MySmartIPC::OnAIFrameData(k_u32 chn_id, k_video_frame_info*frame_info)
             face_detection_->draw_result(osd_frame,detect_result_,false);
             cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
         }
+        else if (input_config_.vo_connect_type == HX8377_V2_MIPI_4LAN_1080X1920_30FPS)
+        {
+            face_detection_->draw_result(osd_frame,detect_result_,false);
+        }
     }
 
     //copy osd frame data to osd_vaddr_,for osd draw

@@ -299,7 +299,7 @@ class KdMedia {
   k_vicap_chn vi_chn_render_id_{VICAP_CHN_ID_0}; // Video capture render channel ID
   k_pixel_format vi_chn_render_pixel_format_{PIXEL_FORMAT_YUV_SEMIPLANAR_420}; // Render channel pixel format
   k_vicap_chn vi_chn_ai_id_{VICAP_CHN_ID_0}; // AI channel ID
-  k_pixel_format vi_chn_ai_pixel_format_{PIXEL_FORMAT_BGR_888_PLANAR}; // AI channel pixel format
+  k_pixel_format vi_chn_ai_pixel_format_{PIXEL_FORMAT_RGB_888_PLANAR}; // AI channel pixel format
   k_vicap_chn vi_chn_venc_id_{VICAP_CHN_ID_0}; // Video encoder channel ID
   k_pixel_format vi_chn_venc_pixel_format_{PIXEL_FORMAT_YUV_SEMIPLANAR_420}; // Video encoder pixel format
 

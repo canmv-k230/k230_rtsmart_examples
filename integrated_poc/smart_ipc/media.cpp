@@ -839,6 +839,14 @@ int KdMedia::_init_layer(k_vo_layer chn_id)
         info.format = vi_chn_render_pixel_format_;
         info.func = K_ROTATION_90;
     }
+    else if (input_config_.vo_connect_type == HX8377_V2_MIPI_4LAN_1080X1920_30FPS)
+    {
+        info.act_size.width = input_config_.vo_height;
+        info.act_size.height = input_config_.vo_width;
+        info.format = vi_chn_render_pixel_format_;
+        info.func = K_ROTATION_0;
+    }
+
     info.global_alptha = 0xff;
     info.offset.x = 0;//(1080-w)/2,
     info.offset.y = 0;//(1920-h)/2;
