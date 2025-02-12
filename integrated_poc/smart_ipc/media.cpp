@@ -693,6 +693,19 @@ int KdMedia::_init_vi_cap()
         else
             vi_chn_attr_info.buf_size = MEM_ALIGN_UP(input_config_.vo_width * input_config_.vo_height * 3 / 2, MEM_ALIGN_4K);
 
+        if (input_config_.vo_connect_type == LT9611_MIPI_4LAN_1920X1080_30FPS)
+        {
+            vi_chn_attr_info.fps = 30;
+        }
+        else if (input_config_.vo_connect_type == ST7701_V1_MIPI_2LAN_480X800_30FPS)
+        {
+            vi_chn_attr_info.fps = 40;
+        }
+        else if (input_config_.vo_connect_type == HX8377_V2_MIPI_4LAN_1080X1920_30FPS)
+        {
+            vi_chn_attr_info.fps = 30;
+        }
+
         ret = kd_sample_vicap_set_chn_attr(vi_chn_attr_info);
         if (ret != K_SUCCESS)
         {
@@ -844,7 +857,7 @@ int KdMedia::_init_layer(k_vo_layer chn_id)
         info.act_size.width = input_config_.vo_height;
         info.act_size.height = input_config_.vo_width;
         info.format = vi_chn_render_pixel_format_;
-        info.func = K_ROTATION_0;
+        info.func = K_ROTATION_90;
     }
 
     info.global_alptha = 0xff;
