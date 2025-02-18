@@ -12,10 +12,14 @@ dirs := $(sort $(dir-y))
 
 BUILD_OUT ?= k230_bin
 
+# Default target
 all:
 	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC)/*
 
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_INTEGRATED_EXAMPLES),y)
+	@rm -rf $(BUILD_OUT)
+	@mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC)
+
 	@$(foreach dir,$(dirs), \
 	$(MAKE) -C $(dir) all || exit $?;\
 	if [ -d $(BUILD_OUT) ]; then \

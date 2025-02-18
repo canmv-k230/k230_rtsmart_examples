@@ -16,11 +16,13 @@ dirs := $(sort $(dir-y))
 
 all:
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_EXAMPLES),y)
+	@rm -rf elf
 	@$(foreach dir,$(dirs),make -C $(dir) all;)
 endif
 	@echo "Make rtsmart samples done."
 
 clean:
+	@rm -rf elf
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_EXAMPLES),y)
 	@$(foreach dir,$(dirs),make -C $(dir) clean;)
 endif

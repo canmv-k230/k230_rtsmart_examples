@@ -76,6 +76,9 @@ all:
 	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC)/*
 
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_AI_EXAMPLES),y)
+	@rm -rf $(BUILD_OUT)
+	@mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC)
+
 	@$(foreach dir,$(dirs), \
 		echo "Building in directory: $(dir) with BUILD_ARG=$(BUILD_ARG)"; \
 		./build_app_sub_rtos_only.sh $(dir) $(BUILD_ARG);\
@@ -90,5 +93,5 @@ endif
 
 clean:
 	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC)/*
-	@rm -rf out k230_bin k230_bin_lcd
+	@rm -rf $(BUILD_OUT)
 	@echo "Clean ai samples done."

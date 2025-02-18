@@ -18,6 +18,9 @@ all:
 	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_KPU_RUN_YOLOV8)/*
 
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_KPU_RUN_EXAMPLES),y)
+	@rm -rf $(BUILD_OUT)
+	@mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_KPU_RUN_YOLOV8)
+
 	./build_app.sh
 	if [ -d $(BUILD_OUT) ]; then \
 		echo "Copying $(BUILD_OUT) to $(RTT_EXAMPLES_ELF_INSTALL_PATH_KPU_RUN_YOLOV8)"; \
@@ -30,5 +33,5 @@ endif
 
 clean:
 	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_KPU_RUN_YOLOV8)/*
-	@rm -rf out k230_bin
+	@rm -rf $(BUILD_OUT)
 	@echo "Clean kpu run samples done."

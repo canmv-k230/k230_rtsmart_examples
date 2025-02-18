@@ -21,6 +21,9 @@ all:
 	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_USAGE_AI2D)/*
 
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_AI2D_EXAMPLES),y)
+	@rm -rf $(BUILD_OUT)
+	@mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_USAGE_AI2D)
+
 	./build_app.sh
 	if [ -d $(BUILD_OUT) ]; then \
 		echo "Copying $(BUILD_OUT) to $(RTT_EXAMPLES_ELF_INSTALL_PATH_USAGE_AI2D)"; \
@@ -33,5 +36,5 @@ endif
 
 clean:
 	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_USAGE_AI2D)/*
-	@rm -rf out k230_bin
+	@rm -rf $(BUILD_OUT)
 	@echo "Clean kpu run samples done."
