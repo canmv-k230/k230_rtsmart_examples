@@ -5,7 +5,6 @@ dir-y :=
 dir-$(CONFIG_RTT_AI_EXAMPLES_ANOMALY_DET) += anomaly_det
 dir-$(CONFIG_RTT_AI_EXAMPLES_BYTETRACK) += bytetrack
 dir-$(CONFIG_RTT_AI_EXAMPLES_CROSSWALK_DETECT) += crosswalk_detect
-dir-$(CONFIG_RTT_AI_EXAMPLES_DEC_AI_ENC) += dec_ai_enc
 dir-$(CONFIG_RTT_AI_EXAMPLES_DEMO_MIX) += demo_mix
 dir-$(CONFIG_RTT_AI_EXAMPLES_DISTRACTION_REMINDER) += distraction_reminder
 dir-$(CONFIG_RTT_AI_EXAMPLES_DMS_SYSTEM) += dms_system

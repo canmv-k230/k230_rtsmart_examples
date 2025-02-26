@@ -116,9 +116,9 @@ int PipeLine::Create()
     k_vo_video_layer_attr vo_attr;
     memset(&vo_attr, 0, sizeof(k_vo_video_layer_attr));
     vo_attr.display_rect = {0,0};
-    vo_attr.img_size = {(unsigned int)general_config_.DISPLAY_WIDTH,(unsigned int)general_config_.DISPLAY_HEIGHT};
-    vo_attr.pixel_format = PIXEL_FORMAT_YVU_PLANAR_420;
-    if (vo_attr.pixel_format != PIXEL_FORMAT_YVU_PLANAR_420)
+    vo_attr.img_size = {(unsigned int)general_config_.DISPLAY_HEIGHT,(unsigned int)general_config_.DISPLAY_WIDTH};
+    vo_attr.pixel_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+    if (vo_attr.pixel_format != PIXEL_FORMAT_YUV_SEMIPLANAR_420)
     {
         printf("input pix format failed \n");
         return -1;
@@ -286,7 +286,7 @@ int PipeLine::Create()
     chn0_attr.crop_enable = K_FALSE;
     chn0_attr.scale_enable = K_FALSE;
     chn0_attr.chn_enable = K_TRUE;
-    chn0_attr.pix_format = PIXEL_FORMAT_YVU_PLANAR_420;
+    chn0_attr.pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
     chn0_attr.buffer_num = VICAP_MAX_FRAME_COUNT;
     chn0_attr.buffer_size = config.comm_pool[0].blk_size;
     printf("vicap ...kd_mpi_vicap_set_chn_attr, buffer_size[%d]\n", chn0_attr.buffer_size);

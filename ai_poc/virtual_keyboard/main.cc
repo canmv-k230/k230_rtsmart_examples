@@ -710,7 +710,7 @@ int main(int argc, char *argv[])
         return -1;
     }
     {
-        #if defined(CONFIG_BOARD_K230D_CANMV)
+        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
             std::thread thread_isp(video_proc_K230D_CANMV, argv);
         #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
         

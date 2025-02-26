@@ -99,7 +99,7 @@ void video_proc(char *argv[])
         fd.post_process({SENSOR_WIDTH, SENSOR_HEIGHT}, results);
 
         cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
         {
             ScopedTiming st("osd draw", atoi(argv[5]));
             cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
@@ -108,19 +108,8 @@ void video_proc(char *argv[])
         }
         #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
         {
-            #if defined(STUDIO_HDMI)
-            {
-                ScopedTiming st("osd draw", atoi(argv[5]));
-                fd.draw_result(osd_frame,results,false);
-            }
-            #else
-            {
-                ScopedTiming st("osd draw", atoi(argv[5]));
-                cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-                fd.draw_result(osd_frame,results,false);
-                cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
-            }
-            #endif
+            ScopedTiming st("osd draw", atoi(argv[5]));
+            fd.draw_result(osd_frame,results,false);
         }
         #else
         {

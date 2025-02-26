@@ -150,7 +150,7 @@ void video_proc(char *argv[])
             hk.pre_process(bbox);
             hk.inference();
 
-            #if defined(CONFIG_BOARD_K230D_CANMV)
+            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
             {
                 int rect_x = r.x1/ SENSOR_WIDTH * osd_height;
                 int rect_y = r.y1/ SENSOR_HEIGHT * osd_width;
@@ -198,7 +198,7 @@ void video_proc(char *argv[])
             }
         }
 
-        #if defined(CONFIG_BOARD_K230D_CANMV)
+        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
         {
             cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
         }

@@ -56,8 +56,8 @@
 #include "mpi_connector_api.h"
 #include "k_autoconf_comm.h"
 #include "mpi_sensor_api.h"
-
-#if (defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230D_CANMV_BPI))
+ 
+#if (defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230D_CANMV_BPI)) || defined(CONFIG_BOARD_K230D_CANMV_BPI_ZERO)
     #define CONFIG_BOARD_K230D_CANMV 1
 #endif
 
@@ -496,7 +496,7 @@ int vivcap_start()
     #elif defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     sensor_type=GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR;
     #else
-    sensor_type = IMX335_MIPI_2LANE_RAW12_2592X1944_30FPS_LINEAR;
+    sensor_type = IMX335_MIPI_2LANE_RAW12_2592X1944_30FPS_12BIT_LINEAR;
     #endif
 
     {
@@ -644,7 +644,7 @@ int vivcap_start()
     chn_attr.scale_enable = K_FALSE;
     // chn_attr.dw_enable = K_FALSE;
     chn_attr.chn_enable = K_TRUE;
-    chn_attr.pix_format = PIXEL_FORMAT_YVU_PLANAR_420;
+    chn_attr.pix_format = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
     chn_attr.buffer_num = VICAP_MAX_FRAME_COUNT;//at least 3 buffers for isp
     chn_attr.buffer_size = config.comm_pool[0].blk_size;
     #if defined(CONFIG_BOARD_K230_CANMV_LCKFB)

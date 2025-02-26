@@ -63,17 +63,13 @@ for subdir in $(ls -d */); do
       
       subdir_name=$(basename $subdir)
       # 检查子目录是否为目录"A"，如果是，则跳过
-      if [ "$subdir_name" = "cmake" ] || [[ "$subdir_name" == k230_bin* ]] || [ "$subdir_name" = "shell" ] || [ "$subdir_name" = "out" ]; then
+      if [ "$subdir_name" = "cmake" ] || [[ "$subdir_name" == k230_bin* ]] || [ "$subdir_name" = "shell" ] || [ "$subdir_name" = "out" ] || [ "$subdir_name" = "vi_vo" ] || [ "$subdir_name" = "demo_mix" ]; then
             continue
       fi
       
-      if [ "$subdir_name" = "llamac" ] && { [ "$curr_pro" = "llamac" ] || [ "$curr_pro" = "all" ]; }; then
-            continue
-      elif { [ "$curr_pro" = "$subdir_name" ] || [ "$curr_pro" = "all" ]; }; then
+      if { [ "$curr_pro" = "$subdir_name" ] || [ "$curr_pro" = "all" ]; }; then
             echo "******************$subdir_name 开始编译******************"
-            if [ "$subdir_name" = "pose_det_rtsp_plug" ]; then
-                  continue
-            elif [ "$subdir_name" = "translate_en_ch" ]; then
+            if [ "$subdir_name" = "translate_en_ch" ]; then
                   cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/utils/*.a ${k230_bin}
             fi
             pushd out
@@ -548,13 +544,6 @@ for subdir in $(ls -d */); do
             cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/yolop.kmodel ${k230_bin}/$subdir_name
             cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/images/road.jpg ${k230_bin}/$subdir_name
             cp -a shell/yolop_*.sh ${k230_bin}/$subdir_name
-      fi
-
-      if [ "$subdir_name" = "pose_det_rtsp_plug" ]; then
-            cp pose_det_rtsp_plug/little/out/rtspServer ${k230_bin}/$subdir_name 
-            cp out/bin/pose_det_enc.elf ${k230_bin}/$subdir_name
-            cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/yolov8n-pose.kmodel ${k230_bin}/$subdir_name
-            cp -a shell/rtsp_plug_*.sh ${k230_bin}/$subdir_name
       fi
       rm -rf out/*
 done

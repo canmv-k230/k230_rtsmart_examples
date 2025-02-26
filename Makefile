@@ -8,6 +8,8 @@ dir-$(CONFIG_RTT_ENABLE_BUILD_AI2D_EXAMPLES) += usage_ai2d
 dir-$(CONFIG_RTT_ENABLE_BUILD_INTEGRATED_EXAMPLES) += integrated_poc
 dir-$(CONFIG_RTT_ENABLE_BUILD_FACE_DETECTION) += face_detection
 dir-$(CONFIG_RTT_ENABLE_BUILD_YOLO) += YOLO
+dir-$(CONFIG_RTT_ENABLE_BUILD_OPENCV_EXAMPLES) += opencv_examples
+dir-$(CONFIG_RTT_ENABLE_BUILD_OPENBLAS_EXAMPLES) += openblas_examples
 
 # Add directories to the build system
 dirs := $(sort $(dir-y))
