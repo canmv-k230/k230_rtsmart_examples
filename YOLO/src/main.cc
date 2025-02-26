@@ -65,8 +65,16 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
             yolo11.post_process(yolo_results);
             // 将绘制的帧设置为黑色
             draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
-            // 在绘制的帧上绘制检测结果
-            yolo11.draw_results(draw_frame,yolo_results);
+            if(general_config.DISPLAY_MODE==1){
+                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
+                // 在绘制的帧上绘制检测结果
+                yolo11.draw_results(draw_frame,yolo_results);
+                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_CLOCKWISE);
+            }else{
+                // 在绘制的帧上绘制检测结果
+                yolo11.draw_results(draw_frame,yolo_results);
+            }
+            
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
@@ -95,8 +103,15 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
             yolov8.post_process(yolo_results);
             // 将绘制的帧设置为黑色
             draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
-            // 在绘制的帧上绘制检测结果
-            yolov8.draw_results(draw_frame,yolo_results);
+            if(general_config.DISPLAY_MODE==1){
+                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
+                // 在绘制的帧上绘制检测结果
+                yolov8.draw_results(draw_frame,yolo_results);
+                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_CLOCKWISE);
+            }else{
+                // 在绘制的帧上绘制检测结果
+                yolov8.draw_results(draw_frame,yolo_results);
+            }
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
@@ -125,8 +140,15 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
             yolov5.post_process(yolo_results);
             // 将绘制的帧设置为黑色
             draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
-            // 在绘制的帧上绘制检测结果
-            yolov5.draw_results(draw_frame,yolo_results);
+            if(general_config.DISPLAY_MODE==1){
+                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
+                // 在绘制的帧上绘制检测结果
+                yolov5.draw_results(draw_frame,yolo_results);
+                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_CLOCKWISE);
+            }else{
+                // 在绘制的帧上绘制检测结果
+                yolov5.draw_results(draw_frame,yolo_results);
+            }
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据

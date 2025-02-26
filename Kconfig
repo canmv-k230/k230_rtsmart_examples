@@ -33,10 +33,6 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
                 bool "Crosswalk detect Example"
                 default y
 
-            config RTT_AI_EXAMPLES_DEC_AI_ENC
-                bool "Dec ai enc Example"
-                default y
-
             config RTT_AI_EXAMPLES_DEMO_MIX
                 bool "Demo mix Example"
                 default y
@@ -298,6 +294,57 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
         menuconfig RTT_ENABLE_BUILD_YOLO
             bool "Enable build YOLO examples"
             default n
+
+        menuconfig RTT_ENABLE_BUILD_OPENCV_EXAMPLES
+            bool "Enable build opencv examples"
+            default n
+
+            if RTT_ENABLE_BUILD_OPENCV_EXAMPLES
+
+                config RTT_OPENCV_CALCULATE_HIST
+                    bool "Calculating histograms using OpenCV"
+                    default y
+
+                config RTT_OPENCV_DETECT_FEATURES2D
+                    bool "Use the FAST feature detector to detect feature points in the image"
+                    default y
+
+                config RTT_OPENCV_FIND_CONTOURS
+                    bool "Use OpenCV to find contours"
+                    default y
+
+                config RTT_OPENCV_OBJ_DETECT
+                    bool "Use OpenCV to detect faces and eyes"
+                    default y
+
+                config RTT_OPENCV_GRAYSCALE_BINARIZE
+                    bool "Use OpenCV to binarize a grayscale image"
+                    default y
+
+            endif
+        
+        menuconfig RTT_ENABLE_BUILD_OPENBLAS_EXAMPLES
+            bool "Enable build openblas examples"
+            default n
+
+            if RTT_ENABLE_BUILD_OPENBLAS_EXAMPLES
+
+                config RTT_OPENBLAS_CBLAS_SAXPY
+                    bool "openblas cblas saxpy example"
+                    default y
+
+                config RTT_OPENBLAS_CBLAS_SGEMM
+                    bool "openblas cblas sgemm example"
+                    default y
+                    
+                config RTT_OPENBLAS_CBLAS_SGER
+                    bool "openblas cblas sger example"
+                    default y
+                
+                config RTT_OPENBLAS_FORTRAN_DGEMM
+                    bool "openblas fortran dgemm example"
+                    default y
+            endif
 
     endif
     

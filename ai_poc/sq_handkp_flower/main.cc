@@ -150,7 +150,7 @@ void video_proc(char *argv[])
                     {
                         auto tb = frameTrackingResult[i];
                         
-                        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+                        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
                         {
                             int rect_x = tb.box.x/ SENSOR_WIDTH * osd_height;
                             int rect_y = tb.box.y/ SENSOR_HEIGHT * osd_width;
@@ -222,7 +222,7 @@ void video_proc(char *argv[])
                             left_top.x = left_pred_x * w_1 + x1_1;
                             left_top.y = left_pred_y * h_1 + y1_1;
 
-                            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+                            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
                             {
                                 draw_x = left_top.x / SENSOR_WIDTH * osd_height;
                                 draw_y = left_top.y / SENSOR_HEIGHT * osd_width;
@@ -256,7 +256,7 @@ void video_proc(char *argv[])
                             right_bottom.x = right_pred_x * w_1 + x1_1;
                             right_bottom.y = right_pred_y * h_1 + y1_1;
                         
-                            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+                            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
                             {
                                 draw_x = right_bottom.x / SENSOR_WIDTH * osd_height;
                                 draw_y = right_bottom.y / SENSOR_HEIGHT * osd_width;
@@ -303,7 +303,7 @@ void video_proc(char *argv[])
 
                     std::string text = fr.post_process();                    
                     
-                    #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+                    #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
                     {
                         int x = 1.0 * x_min/ SENSOR_WIDTH * osd_height;
                         int y = 1.0 * y_min / SENSOR_HEIGHT * osd_width;
@@ -350,7 +350,7 @@ void video_proc(char *argv[])
                     #endif
                 }
 
-                #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0)
+                #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
                 {
                     cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
                 }

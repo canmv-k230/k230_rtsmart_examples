@@ -52,6 +52,8 @@ using namespace nncase::runtime;
 using namespace nncase::runtime::k230;
 using namespace nncase::F::k230;
 
+
+#if defined(CONFIG_BOARD_K230_CANMV)
 // ISP
 #define ISP_INPUT_WIDTH (1920)
 #define ISP_INPUT_HEIGHT (1080)
@@ -68,6 +70,75 @@ using namespace nncase::F::k230;
 #define osd_id          K_VO_OSD3
 #define OSD_WIDTH       (1920)
 #define OSD_HEIGHT      (1080)
+#elif defined(CONFIG_BOARD_K230_CANMV_V3P0)
+// ISP
+#define ISP_INPUT_WIDTH (1920)
+#define ISP_INPUT_HEIGHT (1080)
+//to display
+#define ISP_CHN0_WIDTH  (1920)
+#define ISP_CHN0_HEIGHT (1080)
+// to AI
+#define CHANNEL 3
+#define ISP_CHN1_WIDTH  (1280)
+#define ISP_CHN1_HEIGHT (720)
+
+// AI to Display
+#define vicap_install_osd  (1)
+#define osd_id          K_VO_OSD3
+#define OSD_WIDTH       (1920)
+#define OSD_HEIGHT      (1080)
+#elif defined(CONFIG_BOARD_K230D_CANMV_BPI_ZERO)
+// ISP
+#define ISP_INPUT_WIDTH (1920)
+#define ISP_INPUT_HEIGHT (1080)
+//to display
+#define ISP_CHN0_WIDTH  (800)
+#define ISP_CHN0_HEIGHT (480)
+// to AI
+#define CHANNEL 3
+#define ISP_CHN1_WIDTH  (1280/2)
+#define ISP_CHN1_HEIGHT (720/2)
+
+// AI to Display
+#define vicap_install_osd  (1)
+#define osd_id          K_VO_OSD3
+#define OSD_WIDTH       (480)
+#define OSD_HEIGHT      (800)
+#elif defined(CONFIG_BOARD_K230_CANMV_LCKFB)
+// ISP
+#define ISP_INPUT_WIDTH (1920)
+#define ISP_INPUT_HEIGHT (1080)
+//to display
+#define ISP_CHN0_WIDTH  (800)
+#define ISP_CHN0_HEIGHT (480)
+// to AI
+#define CHANNEL 3
+#define ISP_CHN1_WIDTH  (1280)
+#define ISP_CHN1_HEIGHT (720)
+
+// AI to Display
+#define vicap_install_osd  (1)
+#define osd_id          K_VO_OSD3
+#define OSD_WIDTH       (480)
+#define OSD_HEIGHT      (800)
+#elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
+// ISP
+#define ISP_INPUT_WIDTH (1920)
+#define ISP_INPUT_HEIGHT (1080)
+//to display
+#define ISP_CHN0_WIDTH  (800)
+#define ISP_CHN0_HEIGHT (480)
+// to AI
+#define CHANNEL 3
+#define ISP_CHN1_WIDTH  (1280)
+#define ISP_CHN1_HEIGHT (720)
+
+// AI to Display
+#define vicap_install_osd  (1)
+#define osd_id          K_VO_OSD3
+#define OSD_WIDTH       (480)
+#define OSD_HEIGHT      (800)
+#endif
 
 k_vicap_dev vicap_dev;
 k_u32 osd_pool_id;
@@ -276,7 +347,18 @@ int vicap_start()
     
     // 初始化并配置Display
     k_s32 connector_fd;
-	k_connector_type connector_type = LT9611_MIPI_4LAN_1920X1080_30FPS;
+    #if defined(CONFIG_BOARD_K230_CANMV)
+	    k_connector_type connector_type = LT9611_MIPI_4LAN_1920X1080_30FPS;
+    #elif defined(CONFIG_BOARD_K230_CANMV_V2)
+        k_connector_type connector_type = LT9611_MIPI_4LAN_1920X1080_30FPS;
+    #elif defined(CONFIG_BOARD_K230D_CANMV_BPI_ZERO) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
+        k_connector_type connector_type = ST7701_V1_MIPI_2LAN_480X800_30FPS;
+    #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
+        k_connector_type connector_type = ST7701_V1_MIPI_2LAN_480X800_30FPS;
+    #else
+        k_connector_type connector_type = HX8377_V2_MIPI_4LAN_1080X1920_30FPS;
+    #endif
+
     k_connector_info connector_info;
     memset(&connector_info, 0, sizeof(k_connector_info));
     ret = kd_mpi_get_connector_info(connector_type, &connector_info);
@@ -295,10 +377,14 @@ int vicap_start()
     //配置VI->VO绑定信息，包括分辨率、是否旋转、显示位置
     layer_info info;
     memset(&info, 0, sizeof(info));
-    info.act_size.width = ISP_CHN0_WIDTH;
-    info.act_size.height = ISP_CHN0_HEIGHT;
-    info.format = PIXEL_FORMAT_YVU_PLANAR_420;
+    info.act_size.width = ISP_CHN0_HEIGHT;
+    info.act_size.height = ISP_CHN0_WIDTH;
+    info.format = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
+    #if defined(CONFIG_BOARD_K230D_CANMV_BPI_ZERO) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB) || defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
+    info.func = K_ROTATION_90;
+    #else
     info.func = 0;//K_ROTATION_180;////K_ROTATION_90;
+    #endif
     info.global_alptha = 0xff;
     info.offset.x = 0;//x
     info.offset.y = 0;//y;
@@ -316,7 +402,7 @@ int vicap_start()
     attr.img_size = info.act_size;
     info.size = info.act_size.height * info.act_size.width * 3 / 2;
     attr.pixel_format = info.format;
-    if (info.format != PIXEL_FORMAT_YVU_PLANAR_420)
+    if (info.format != PIXEL_FORMAT_YVU_SEMIPLANAR_420)
     {
         printf("input pix format failed \n");
         return -1;
@@ -389,7 +475,7 @@ int vicap_start()
     vf_info.mod_id = K_ID_VO;
     vf_info.pool_id = osd_pool_id;
     vf_info.v_frame.phys_addr[0] = phys_addr;
-    if (vf_info.v_frame.pixel_format == PIXEL_FORMAT_YVU_PLANAR_420)
+    if (vf_info.v_frame.pixel_format == PIXEL_FORMAT_YVU_SEMIPLANAR_420)
         vf_info.v_frame.phys_addr[1] = phys_addr + (vf_info.v_frame.height * vf_info.v_frame.stride[0]);
     pic_vaddr = virt_addr;
     printf("phys_addr is %lx g_pool_id is %d \n", phys_addr, osd_pool_id);
@@ -453,7 +539,7 @@ int vicap_start()
     chn_attr.scale_enable = K_FALSE;
     // chn_attr.dw_enable = K_FALSE;
     chn_attr.chn_enable = K_TRUE;
-    chn_attr.pix_format = PIXEL_FORMAT_YVU_PLANAR_420;
+    chn_attr.pix_format = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
     chn_attr.buffer_num = VICAP_MAX_FRAME_COUNT;//at least 3 buffers for isp
     chn_attr.buffer_size = config.comm_pool[0].blk_size;
     printf("sample_vicap ...kd_mpi_vicap_set_chn_attr, buffer_size[%d]\n", chn_attr.buffer_size);
@@ -764,6 +850,24 @@ int camera_inference(char *argv[]){
         nms(bboxes, conf_thresh, nms_thresh, nms_result);
 
         cv::Mat osd_frame(OSD_HEIGHT, OSD_WIDTH, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+        #if defined(CONFIG_BOARD_K230D_CANMV_BPI_ZERO) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB) || defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
+        cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
+        // 将识别的框绘制到原图片上并保存为结果图片result,jpg
+        for (int i = 0; i < nms_result.size(); i++) {
+            int res=nms_result[i];
+            cv::Rect box=bboxes[res].box;
+            int idx=bboxes[res].index;
+            float score=bboxes[res].confidence;
+            int x=int(box.x*float(OSD_HEIGHT)/ISP_CHN1_WIDTH);
+            int y=int(box.y*float(OSD_WIDTH)/ISP_CHN1_HEIGHT);
+            int w=int(box.width*float(OSD_HEIGHT)/ISP_CHN1_WIDTH);
+            int h=int(box.height*float(OSD_WIDTH)/ISP_CHN1_HEIGHT);
+            cv::Rect new_box(x,y,w,h);
+            cv::rectangle(osd_frame, new_box, class_colors[idx], 2, 8);
+            cv::putText(osd_frame, classes[idx]+" "+std::to_string(score), cv::Point(MIN(new_box.x + 5,OSD_HEIGHT), MAX(new_box.y - 10,0)), cv::FONT_HERSHEY_DUPLEX, 1, class_colors[idx], 2, 0);
+        }
+        cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
+        #else
         // 将识别的框绘制到原图片上并保存为结果图片result,jpg
         for (int i = 0; i < nms_result.size(); i++) {
             int res=nms_result[i];
@@ -778,7 +882,7 @@ int camera_inference(char *argv[]){
             cv::rectangle(osd_frame, new_box, class_colors[idx], 2, 8);
             cv::putText(osd_frame, classes[idx]+" "+std::to_string(score), cv::Point(MIN(new_box.x + 5,OSD_WIDTH), MAX(new_box.y - 10,0)), cv::FONT_HERSHEY_DUPLEX, 1, class_colors[idx], 2, 0);
         }
-
+        #endif
         memcpy(pic_vaddr, osd_frame.data, OSD_WIDTH * OSD_HEIGHT * 4);
         kd_mpi_vo_chn_insert_frame(osd_id + 3, &vf_info); 
 

@@ -25,7 +25,7 @@ int main(int argc, char *argv[])
     std::cout << "case " << argv[0] << " build " << __DATE__ << " " << __TIME__ << std::endl;
     if (argc < 3)
     {
-        std::cerr << "Usage: " << argv[0] << "<image> <debug_mode>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <image> <debug_mode 0,1,2>" << std::endl;
         return -1;
     }
 
