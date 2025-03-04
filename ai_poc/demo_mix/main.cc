@@ -46,8 +46,11 @@
 #include <unistd.h>
 
 //串口通信设备名和缓冲区大小
+#define USE_UART 0
+#if defined(USE_UART)
 #define UART_DEVICE_NAME1 "/dev/uart2"
 #define BUF_SIZE (512)
+#endif
 
 /**
 *本项目实现了手势识别、动态手势识别、人脸姿态角估计、人脸单目标跟踪四个任务；四个任务通过手势识别作为控制命令完成切换。
@@ -84,7 +87,8 @@ int8_t frame_head=0xAA;
 int8_t frame_tail=0xBB;
 
 void video_proc()
-{
+{   
+    #if defined(USE_UART)
     //打开串口
     int fd1;
     char send[BUF_SIZE];
@@ -93,6 +97,7 @@ void video_proc()
         perror("Failed to open UART device");
         return;
     }
+    #endif
 
     vivcap_start();
     // 设置osd参数
@@ -305,6 +310,7 @@ void video_proc()
 
                     if(gesture=="love"){
                         cur_task_state=0;
+                        #if defined(USE_UART)
                         std::vector<int8_t> frame_data;
                         frame_data.push_back(frame_head);
                         frame_data.push_back(0x02);
@@ -313,6 +319,7 @@ void video_proc()
                         frame_data.push_back(0x02);
                         frame_data.push_back(frame_tail);
                         write(fd1,frame_data.data(), frame_data.size());
+                        #endif
                         break;
                     }
 
@@ -566,6 +573,7 @@ void video_proc()
                     cv::putText(osd_frame, "up", cv::Point(c_x,c_y),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 0, 0), 2);
                     //如果当前状态是“middel”才发送一帧“up”数据
                     if(dg_state=="middle"){
+                        #if defined(USE_UART)
                         std::vector<int8_t> frame_data;
                         int8_t deviceNumber = 0;
                         int8_t commandNumber = 0;
@@ -578,6 +586,7 @@ void video_proc()
                         frame_data.push_back(data);
                         frame_data.push_back(frame_tail);
                         write(fd1,frame_data.data(), frame_data.size());
+                        #endif
                     }
                     dg_state="up";
                 } else if (draw_state_ == RIGHT)
@@ -585,6 +594,7 @@ void video_proc()
                     cv::putText(osd_frame, "left", cv::Point(c_x,c_y),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 0, 0), 2);
                     //如果当前状态是“middel”才发送一帧“left”数据
                     if(dg_state=="middle"){
+                        #if defined(USE_UART)
                         std::vector<int8_t> frame_data;
                         int8_t deviceNumber = 0;
                         int8_t commandNumber = 1;
@@ -597,6 +607,7 @@ void video_proc()
                         frame_data.push_back(data);
                         frame_data.push_back(frame_tail);
                         write(fd1,frame_data.data(), frame_data.size());
+                        #endif
                     }
                     dg_state="left";
                 }else if (draw_state_ == DOWN)
@@ -604,6 +615,7 @@ void video_proc()
                     cv::putText(osd_frame, "down", cv::Point(c_x,c_y),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 0, 0), 2);
                     //如果当前状态是“middel”才发送一帧“down”数据
                     if(dg_state=="middle"){
+                        #if defined(USE_UART)
                         std::vector<int8_t> frame_data;
                         int8_t deviceNumber = 0;
                         int8_t commandNumber = 2;
@@ -616,6 +628,7 @@ void video_proc()
                         frame_data.push_back(data);
                         frame_data.push_back(frame_tail);
                         write(fd1,frame_data.data(), frame_data.size());
+                        #endif
                     }
                     dg_state="down";
                 }else if (draw_state_ == LEFT)
@@ -623,6 +636,7 @@ void video_proc()
                     cv::putText(osd_frame, "right", cv::Point(c_x,c_y),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 0, 0), 2);
                     //如果当前状态是“middel”才发送一帧“right”数据
                     if(dg_state=="middle"){
+                        #if defined(USE_UART)
                         std::vector<int8_t> frame_data;
                         int8_t deviceNumber = 0;
                         int8_t commandNumber = 3;
@@ -635,6 +649,7 @@ void video_proc()
                         frame_data.push_back(data);
                         frame_data.push_back(frame_tail);
                         write(fd1,frame_data.data(), frame_data.size());
+                        #endif
                     }
                     dg_state="right";
                 }else if (draw_state_ == MIDDLE)
@@ -642,6 +657,7 @@ void video_proc()
                     cv::putText(osd_frame, "middle", cv::Point(c_x,c_y),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 0, 0), 2);
                     //如果当前状态不是“middel”发送一帧“middle”数据
                     if(dg_state!="middle"){
+                        #if defined(USE_UART)
                         std::vector<int8_t> frame_data;
                         int8_t deviceNumber = 0;
                         int8_t commandNumber = 4;
@@ -654,6 +670,7 @@ void video_proc()
                         frame_data.push_back(data);
                         frame_data.push_back(frame_tail);
                         write(fd1,frame_data.data(), frame_data.size());
+                        #endif
                     }
                     dg_state="middle";
                 }
@@ -700,6 +717,7 @@ void video_proc()
                //如果识别到“love”手势，退出当前任务
                 if(gesture=="love"){
                     cur_task_state=0;
+                    #if defined(USE_UART)
                     std::vector<int8_t> frame_data;
                     frame_data.push_back(frame_head);
                     frame_data.push_back(0x02);
@@ -708,6 +726,7 @@ void video_proc()
                     frame_data.push_back(0x02);
                     frame_data.push_back(frame_tail);
                     write(fd1,frame_data.data(), frame_data.size());
+                    #endif
                     break;
                 }
             }
@@ -766,6 +785,7 @@ void video_proc()
                     cv::putText(osd_frame, roll_text, cv::Point(50,100),cv::FONT_HERSHEY_COMPLEX, 2, cv::Scalar(255, 255, 0, 0), 2);
                     cv::putText(osd_frame, yaw_text, cv::Point(50,150),cv::FONT_HERSHEY_COMPLEX, 2, cv::Scalar(255, 255, 0, 0), 2);
                     fp.draw_result(osd_frame,det_results[idx].bbox,pose_result,false);
+                    #if defined(USE_UART)
                     //发送帧数据，包括相对三轴正方向的夹角
                     std::vector<int8_t> frame_data;
                     int8_t deviceNumber = 1;
@@ -780,6 +800,7 @@ void video_proc()
                     frame_data.push_back(static_cast<int8_t>(pose_result.yaw));
                     frame_data.push_back(frame_tail);
                     write(fd1,frame_data.data(), frame_data.size());
+                    #endif
                 }
             }
         }
@@ -816,15 +837,17 @@ void video_proc()
                 //发送退出帧数据
                 if(gesture=="love"){
                     cur_task_state=0;
+                    #if defined(USE_UART)
                     std::vector<int8_t> frame_data;
-                        frame_data.push_back(frame_head);
-                        frame_data.push_back(0x02);
-                        frame_data.push_back(0x02);
-                        frame_data.push_back(0x02);
-                        frame_data.push_back(0x02);
-                        frame_data.push_back(frame_tail);
-                        write(fd1,frame_data.data(), frame_data.size());
-                        break;
+                    frame_data.push_back(frame_head);
+                    frame_data.push_back(0x02);
+                    frame_data.push_back(0x02);
+                    frame_data.push_back(0x02);
+                    frame_data.push_back(0x02);
+                    frame_data.push_back(frame_tail);
+                    write(fd1,frame_data.data(), frame_data.size());
+                    #endif
+                    break;
                 }
             }
             if(cur_task_state==0){
@@ -948,6 +971,7 @@ void video_proc()
                 int x_flag=0;
                 int y_flag=0;
                 string res_track="";
+                #if defined(USE_UART)
                 std::vector<int8_t> frame_data;
                 int8_t deviceNumber = 1;
                 int8_t commandNumber = 1;
@@ -991,7 +1015,7 @@ void video_proc()
                 frame_data.push_back(data_2);
                 frame_data.push_back(frame_tail);
                 write(fd1,frame_data.data(), frame_data.size());
-                
+                #endif
             }
         }
 

@@ -1,12 +1,14 @@
-# 1.简介
+# 人脸检测
+
+## 1.简介
 
 人脸检测采用了retina-face网络结构，backbone选取0.25-mobilenet。使用该应用，可得到图像或视频中的每个人脸检测框以及每个人脸的左眼球/右眼球/鼻尖/左嘴角/右嘴角五个关键点位置。
 
-# 2.应用使用说明
+## 2.应用使用说明
 
-## 2.1 使用帮助
+### 2.1 使用帮助
 
-```
+```shell
 Usage: ./face_detection.elf <kmodel_det> <obj_thres> <nms_thres> <input_mode> <debug_mode>
 
 各参数释义如下：
@@ -23,9 +25,6 @@ Usage: ./face_detection.elf <kmodel_det> <obj_thres> <nms_thres> <input_mode> <d
 ./face_detection.elf face_detection_320.kmodel 0.6 0.2 None 0
 ```
 
-## 2.2 效果展示
+### 2.2 效果展示
 
-<img src="https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/face_detection/face_detect_result.jpg" alt="人脸检测效果图" width="50%" height="50%"/>
-
-
-
+![人脸检测效果图](https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/face_detection/face_detect_result.jpg)

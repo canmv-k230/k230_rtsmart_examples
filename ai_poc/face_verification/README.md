@@ -1,14 +1,16 @@
-# 1.简介
+# 人脸验证
+
+## 1.简介
 
 人脸验证是一种基于人脸生物特征的身份验证技术，旨在确认个体是否是其所声称的身份。该技术通过分析和比对用户的脸部特征来验证其身份，通常是在人脸验证系统通过对比两张图片，确定两张图像中的人脸是否属于同一个人。
 
 人脸验证在安全领域、用户身份验证方面有着广泛的应用，为各种应用场景提供了便捷、高效且安全的身份验证手段。
 
-# 2.应用使用说明
+## 2.应用使用说明
 
-## 2.1 使用帮助
+### 2.1 使用帮助
 
-```
+```shell
 Usage: ./face_verification.elf<kmodel_det> <det_thres> <nms_thres> <kmodel_recg> <recg_thres> <img_pth_A> <img_pth_B> <debug_mode>
 Options:
   kmodel_det               人脸检测kmodel路径
@@ -23,6 +25,9 @@ Options:
  #推理示例：（face_verification_image.sh）
 ./face_verification.elf face_detection_320.kmodel 0.6 0.2 face_recognition.kmodel 75 identification_card.png person.png 1
 ```
-## 2.2 效果展示
 
-<img src="https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/face_verification/face_verification_result.png" alt="人脸验证效果图" width="50%" height="50%"/>
+### 2.2 效果展示
+
+![人脸验证效果图](https://developer.canaan-creative.com/api/post/attachment?id=571)
+
+两张图片存在人脸的相似度达到81.1，设置的阈值为75，因此可以认定两张图片中的人脸属于同一个人。

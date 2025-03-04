@@ -63,7 +63,7 @@ for subdir in $(ls -d */); do
       
       subdir_name=$(basename $subdir)
       # 检查子目录是否为目录"A"，如果是，则跳过
-      if [ "$subdir_name" = "cmake" ] || [[ "$subdir_name" == k230_bin* ]] || [ "$subdir_name" = "shell" ] || [ "$subdir_name" = "out" ] || [ "$subdir_name" = "vi_vo" ] || [ "$subdir_name" = "demo_mix" ]; then
+      if [ "$subdir_name" = "cmake" ] || [[ "$subdir_name" == k230_bin* ]] || [ "$subdir_name" = "shell" ] || [ "$subdir_name" = "out" ] || [ "$subdir_name" = "vi_vo" ]; then
             continue
       fi
       
@@ -525,8 +525,13 @@ for subdir in $(ls -d */); do
             cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/gesture.kmodel ${k230_bin}/$subdir_name
             cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/face_detection_320.kmodel ${k230_bin}/$subdir_name
             cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/face_pose.kmodel ${k230_bin}/$subdir_name
+            cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/cropped_test127.kmodel ${k230_bin}/$subdir_name
             cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/nanotrack_backbone_sim.kmodel ${k230_bin}/$subdir_name
             cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/nanotracker_head_calib_k230.kmodel ${k230_bin}/$subdir_name
+            cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/utils/shang.bin ${k230_bin}/$subdir_name
+            cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/utils/xia.bin ${k230_bin}/$subdir_name
+            cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/utils/zuo.bin ${k230_bin}/$subdir_name
+            cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/utils/you.bin ${k230_bin}/$subdir_name
             cp -a shell/demo_mix.sh ${k230_bin}/$subdir_name
       fi
 

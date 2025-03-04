@@ -1,12 +1,14 @@
-# 1.简介
+# OCR文本识别
+
+## 1.简介
 
 OCR识别任务采用了CRNN网络结构，OCR检测任务采用了DBnet的网络结构。使用该应用，可检测到图像或视频中的文本位置以及相应的文字内容。
 
-# 2.应用使用说明
+## 2.应用使用说明
 
-## 2.1 使用帮助
+### 2.1 使用帮助
 
-```
+```shell
 Usage: ./ocr_rec.elf <kmodel_det> <threshold> <box_thresh> <input_mode> <kmodel_reco> <debug_mode>
 Options:
   kmodel_det      ocr检测kmodel路径
@@ -23,7 +25,6 @@ Options:
 ./ocr_reco.elf ocr_det_int16.kmodel 0.25 0.4 None ocr_rec_int16.kmodel 0
 ```
 
-## 2.2 效果展示
+### 2.2 效果展示
 
-<img src="https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/ocr/ocr_result.jpg" alt="文字识别效果图" width="50%" height="50%"/>
-
+![OCR效果](https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/ocr/ocr_result.jpg)
