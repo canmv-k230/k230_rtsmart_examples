@@ -1,14 +1,16 @@
-# 1.简介
+# 异常检测
+
+## 1.简介
 
 异常检测方法在训练时只需要正样本图像即可进行模型训练，训练得到的异常检测模型能够从输入图片中辨别出正常图像和异常图像。该方法通常会被应用在工业图像检测、医疗图像分析、安防监控等领域。
 
 本示例工程提供的模型使用patchcore异常检测方法训练得到，能够从输入图片中辨别出玻璃瓶口是否存在异常。
 
-# 2.应用使用说明
+## 2.应用使用说明
 
-## 2.1 使用帮助
+### 2.1 使用帮助
 
-```
+```shell
 Usage: ./anomaly_det.elf <kmodel_det> <obj_thres> <input_mode> <debug_mode>
 Options:
   kmodel_det      异常检测kmodel路径
@@ -19,11 +21,11 @@ Options:
  #单图推理示例：（anomaly_det_image.sh）
 ./anomaly_det.elf anomaly_det.kmodel 3.7 000.png 0
 ```
-**注意：**1）使用异常检测方法时需要将memory.bin文件拷贝到anomaly_det.elf同级目录
 
-​			2）异常检测方法只支持单图推理模式，不支持视频流推理
+**注意：**
+-使用异常检测方法时需要将memory.bin文件拷贝到anomaly_det.elf同级目录
+​-异常检测方法只支持单图推理模式，不支持视频流推理
 
-## 2.2 效果展示
+### 2.2 效果展示
 
-<img src="https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/anomaly_det/anomaly_detection_result.jpg" alt="异常检测效果图" width="50%" height="50%"/>
-
+![异常检测](https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/anomaly_det/anomaly_detection_result.jpg)
