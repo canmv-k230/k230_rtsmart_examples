@@ -1,7 +1,7 @@
 include mkenv.mk
 
 dir-y :=
-
+dir-$(CONFIG_RTT_ENABLE_BUILD_PERIPHERAL_EXAMPLES) += peripheral
 dir-$(CONFIG_RTT_ENABLE_BUILD_AI_EXAMPLES) += ai_poc
 dir-$(CONFIG_RTT_ENABLE_BUILD_KPU_RUN_EXAMPLES) += kpu_run_yolov8
 dir-$(CONFIG_RTT_ENABLE_BUILD_AI2D_EXAMPLES) += usage_ai2d
@@ -19,7 +19,7 @@ dirs := $(sort $(dir-y))
 all:
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_EXAMPLES),y)
 	@rm -rf elf
-	@$(foreach dir,$(dirs),make -C $(dir) all;)
+	@$(foreach dir,$(dirs),make -C $(dir) all || exit 1;)
 endif
 	@echo "Make rtsmart samples done."
 

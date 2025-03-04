@@ -7,7 +7,7 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
         menuconfig RTT_ENABLE_BUILD_AI_EXAMPLES
             bool "Enable build ai examples"
             default n
-        
+
         choice RTT_AI_EXAMPLES_MODE
             bool "Display mode"
             default RTT_AI_EXAMPLES_MODE_HDMI
@@ -322,7 +322,7 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
                     default y
 
             endif
-        
+
         menuconfig RTT_ENABLE_BUILD_OPENBLAS_EXAMPLES
             bool "Enable build openblas examples"
             default n
@@ -336,15 +336,19 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
                 config RTT_OPENBLAS_CBLAS_SGEMM
                     bool "openblas cblas sgemm example"
                     default y
-                    
+
                 config RTT_OPENBLAS_CBLAS_SGER
                     bool "openblas cblas sger example"
                     default y
-                
+
                 config RTT_OPENBLAS_FORTRAN_DGEMM
                     bool "openblas fortran dgemm example"
                     default y
             endif
 
+        menuconfig RTT_ENABLE_BUILD_PERIPHERAL_EXAMPLES
+            bool "Enable build peripheral examples"
+            default y
+
+
     endif
-    
