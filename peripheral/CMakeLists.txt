@@ -9,9 +9,8 @@ set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR riscv64)
 
 # cross compiler
-set(CMAKE_C_COMPILER riscv64-unknown-linux-musl-gcc)
-set(CMAKE_CXX_COMPILER riscv64-unknown-linux-musl-g++)
-
+set(CMAKE_C_COMPILER "$ENV{CROSS_COMPILE_DIR}/riscv64-unknown-linux-musl-gcc")
+set(CMAKE_CXX_COMPILER "$ENV{CROSS_COMPILE_DIR}/riscv64-unknown-linux-musl-g++")
 set(CMAKE_C_FLAGS_DEBUG "-O0 -g3")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -s")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g3")
