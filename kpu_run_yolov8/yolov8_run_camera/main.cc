@@ -138,6 +138,23 @@ using namespace nncase::F::k230;
 #define osd_id          K_VO_OSD3
 #define OSD_WIDTH       (480)
 #define OSD_HEIGHT      (800)
+#else
+// ISP
+#define ISP_INPUT_WIDTH (1920)
+#define ISP_INPUT_HEIGHT (1080)
+//to display
+#define ISP_CHN0_WIDTH  (800)
+#define ISP_CHN0_HEIGHT (480)
+// to AI
+#define CHANNEL 3
+#define ISP_CHN1_WIDTH  (1280)
+#define ISP_CHN1_HEIGHT (720)
+
+// AI to Display
+#define vicap_install_osd  (1)
+#define osd_id          K_VO_OSD3
+#define OSD_WIDTH       (480)
+#define OSD_HEIGHT      (800)
 #endif
 
 k_vicap_dev vicap_dev;
@@ -481,7 +498,7 @@ int vicap_start()
     printf("phys_addr is %lx g_pool_id is %d \n", phys_addr, osd_pool_id);
 
     // 配置Sensor部分
-    k_vicap_sensor_type sensor_type = OV5647_MIPI_CSI0_1920X1080_30FPS_10BIT_LINEAR;
+    k_vicap_sensor_type sensor_type = SENSOR_TYPE_MAX;
 
     k_vicap_probe_config probe_cfg;
     k_vicap_sensor_info sensor_info;

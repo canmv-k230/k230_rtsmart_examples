@@ -153,6 +153,8 @@
 #define SENSOR_WIDTH (720)    // isp宽度，ai输入，竖屏
 #define ISP_CHN0_WIDTH  (1088)//(1920)
 #define ISP_CHN0_HEIGHT (1920)//(1080)
+#define ISP_INPUT_WIDTH (1920)
+#define ISP_INPUT_HEIGHT (1080)
 #define vicap_install_osd                   (1)
 #define osd_id                              K_VO_OSD3
 #define osd_width                           (1080)
@@ -486,18 +488,6 @@ int vivcap_start()
     k_vb_pool_config pool_config;
 
     printf("sample_vicap ...\n");
-
-    #if defined(CONFIG_BOARD_K230_CANMV)
-    sensor_type = OV5647_MIPI_CSI0_1920X1080_30FPS_10BIT_LINEAR;
-    #elif defined(CONFIG_BOARD_K230_CANMV_V2) 
-    sensor_type = OV5647_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR_V2;
-    #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
-    sensor_type = GC2093_MIPI_CSI2_1920X1080_60FPS_10BIT_LINEAR;
-    #elif defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
-    sensor_type=GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR;
-    #else
-    sensor_type = IMX335_MIPI_2LANE_RAW12_2592X1944_30FPS_12BIT_LINEAR;
-    #endif
 
     {
         k_vicap_probe_config probe_cfg;

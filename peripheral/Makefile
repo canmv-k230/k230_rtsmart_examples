@@ -9,8 +9,8 @@ elf_install_dir := $(SDK_BUILD_IMAGES_DIR)/sdcard/app/examples/peripheral
 all:
 	mkdir -p $(out_dir);
 	mkdir -p $(elf_install_dir);
-	cmake -B $(out_dir) -DCMAKE_INSTALL_PREFIX=$(elf_install_dir) . ;
-	make -C $(out_dir) install;
+	cmake -B $(out_dir) -DCMAKE_INSTALL_PREFIX=$(elf_install_dir) . || exit $?;
+	make -C $(out_dir) install || exit $?;
 
 clean:
 	@make -C $(out_dir) clean;
