@@ -21,8 +21,8 @@ PipeLine::PipeLine(GeneralConfig &general_config,int debug_mode)
     vo_chn_id = K_VO_LAYER1;
 
     osd_chn_id = K_VO_OSD3;
-    // 默认使用gc2093，在start()方法中自动适配类型
-    sensor_type = GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR;
+    // 在start()方法中自动适配类型
+    sensor_type = SENSOR_TYPE_MAX;
     // vicap设备ID
     vicap_dev=VICAP_DEV_ID_0;
     // vicap到vo通道ID

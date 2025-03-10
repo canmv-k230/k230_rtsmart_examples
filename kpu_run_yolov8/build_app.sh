@@ -1,5 +1,6 @@
 #!/bin/bash
 set -x
+set +e
 
 # Get the full path of this script
 SCRIPT=$(realpath -s "$0")
@@ -27,7 +28,8 @@ cmake -DCMAKE_BUILD_TYPE=Release                 \
       -DCMAKE_TOOLCHAIN_FILE=cmake/Riscv64.cmake \
       ..
 
-make -j && make install
+make -j  || exit $?
+make install || exit $?
 popd
 
 # assemble all test cases

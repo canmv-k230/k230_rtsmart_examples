@@ -80,7 +80,7 @@ ifeq ($(CONFIG_RTT_ENABLE_BUILD_AI_EXAMPLES),y)
 
 	@$(foreach dir,$(dirs), \
 		echo "Building in directory: $(dir) with BUILD_ARG=$(BUILD_ARG)"; \
-		./build_app_sub_rtos_only.sh $(dir) $(BUILD_ARG);\
+		./build_app_sub_rtos_only.sh $(dir) $(BUILD_ARG) || exit $?;\
 		if [ -d $(BUILD_OUT) ]; then \
 			echo "Copying $(BUILD_OUT) to $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC)"; \
 			cp -r $(BUILD_OUT)/* $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC); \

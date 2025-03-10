@@ -1,5 +1,6 @@
 #!/bin/bash
 # set -x
+set +e
 
 k230_bin=`pwd`/k230_bin
 
@@ -87,7 +88,8 @@ for subdir in $(ls -d */); do
                   -D$subdir_name=ON                        \
                   ..
             fi
-            make -j && make install
+            make -j || exit $?
+            make install || exit $?
             echo "******************$subdir_name 编译完成******************"
             popd
       else
