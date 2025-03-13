@@ -13,5 +13,5 @@ all:
 	make -C $(out_dir) install || exit $?;
 
 clean:
-	@make -C $(out_dir) clean;
-	@rm -rf $(out_dir);
+	@make -C $(out_dir) clean || true
+	@rm -rf $(out_dir) || true
