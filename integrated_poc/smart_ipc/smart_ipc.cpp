@@ -65,6 +65,7 @@ void MySmartIPC::OnAIFrameData(k_u32 chn_id, k_video_frame_info*frame_info)
     }
 
     //copy osd frame data to osd_vaddr_,for osd draw
+    if (osd_vaddr_ != NULL)
     {
         ScopedTiming st("osd copy", 0);
         memcpy(osd_vaddr_, osd_frame.data, input_config_.osd_width * input_config_.osd_height * 4);
@@ -102,11 +103,11 @@ int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream
     stream_url_ = stream_url;
 
     //init media
-    feature_config_.enable_video_encoder = true;
+    feature_config_.enable_video_encoder = config.enable_video_encoding;
     feature_config_.on_venc_data = this;
-    feature_config_.enable_ai_analysis = true;
+    feature_config_.enable_ai_analysis = config.enable_ai_analysis;
     feature_config_.on_ai_frame_data = this;
-    feature_config_.enable_render = true;
+    feature_config_.enable_render = config.enable_video_output;
     feature_config_.enable_audio_encoder = true;
     feature_config_.on_aenc_data = this;
 
