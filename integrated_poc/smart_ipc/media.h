@@ -42,6 +42,10 @@ struct KdMediaInputConfig {
   std::string kmodel_file="face_detection_320.kmodel"; // Kmodel file path
   float obj_thresh = 0.6; // Object detection threshold
   float nms_thresh = 0.4; // Non-maximum suppression threshold
+
+  bool enable_video_output = true; // Enable rendering
+  bool enable_ai_analysis = true; // Enable AI analysis
+  bool enable_video_encoding = true; // Enable video encoder
 };;
 
 class IOnAEncData {

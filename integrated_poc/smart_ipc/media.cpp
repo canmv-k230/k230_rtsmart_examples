@@ -1007,6 +1007,11 @@ int KdMedia::_init_vo_layer_osd()
 
 int KdMedia::_deinit_vo_layer_osd()
 {
+    if (!feature_config_.enable_render)
+    {
+        return 0;
+    }
+
     k_s32 ret = 0;
     //vi unbind vo
     if (0 != kd_sample_vi_unbind_vo(vi_dev_id_, vi_chn_render_id_, K_VO_DISPLAY_DEV_ID, vo_layer_chn_id_))
@@ -1094,6 +1099,11 @@ int KdMedia::_init_venc()
 
 int KdMedia::_deinit_venc()
 {
+    if (!feature_config_.enable_video_encoder)
+    {
+        return 0;
+    }
+
     k_s32 ret = kd_mpi_venc_destroy_chn(venc_chn_id_);
     if (ret != K_SUCCESS)
     {
@@ -1473,6 +1483,12 @@ void *KdMedia::start_ai_aenc_thread(void *arg)
 
 int KdMedia::osd_alloc_frame(void **osd_vaddr)
 {
+    if (!feature_config_.enable_render || !feature_config_.enable_ai_analysis)
+    {
+        *osd_vaddr = NULL;
+        return 0;
+    }
+
     k_u64 phys_addr = 0;
     k_u32 *virt_addr;
     k_vb_blk_handle handle;
@@ -1538,6 +1554,11 @@ int KdMedia::osd_alloc_frame(void **osd_vaddr)
 
 int KdMedia::osd_draw_frame()
 {
+    if (!feature_config_.enable_render)
+    {
+        return 0;
+    }
+
     return kd_mpi_vo_chn_insert_frame(osd_id_+3, &osd_vf_info_);
 }
 

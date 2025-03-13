@@ -17,7 +17,7 @@ static void sigHandler(int sig_no) {
 }
 
 static void Usage() {
-    std::cout << "Usage: ./smart_ipc.elf [-H] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>]" << std::endl;
+    std::cout << "Usage: ./smart_ipc.elf [-H] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>]" << std::endl;
     std::cout << "-H: display this help message" << std::endl;
     std::cout << "-a: the audio sample rate, default 8000" << std::endl;
     std::cout << "-c: the audio channel count, default 1" << std::endl;
@@ -31,14 +31,16 @@ static void Usage() {
     std::cout << "-K: the kmodel file path,default face_detection_320.kmodel" << std::endl;
     std::cout << "-T: the face detection threshold,default 0.6" << std::endl;
     std::cout << "-N: the face detection NMS threshold,default 0.4" << std::endl;
-
+    std::cout << "-E: enable video output, default 1" << std::endl;
+    std::cout << "-F: enable AI analysis, default 1" << std::endl;
+    std::cout << "-G: enable video encoding, default 1" << std::endl;
     exit(-1);
 }
 
 int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
     int result;
     opterr = 0;
-    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:K:T:N:")) != -1) {
+    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:K:T:N:E:F:G:")) != -1) {
         switch(result) {
         case 'H' : {
             Usage(); break;
@@ -158,6 +160,25 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
             config.nms_thresh = n;
             break;
         }
+        case 'E': {
+            int n = atoi(optarg);
+            if (n < 0) Usage();
+            config.enable_video_output = n;
+            break;
+        }
+        case 'F': {
+            int n = atoi(optarg);
+            if (n < 0) Usage();
+            config.enable_ai_analysis = n;
+            break;
+        }
+        case 'G': {
+            int n = atoi(optarg);
+            if (n < 0) Usage();
+            config.enable_video_encoding = n;
+            break;
+        }
+
         default: Usage(); break;
         }
     }
@@ -179,6 +200,9 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
     printf("Kmodel file: %s\n", config.kmodel_file.c_str());
     printf("Face detection threshold: %f\n", config.obj_thresh);
     printf("Face detection NMS threshold: %f\n", config.nms_thresh);
+    printf("Enable video output: %d\n", config.enable_video_output);
+    printf("Enable AI analysis: %d\n", config.enable_ai_analysis);
+    printf("Enable video encoding: %d\n", config.enable_video_encoding);
     printf("\n");
     return 0;
 }
