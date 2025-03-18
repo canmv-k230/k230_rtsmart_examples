@@ -218,7 +218,7 @@ int main(int argc, char *argv[]) {
 
     MySmartIPC *smartIPC = new MySmartIPC();
     if (!smartIPC || smartIPC->Init(config) < 0) {
-        std::cout << "KdRtspServer Init failed." << std::endl;
+        std::cout << "SmartIPC Init failed." << std::endl;
         return -1;
     }
 

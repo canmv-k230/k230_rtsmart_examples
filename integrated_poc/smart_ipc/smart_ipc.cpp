@@ -76,7 +76,20 @@ void MySmartIPC::OnAIFrameData(k_u32 chn_id, k_video_frame_info*frame_info)
 
 int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream_url/*= "test"*/, int port/*= 8554*/)
 {
-    ScopedTiming st = ScopedTiming("MySmartIPC::Init", 1);
+    //init media
+    feature_config_.enable_video_encoder = config.enable_video_encoding;
+    feature_config_.on_venc_data = this;
+    feature_config_.enable_ai_analysis = config.enable_ai_analysis;
+    feature_config_.on_ai_frame_data = this;
+    feature_config_.enable_render = config.enable_video_output;
+    feature_config_.enable_audio_encoder = true;
+    feature_config_.on_aenc_data = this;
+
+    if (0 != media_.configure_media_features(config, feature_config_))
+    {
+        return -1;
+    }
+
     //init rtsp server
     input_config_ = config;
     if (rtsp_server_.Init(port, nullptr) < 0) {
@@ -101,17 +114,6 @@ int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream
         return -1;
     }
     stream_url_ = stream_url;
-
-    //init media
-    feature_config_.enable_video_encoder = config.enable_video_encoding;
-    feature_config_.on_venc_data = this;
-    feature_config_.enable_ai_analysis = config.enable_ai_analysis;
-    feature_config_.on_ai_frame_data = this;
-    feature_config_.enable_render = config.enable_video_output;
-    feature_config_.enable_audio_encoder = true;
-    feature_config_.on_aenc_data = this;
-
-    media_.configure_media_features(config, feature_config_);
 
     //init ai analyse
     _ai_analyse_init();
