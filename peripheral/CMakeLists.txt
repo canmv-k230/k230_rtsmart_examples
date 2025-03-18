@@ -48,6 +48,7 @@ include_directories(${k230_mpp_root}/include/comm)
 include_directories(../../rtsmart/userapps/sdk/rt-thread/include/)  #rtsmart user include;
 include_directories(../../rtsmart/userapps)
 include_directories(../../rtsmart/userapps/sdk/rt-thread/components/drivers/)
+include_directories(../../rtsmart/userapps/sdk/rt-thread/components/dfs/)
 
 add_subdirectory(uart)
 add_subdirectory(i2c)
