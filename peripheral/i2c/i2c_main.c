@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2023, Canaan Bright Sight Co., Ltd
+ * Copyright (c) 2025, Canaan Bright Sight Co., Ltd
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
