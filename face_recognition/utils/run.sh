@@ -1,0 +1,1 @@
+./face_recognition.elf face_detection_320.kmodel 0.6 0.2 face_recognition.kmodel 75 face_database 0
