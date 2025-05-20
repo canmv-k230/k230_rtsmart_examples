@@ -225,7 +225,7 @@ int PipeLine::Create()
     osd_frame_info.v_frame.width = OSD_WIDTH;
     osd_frame_info.v_frame.height = OSD_HEIGHT;
     osd_frame_info.v_frame.stride[0] = OSD_WIDTH;
-    osd_frame_info.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
+    osd_frame_info.v_frame.pixel_format = PIXEL_FORMAT_BGRA_8888;
     osd_frame_info.mod_id = K_ID_VO;
     osd_frame_info.pool_id = osd_pool_id;
     osd_frame_info.v_frame.phys_addr[0] = phys_addr;
