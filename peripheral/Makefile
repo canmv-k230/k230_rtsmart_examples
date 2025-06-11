@@ -3,7 +3,7 @@ include ../mkenv.mk
 endif
 
 out_dir := $(SDK_RTSMART_BUILD_DIR)/examples/peripheral
-elf_install_dir := $(SDK_BUILD_IMAGES_DIR)/sdcard/app/examples/peripheral
+elf_install_dir := $(RTT_EXAMPLES_ELF_INSTALL_PATH_PERIPHERAL_EXAMPLES)/
 
 .PHONY: all clean
 all:

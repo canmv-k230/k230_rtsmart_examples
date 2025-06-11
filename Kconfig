@@ -352,7 +352,7 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
 
         menuconfig RTT_ENABLE_BUILD_PERIPHERAL_EXAMPLES
             bool "Enable build peripheral examples"
-            default y
+            default n
 
 
     endif
