@@ -15,9 +15,24 @@ void MySmartIPC::OnAEncData(k_u32 chn_id, k_u8*pdata,size_t size,k_u64 time_stam
     }
 }
 
+static k_u64 get_ticks()
+{
+    volatile k_u64 time_elapsed;
+    __asm__ __volatile__(
+        "rdtime %0"
+        : "=r"(time_elapsed));
+    return time_elapsed;
+}
+
 void MySmartIPC::OnVEncData(k_u32 chn_id, void *data, size_t size, k_venc_pack_type type,uint64_t timestamp)
 {
+    // if (K_VENC_HEADER != type)
+    // {
+    //     printf("OnVEncData venc type(%d),timestamp:%lld(%lld)\n",type,timestamp,get_ticks()/27-timestamp);
+    // }
+
     if (started_) {
+
         rtsp_server_.SendVideoData(stream_url_, (const uint8_t*)data, size, timestamp);
     }
 }
@@ -82,8 +97,9 @@ int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream
     feature_config_.enable_ai_analysis = config.enable_ai_analysis;
     feature_config_.on_ai_frame_data = this;
     feature_config_.enable_render = config.enable_video_output;
-    feature_config_.enable_audio_encoder = true;
+    feature_config_.enable_audio_encoder = config.enable_capture_audio;
     feature_config_.on_aenc_data = this;
+
 
     if (0 != media_.configure_media_features(config, feature_config_))
     {

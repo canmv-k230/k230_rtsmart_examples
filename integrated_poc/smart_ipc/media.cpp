@@ -485,7 +485,8 @@ int KdMedia::configure_media_features(const KdMediaInputConfig &input_config, co
 int KdMedia::enable_media_features()
 {
     // Audio codec initialization takes a long time, so it is executed in a separate thread
-    pthread_create(&start_ai_aenc_tid_, NULL, start_ai_aenc_thread, this);
+    if (feature_config_.enable_audio_encoder)
+        pthread_create(&start_ai_aenc_tid_, NULL, start_ai_aenc_thread, this);
 
     //init vicap
     _init_vi_cap();
@@ -1061,7 +1062,7 @@ int KdMedia::_init_venc()
     if (input_config_.video_type == KdMediaVideoType::kVideoTypeH264)
     {
         chn_attr.venc_attr.type = K_PT_H264;
-        chn_attr.venc_attr.profile = VENC_PROFILE_H264_HIGH;
+        chn_attr.venc_attr.profile = VENC_PROFILE_H264_BASELINE;
     }
     else if (input_config_.video_type == KdMediaVideoType::kVideoTypeH265)
     {

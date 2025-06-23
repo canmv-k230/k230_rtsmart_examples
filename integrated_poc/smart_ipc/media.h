@@ -46,7 +46,8 @@ struct KdMediaInputConfig {
   bool enable_video_output = true; // Enable rendering
   bool enable_ai_analysis = true; // Enable AI analysis
   bool enable_video_encoding = true; // Enable video encoder
-};;
+  bool enable_capture_audio = true; // Enable capture audio
+};
 
 class IOnAEncData {
   public:
