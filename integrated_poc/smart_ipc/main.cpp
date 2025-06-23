@@ -17,11 +17,13 @@ static void sigHandler(int sig_no) {
 }
 
 static void Usage() {
-    std::cout << "Usage: ./smart_ipc.elf [-H] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>]" << std::endl;
+    std::cout << "Usage: ./smart_ipc.elf [-H] [-S <sensor type>] [-V <enable_audio_capture>] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>]" << std::endl;
     std::cout << "-H: display this help message" << std::endl;
+    std::cout << "-S: the sensor type, default auto-detect" << std::endl;
+    std::cout << "-V: enable audio capture, default 1" << std::endl;
     std::cout << "-a: the audio sample rate, default 8000" << std::endl;
     std::cout << "-c: the audio channel count, default 1" << std::endl;
-    std::cout << "-t: the video encoder type: h264/h265, default h26" << std::endl;
+    std::cout << "-t: the video encoder type: h264/h265, default h264" << std::endl;
     std::cout << "-w: the video encoder width, default 1280" << std::endl;
     std::cout << "-h: the video encoder height, default 720" << std::endl;
     std::cout << "-b: the video encoder bitrate(kbps), default 2000" << std::endl;
@@ -40,7 +42,7 @@ static void Usage() {
 int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
     int result;
     opterr = 0;
-    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:K:T:N:E:F:G:")) != -1) {
+    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:K:T:N:E:F:G:S:V:")) != -1) {
         switch(result) {
         case 'H' : {
             Usage(); break;
@@ -178,12 +180,31 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
             config.enable_video_encoding = n;
             break;
         }
+        case 'S': {
+            int n = atoi(optarg);
+            if (n < 0) Usage();
+            config.sensor_type = (k_vicap_sensor_type)n;
+            break;
+        }
+        case 'V': {
+            int n = atoi(optarg);
+            if (n < 0) Usage();
+            config.enable_capture_audio = n;
+            break;
+        }
 
         default: Usage(); break;
         }
     }
 
     printf("Config parameters:\n");
+    if (config.sensor_type == SENSOR_TYPE_MAX) {
+        printf("Sensor type: auto-detect\n");
+    } else {
+        printf("Sensor type: %d\n", config.sensor_type);
+    }
+    printf("Sensor type: %d\n", config.sensor_type);
+    printf("Audio capture enabled: %d\n", config.enable_capture_audio);
     printf("Audio sample rate: %d\n", config.audio_samplerate);
     printf("Audio channel count: %d\n", config.audio_channel_cnt);
     printf("Video encoder type: %s\n", (config.video_type == KdMediaVideoType::kVideoTypeH264) ? "h264" : "h265");
