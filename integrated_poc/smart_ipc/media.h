@@ -18,12 +18,18 @@ enum class KdMediaVideoType {
   kVideoTypeButt
 };
 
+typedef enum {
+    DATA_SOURCE_SENSOR_CHANNEL = 0, /**< 数据源为Sensor的通道 */
+    DATA_SOURCE_VO_WBC,             /**< 数据源为VO模块的WBC回写数据 */
+} VencDataSourceType;
+
 struct KdMediaInputConfig {
   k_vicap_sensor_type sensor_type = SENSOR_TYPE_MAX; // Sensor type
   KdMediaVideoType video_type = KdMediaVideoType::kVideoTypeH264; // Venc type
   int venc_width = 1280; // Video encoder width
   int venc_height = 720; // Video encoder height
   int bitrate_kbps = 2000; // Bitrate in kbps
+  VencDataSourceType venc_data_source_type = DATA_SOURCE_SENSOR_CHANNEL; // Video encoder data source
 
   int audio_samplerate = 8000; // Audio sample rate
   int audio_channel_cnt = 1; // Number of audio channels
@@ -159,6 +165,12 @@ class KdMedia {
    */
   int _init_connector();
 
+    /**
+   * @brief Deinitialize connector.
+   * @return Status of the initialization operation.
+   */
+  int _deinit_connector();
+
   /**
    * @brief Initialize video output layer.
    * @param chn_id Channel ID for the video output layer.
@@ -198,6 +210,18 @@ class KdMedia {
    * @return Status of the deinitialization operation.
    */
   int _deinit_vo_layer_osd();
+
+  /**
+   * @brief Initialize wbc
+   * @return Status of the initialization operation.
+   */
+  int _init_wbc();
+
+  /**
+   * @brief Deinitialize wbc
+   * @return Status of the deinitialization operation.
+   */
+  int _deinit_wbc();
 
   /**
    * @brief Initialize video encoder.
@@ -259,6 +283,18 @@ class KdMedia {
    */
   int _stop_dump_frame_for_ai_analysis();
 
+    /**
+   * @brief Start dumping wbc frames.
+   * @return Status of the start operation.
+   */
+  int _start_dump_wbc_frame();
+
+  /**
+   * @brief Stop dumping wbc frames.
+   * @return Status of the stop operation.
+   */
+  int _stop_dump_wbc_frame();
+
   /**
    * @brief Thread function to get audio encoder stream.
    * @param arg Arguments for the thread function.
@@ -279,6 +315,13 @@ class KdMedia {
    * @return Pointer to the result.
    */
   static void *ai_analysis_frame_thread(void *arg);
+
+    /**
+   * @brief Thread function to get vo wbc frame.
+   * @param arg Arguments for the thread function.
+   * @return Pointer to the result.
+   */
+  static void *wbc_frame_thread(void *arg);
 
   /**
    * @brief Thread function to start ai,aenc.
@@ -315,6 +358,9 @@ class KdMedia {
   pthread_t ai_analysis_frame_tid_{0}; // AI analysis frame thread ID
   bool start_dump_ai_analysis_frame_{false}; // Flag to start dumping AI frames
 
+  pthread_t wbc_frame_tid_{0}; // get vo wbc frame thread ID
+  bool start_dump_wbc_frame_{false}; // Flag to start dumping wbc frames
+
   int audio_frame_divisor_{25}; // Audio frame divisor
   k_u32 ai_dev_{0}; // Audio input device ID
   k_u32 ai_chn_{0}; // Audio input channel ID
@@ -325,6 +371,10 @@ class KdMedia {
   bool start_get_audio_stream_{false}; // Flag to start getting audio stream
   bool ai_started_{false}; // AI started flag
   bool ai_initialized_{false}; // AI initialized flag
+
+  int wbc_width_{0}; // WBC width
+  int wbc_height_{0}; // WBC height
+  char *connector_name_{nullptr}; // Connector name
 };
 
 #endif // _KD_MEDIA_H

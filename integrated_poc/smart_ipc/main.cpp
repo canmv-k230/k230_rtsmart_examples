@@ -17,7 +17,7 @@ static void sigHandler(int sig_no) {
 }
 
 static void Usage() {
-    std::cout << "Usage: ./smart_ipc.elf [-H] [-S <sensor type>] [-V <enable_audio_capture>] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>]" << std::endl;
+    std::cout << "Usage: ./smart_ipc.elf [-H] [-S <sensor type>] [-V <enable_audio_capture>] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>] [-D <data_source>]" << std::endl;
     std::cout << "-H: display this help message" << std::endl;
     std::cout << "-S: the sensor type, default auto-detect" << std::endl;
     std::cout << "-V: enable audio capture, default 1" << std::endl;
@@ -27,6 +27,7 @@ static void Usage() {
     std::cout << "-w: the video encoder width, default 1280" << std::endl;
     std::cout << "-h: the video encoder height, default 720" << std::endl;
     std::cout << "-b: the video encoder bitrate(kbps), default 2000" << std::endl;
+    std::cout << "-D: the encoding data source(0:Sensor Channel(default),1:vo wbc)" << std::endl;
     std::cout << "-C: the video output connector type(0:HDMI,1:LCD), default HDMI" << std::endl;
     std::cout << "-A: the AI analysis input width, default 1280" << std::endl;
     std::cout << "-I: the AI analysis input height, default 720" << std::endl;
@@ -42,7 +43,7 @@ static void Usage() {
 int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
     int result;
     opterr = 0;
-    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:K:T:N:E:F:G:S:V:")) != -1) {
+    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:K:T:N:E:F:G:S:V:D:")) != -1) {
         switch(result) {
         case 'H' : {
             Usage(); break;
@@ -84,6 +85,12 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
             config.bitrate_kbps = n;
             break;
         }
+        case 'D': {
+            int n = atoi(optarg);
+            if (n < 0) Usage();
+            config.venc_data_source_type = (VencDataSourceType)n;
+            break;
+        }
         case 'C': {
             int n = atoi(optarg);
             if (n == 0) {
@@ -104,22 +111,9 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
                 config.osd_height = 1920;
                 config.vo_width = 1920;
                 config.vo_height = 1080;
-            } else {
+            }else {
                 Usage();
             }
-            break;
-        }
-
-        case 'W': {
-            int n = atoi(optarg);
-            if (n < 0) Usage();
-            config.vo_width = n;
-            break;
-        }
-        case 'D': {
-            int n = atoi(optarg);
-            if (n < 0) Usage();
-            config.vo_height = n;
             break;
         }
         case 'O': {
@@ -224,6 +218,7 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
     printf("Enable video output: %d\n", config.enable_video_output);
     printf("Enable AI analysis: %d\n", config.enable_ai_analysis);
     printf("Enable video encoding: %d\n", config.enable_video_encoding);
+    printf("Video encoder data source: %s\n", (config.venc_data_source_type == DATA_SOURCE_SENSOR_CHANNEL) ? "Sensor Channel" : "VO WBC");
     printf("\n");
     return 0;
 }
