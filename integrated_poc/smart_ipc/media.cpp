@@ -506,6 +506,11 @@ int KdMedia::enable_media_features()
     //start dump frame for ai analysis
     _start_dump_frame_for_ai_analysis();
 
+    //start wbc frame
+    if (input_config_.venc_data_source_type == DATA_SOURCE_VO_WBC && feature_config_.enable_video_encoder){
+        _start_dump_wbc_frame();
+    }
+
     //init venc
     _init_venc();
 
@@ -519,6 +524,9 @@ int KdMedia::disable_media_features()
 {
     //stop dump frame for ai analysis
     _stop_dump_frame_for_ai_analysis();
+
+    //stop wbc frame
+    _stop_dump_wbc_frame();
 
     //stop venc
     _stop_venc();
@@ -572,6 +580,15 @@ int KdMedia::_init_vb_pool()
             vb_config.comm_pool[pool_index].blk_cnt = VICAP_CHN_MIN_FRAME_COUNT;
             vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
             vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.vo_width * input_config_.vo_height * 3 / 2, MEM_ALIGN_1K);
+
+            if( input_config_.venc_data_source_type == DATA_SOURCE_VO_WBC)
+            {
+                pool_index ++;
+                vb_config.comm_pool[pool_index].blk_cnt = 4;
+                vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
+                vb_config.comm_pool[pool_index].blk_size = input_config_.vo_width * input_config_.vo_height * 2;
+            }
+
         }
 
         //vb for ai anysis
@@ -757,7 +774,7 @@ int KdMedia::_init_vi_cap()
     }
 
     //set chn2 output yuv420sp for venc
-    if (feature_config_.enable_video_encoder)
+    if (feature_config_.enable_video_encoder && input_config_.venc_data_source_type == DATA_SOURCE_SENSOR_CHANNEL)
     {
         vicap_chn_index ++;
         vi_chn_venc_id_ = (k_vicap_chn)vicap_chn_index;
@@ -830,6 +847,22 @@ int KdMedia::_init_connector()
     // connector init
     kd_mpi_connector_init(connector_fd, connector_info);
 
+    printf("connector init success, connector type: %d, width:%d,height:%d\n", connector_type, connector_info.resolution.hdisplay,connector_info.resolution.vdisplay);
+    wbc_width_ = connector_info.resolution.hdisplay;
+    wbc_height_ = connector_info.resolution.vdisplay;
+    connector_name_ = (char*)connector_info.connector_name;
+
+    return 0;
+}
+
+int KdMedia::_deinit_connector()
+{
+    k_s32 connector_fd;
+
+    //poweroff
+    connector_fd = kd_mpi_connector_open(connector_name_);
+    kd_mpi_connector_power_set(connector_fd, K_FALSE);
+    kd_mpi_connector_close(connector_fd);
     return 0;
 }
 
@@ -1000,6 +1033,11 @@ int KdMedia::_init_vo_layer_osd()
         return -1;
     }
 
+    //init wbc
+    if (input_config_.venc_data_source_type == DATA_SOURCE_VO_WBC && feature_config_.enable_video_encoder){
+        _init_wbc();
+    }
+
     //vi bind vo
     ret = kd_sample_vi_bind_vo(vi_dev_id_, vi_chn_render_id_, K_VO_DISPLAY_DEV_ID, vo_layer_chn_id_);
 
@@ -1035,6 +1073,50 @@ int KdMedia::_deinit_vo_layer_osd()
         return -1;
     }
 
+    //deinit connector
+    _deinit_connector();
+
+    //deinit wbc
+    if (input_config_.venc_data_source_type == DATA_SOURCE_VO_WBC && feature_config_.enable_video_encoder){
+        _deinit_wbc();
+    }
+
+    kd_display_reset();
+
+    return 0;
+}
+
+int KdMedia::_init_wbc()
+{
+    k_vo_wbc_attr wb_attr;
+    wb_attr.pixel_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+    wb_attr.target_size.width = wbc_width_;
+    wb_attr.target_size.height = wbc_height_;
+    wb_attr.stride = wb_attr.target_size.width;
+
+    kd_mpi_vo_set_wbc_attr(&wb_attr);
+    kd_mpi_vo_enable_wbc();
+    return 0;
+}
+
+int KdMedia::_deinit_wbc()
+{
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) {
+        printf("open /dev/mem failed, errno:%d\n", errno);
+        return -1;
+    }
+    void *vo_base = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0x90840000);
+    if (vo_base == NULL) {
+        printf("mmap failed, errno:%d\n", errno);
+    }
+    *(uint32_t *)(vo_base + 0x118) = 0x10000;
+    *(uint32_t *)(vo_base + 0x004) = 0x11;
+    munmap(vo_base, 4096);
+    close(fd);
+    usleep(5000);
+
+    kd_mpi_vo_disable_wbc();
     return 0;
 }
 
@@ -1213,7 +1295,15 @@ int KdMedia::_start_venc()
     }
 
     //from vicap chn to venc chn，without ai analysis
-    kd_sample_vi_bind_venc(vi_dev_id_, vi_chn_venc_id_, venc_chn_id_);
+    if (input_config_.venc_data_source_type == DATA_SOURCE_SENSOR_CHANNEL)
+    {
+        k_s32 ret = kd_sample_vi_bind_venc(vi_dev_id_, vi_chn_venc_id_, venc_chn_id_);
+        if (ret != K_SUCCESS)
+        {
+            printf("kd_sample_vi_bind_venc failed:0x%x\n", ret);
+            return -1;
+        }
+    }
 
     return 0;
 }
@@ -1369,6 +1459,39 @@ int KdMedia::_stop_dump_frame_for_ai_analysis()
     {
         start_dump_ai_analysis_frame_ = false;
         pthread_join(ai_analysis_frame_tid_, NULL);
+        ai_analysis_frame_tid_ = 0;
+    }
+    return 0;
+}
+
+int KdMedia::_start_dump_wbc_frame()
+{
+    //start get aenc data
+    if (!start_dump_wbc_frame_)
+    {
+        start_dump_wbc_frame_ = K_TRUE;
+    }
+    else
+    {
+        printf("wbc frame already start\n");
+        return K_FAILED;
+    }
+    //start wbc frame
+    if (wbc_frame_tid_ != 0)
+    {
+        pthread_join(wbc_frame_tid_, NULL);
+        wbc_frame_tid_ = 0;
+    }
+    pthread_create(&wbc_frame_tid_, NULL, wbc_frame_thread, this);
+}
+
+int KdMedia::_stop_dump_wbc_frame()
+{
+    if (start_dump_wbc_frame_)
+    {
+        start_dump_wbc_frame_ = false;
+        pthread_join(wbc_frame_tid_, NULL);
+        wbc_frame_tid_ = 0;
     }
     return 0;
 }
@@ -1406,6 +1529,7 @@ void *KdMedia::venc_stream_thread(void *arg)
 {
     KdMedia *pthis = (KdMedia*)arg;
     k_u32 venc_chn = pthis->venc_chn_id_;
+    k_s32 ret;
 
     k_venc_stream output;
     k_venc_chn_status status;
@@ -1421,7 +1545,11 @@ void *KdMedia::venc_stream_thread(void *arg)
 
         output.pack = (k_venc_pack *)malloc(sizeof(k_venc_pack) * output.pack_cnt);
 
-        kd_mpi_venc_get_stream(venc_chn, &output, -1);
+        ret = kd_mpi_venc_get_stream(venc_chn, &output, 1000);
+        if (ret != K_SUCCESS){
+            free(output.pack);
+            continue;
+        }
 
         for (int i = 0; i < output.pack_cnt; i++)
         {
@@ -1438,6 +1566,27 @@ void *KdMedia::venc_stream_thread(void *arg)
 
         kd_mpi_venc_release_stream(venc_chn, &output);
 
+        free(output.pack);
+    }
+
+    //Empty all data in the encoder.
+    while(1)
+    {
+        kd_mpi_venc_query_status(venc_chn, &status);
+
+        if (status.cur_packs > 0)
+            output.pack_cnt = status.cur_packs;
+        else
+            output.pack_cnt = 1;
+
+        output.pack = (k_venc_pack *)malloc(sizeof(k_venc_pack) * output.pack_cnt);
+        ret = kd_mpi_venc_get_stream(venc_chn, &output, 1000);
+        if (ret != K_SUCCESS){
+            free(output.pack);
+            break;
+        }
+
+        kd_mpi_venc_release_stream(venc_chn, &output);
         free(output.pack);
     }
 
@@ -1471,6 +1620,67 @@ void *KdMedia::ai_analysis_frame_thread(void *arg)
 
     }
 
+    return NULL;
+}
+
+static int _save_nv12_frame_to_file(k_video_frame_info *frame_info, const char *filename)
+{
+    unsigned ysize = frame_info->v_frame.width * frame_info->v_frame.height;
+    unsigned uvsize = ysize / 2;
+    FILE *fp = fopen(filename, "wb");
+    if (!fp)
+    {
+        printf("Failed to open file %s for writing\n", filename);
+        return -1;
+    }
+
+    k_u8 *pData = (k_u8 *)kd_mpi_sys_mmap(frame_info->v_frame.phys_addr[0], ysize);
+    if (pData)
+    {
+        fwrite(pData, 1, ysize, fp);
+        kd_mpi_sys_munmap(pData, ysize);
+    }
+
+    pData = (k_u8 *)kd_mpi_sys_mmap(frame_info->v_frame.phys_addr[1], uvsize);
+    if (pData)
+    {
+        fwrite(pData, 1, uvsize, fp);
+        kd_mpi_sys_munmap(pData, uvsize);
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+void *KdMedia::wbc_frame_thread(void *arg)
+{
+    KdMedia *pthis = (KdMedia*)arg;
+    k_s32 ret;
+    k_video_frame_info wbc_frame_info;
+    k_video_frame_info rotation_frame_info;
+    k_u32 venc_chn = pthis->venc_chn_id_;
+
+    //init vo wbc
+    //pthis->_init_wbc();
+
+    k_u8 *pData;
+    while (pthis->start_dump_wbc_frame_)
+    {
+        memset(&wbc_frame_info, 0, sizeof(k_video_frame_info));
+        ret = kd_mpi_wbc_dump_frame(&wbc_frame_info, 1000);
+        if (ret)
+        {
+            printf("%s kd_mpi_vo_wbc_get_frame failed.\n", __func__);
+            continue;
+        }
+
+        kd_mpi_venc_send_frame(venc_chn, &wbc_frame_info, -1);//-1 block send
+
+        kd_mpi_wbc_dump_release(&wbc_frame_info);
+    }
+
+    //deinit vo wbc
+    //pthis->_deinit_wbc();
     return NULL;
 }
 
