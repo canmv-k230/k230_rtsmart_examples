@@ -26,8 +26,9 @@
 #define _FACE_MASK_H
 
 #include <vector>
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
+#include "face_detection.h"
 
 using std::vector;
 
@@ -48,25 +49,14 @@ class FaceMask : public AIBase
 {
 public:
     /**
-     * @brief FaceMask构造函数，加载kmodel,并初始化kmodel输入、输出(for image)
-     * @param kmodel_file kmodel文件路径
-     * @param mask_thresh FaceMask阈值
-     * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-     * @return None
-     */
-    FaceMask(const char *kmodel_file,float mask_thresh, const int debug_mode = 1);
-
-    /**
      * @brief FaceMask构造函数，加载kmodel,并初始化kmodel输入、输出和人脸检测阈值(for isp)
      * @param kmodel_file kmodel文件路径
      * @param mask_thresh FaceMask阈值
-     * @param isp_shape   isp输入大小（chw）
-     * @param vaddr       isp对应虚拟地址
-     * @param paddr       isp对应物理地址
+     * @param image_size  输入大小
      * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
      * @return None
      */
-    FaceMask(const char *kmodel_file,float mask_thresh, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+    FaceMask(char *kmodel_file,float mask_thresh, FrameCHWSize image_size,int debug_mode);
 
     /**
      * @brief FaceMask析构函数
@@ -74,20 +64,7 @@ public:
      */
     ~FaceMask();
 
-    /**
-     * @brief 图片预处理
-     * @param ori_img          原始图片
-     * @param sparse_points    原始图片中人脸五官点位置
-     * @return None
-     */
-    void pre_process(cv::Mat ori_img, float* sparse_points);
-
-    /**
-     * @brief 视频流预处理
-     * @param sparse_points 原始图片中人脸五官点位置
-     * @return None
-     */
-    void pre_process(float* sparse_points);
+    void pre_process(runtime_tensor& input_tensor, float* sparse_points);
 
     /**
      * @brief kmodel推理
@@ -145,11 +122,10 @@ private:
     void softmax(vector<float>& input,vector<float>& output);
 
     std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
-    runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
     
-    uintptr_t vaddr_;                            // isp的虚拟地址
-    FrameCHWSize isp_shape_;                     // isp对应的地址大小
+    FrameCHWSize image_size_;                    
+    FrameCHWSize input_size_;
     float matrix_dst_[10];                       // 人脸affine的变换矩阵
     float mask_thresh_;                          // 人脸佩戴口罩阈值
 };

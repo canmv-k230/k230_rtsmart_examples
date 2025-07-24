@@ -28,9 +28,10 @@
 #include <iostream>
 #include <vector>
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 #include "face_mesh_post.h"
+#include "face_detection.h"
 
 using std::vector;
 
@@ -61,22 +62,11 @@ public:
      * @brief FaceMesh构造函数
      * @param kmodel_file           kmodel文件路径
      * @param post_kmodel_file      后处理kmodel文件路径
+     * @param image_size            输入大小
      * @param debug_mode            0（不调试）、 1（只显示时间）、2（显示所有打印信息）
      * @return None
      */
-    FaceMesh(const char *kmodel_file,const char *post_kmodel_file, const int debug_mode = 1);
-
-    /**
-     * @brief FaceMesh构造函数
-     * @param kmodel_file           kmodel文件路径
-     * @param post_kmodel_file      后处理kmodel文件路径
-     * @param isp_shape             isp输入大小
-     * @param vaddr                 isp对应虚拟地址
-     * @param paddr                 isp对应物理地址
-     * @param debug_mode            0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-     * @return None
-     */
-    FaceMesh(const char *kmodel_file,const char *post_kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+    FaceMesh(char *kmodel_file,char *post_kmodel_file, FrameCHWSize image_size, int debug_mode);
 
     /**
      * @brief FaceMesh析构函数
@@ -84,20 +74,7 @@ public:
      */
     ~FaceMesh();
 
-    /**
-     * @brief 图片预处理，（ai2d for image）
-     * @param ori_img               原始图片
-     * @param bbox                  人脸检测框
-     * @return None
-     */
-    void pre_process(cv::Mat ori_img,Bbox &bbox);
-
-    /**
-     * @brief 视频流预处理（ai2d for isp）
-     * @param bbox                  人脸检测框
-     * @return None
-     */
-    void pre_process(Bbox &bbox);
+    void pre_process(runtime_tensor& input_tensor,Bbox &bbox);
 
     /**
      * @brief kmodel推理
@@ -111,7 +88,7 @@ public:
      * @param vertices              后处理后3d点
      * @return None
      */
-    void post_process(FrameSize frame_size, vector<float>& vertices,bool pic_mode);
+    void post_process(FrameCHWSize frame_size, vector<float>& vertices,bool pic_mode);
 
     /**
      * @brief 获取mesh
@@ -137,7 +114,7 @@ private:
      * @param roi_b                 roi(x,y,w,h)
      * @return roi(x1,y1,x2,y2)
      */
-    LeftTopRightBottom parse_roi_box_from_bbox(FrameSize frame_size,Bbox& b,Bbox& roi_b);
+    LeftTopRightBottom parse_roi_box_from_bbox(FrameCHWSize frame_size,Bbox& b,Bbox& roi_b);
     
     /**
      * @brief 参数归一化
@@ -163,10 +140,9 @@ private:
     void similar_transform(LeftTopRightBottom& roi_box,vector<float> &vertices);
 
     std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
-    runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-    uintptr_t vaddr_;                            // isp的虚拟地址
-    FrameCHWSize isp_shape_;                     // isp对应的地址大小
+    FrameCHWSize image_size_;
+    FrameCHWSize input_size_;
     
     FaceMeshPost post_obj_;                      // 人脸mesh后处理对象
 

@@ -25,66 +25,52 @@
 
 #include "ocr_reco.h"
 
-OCRReco::OCRReco(const char *kmodel_file, int dict_size, const int debug_mode)
-:dict_size(dict_size), AIBase(kmodel_file,"OCRReco", debug_mode)
+OCRReco::OCRReco(char *kmodel_file,int debug_mode)
+:AIBase(kmodel_file,"OCRReco", debug_mode)
 {
-    model_name_ = "OCRReco";
-    flag = 0;
 
-    input_width = input_shapes_[0][3];
-    input_height = input_shapes_[0][2];
-
-    output = new float[input_width * dict_size / 4];
-
-    ai2d_out_tensor_ = this -> get_input_tensor(0);
-}
-
-OCRReco::OCRReco(const char *kmodel_file, int dict_size, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode)
-:dict_size(dict_size), AIBase(kmodel_file,"OCRReco", debug_mode)
-{
-    model_name_ = "OCRReco";
-    flag = 0;
-
-    input_width = input_shapes_[0][3];
-    input_height = input_shapes_[0][2];
-
-    output = new float[input_width * dict_size / 4];
-
-    vaddr_ = vaddr;
-
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-    int isp_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-
-    ai2d_out_tensor_ = this -> get_input_tensor(0);
-
-    Utils::resize(ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
+    ifstream dict(DICT);
+	while (!dict.eof())
+    {
+        string line;
+		while (getline(dict, line)){
+            // 如果行末有回车符 (\r)，将其去除
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
+                line.pop_back();
+            }
+            dict_.push_back(line);
+            dict_size++;
+        }
+    }    
 }
 
 OCRReco::~OCRReco()
 {
-    delete[] output;
 }
 
 void OCRReco::pre_process(cv::Mat ori_img)
 {
     ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
+    image_size_={ori_img.channels(),ori_img.rows,ori_img.cols};
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
+    ai2d_out_tensor_=get_input_tensor(0);
+    Utils::padding_resize_one_side_set(image_size_,input_size_,ai2d_builder_, cv::Scalar(114, 114, 114));
+
     std::vector<uint8_t> chw_vec;
-
-    Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);
-    Utils::padding_resize_one_side({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_out_tensor_, cv::Scalar(0, 0, 0));
-}
-
-void OCRReco::pre_process()
-{
-    ScopedTiming st(model_name_ + " pre_process video", debug_mode_);
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    ai2d_builder_->invoke(ai2d_in_tensor_, ai2d_out_tensor_).expect("error occurred in ai2d running");
+    std::vector<cv::Mat> bgrChannels(3);
+    cv::split(ori_img, bgrChannels);
+    for (auto i = 2; i > -1; i--)
+    {
+        std::vector<uint8_t> data = std::vector<uint8_t>(bgrChannels[i].reshape(1, 1));
+        chw_vec.insert(chw_vec.end(), data.begin(), data.end());
+    }
+    // 创建tensor
+    dims_t rec_in_shape { 1, ori_img.channels(), ori_img.rows, ori_img.cols };
+    runtime_tensor rec_input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, rec_in_shape, hrt::pool_shared).expect("cannot create input tensor");
+    auto rec_input_buf = rec_input_tensor.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
+    memcpy(reinterpret_cast<char *>(rec_input_buf.data()), chw_vec.data(), chw_vec.size());
+    hrt::sync(rec_input_tensor, sync_op_t::sync_write_back, true).expect("write back input failed");
+    ai2d_builder_->invoke(rec_input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void OCRReco::inference()
@@ -93,43 +79,30 @@ void OCRReco::inference()
     this->get_output();
 }
 
-void OCRReco::post_process(vector<string> &results)
+void OCRReco::post_process(std::string &results)
 {
-    output = p_outputs_[0];
-
-	int size = input_width / 4;
-
-    // std::cout << size << std::endl;
-
-	ifstream dict(DICT);
-	vector<string> txt;
-	txt.push_back("blank");
-	while (!dict.eof())
-	{
-		string line;
-		while (getline(dict, line))
-		{
-			txt.push_back(line);
-		}
-	}
-	txt.push_back("");
-
-
+    float* output = p_outputs_[0];
+	int size = input_shapes_[0][3] / 4;
 	vector<int> result;
 	for (int i = 0; i < size; i++)
 	{
-		int max_index = std::max_element(output + i * dict_size, output + i * dict_size + dict_size) - (output + i * dict_size);
-        // int max_index = std::max_element(pred,pred+output_shapes_[0][3]) - pred;
-		result.push_back(max_index);
+		float maxs = -10.f;
+		int index = -1;
+		for (int j = 0; j < dict_size; j++)
+		{
+			if (maxs < output[i * dict_size + j])
+			{
+				index = j;
+				maxs = output[i * dict_size + j];
+			}
+		}
+		result.push_back(index);
 	}
 
-	for (int i = 0; i < size; i++)
-	{
-		if (result[i] == 0)
-			continue;
-		if (i > 0 && result[i - 1] == result[i])
-			continue;
-		results.push_back(txt[result[i]]);
-	}
+	for (int i = 0; i < size; i++){
+        if (result[i] >= 0 && result[i] != 0 && !(i > 0 && result[i-1] == result[i]))
+        {
+        	results+=dict_[result[i]];
+        }
+    }
 }
-

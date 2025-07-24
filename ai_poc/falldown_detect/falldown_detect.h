@@ -28,60 +28,45 @@
 
 #include <iostream>
 #include <vector>
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
+typedef struct BoxInfo
+{
+    float x1;   
+    float y1;  
+    float x2; 
+    float y2; 
+    float score;
+    int label; 
+} BoxInfo;
 
 /**
  * @brief 摔倒检测任务
  * 主要封装了对于每一帧图片，从预处理、运行到后处理给出结果的过程
  */
-class falldownDetect: public AIBase
+class FalldownDetect: public AIBase
 {
     public:
-
-        /** 
-        * for image
-        * @brief falldownDetect 构造函数，加载kmodel,并初始化kmodel输入、输出、类阈值和NMS阈值
-        * @param kmodel_file kmodel文件路径
-        * @param obj_thresh 检测框阈值
-        * @param nms_thresh NMS阈值
-        * @param debug_mode 0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-        * @return None
-        */
-        falldownDetect(const char *kmodel_file, float obj_thresh,float nms_thresh,  const int debug_mode);
-
         /** 
         * for video
-        * @brief falldownDetect 构造函数，加载kmodel,并初始化kmodel输入、输出、类阈值和NMS阈值
+        * @brief FalldownDetect 构造函数，加载kmodel,并初始化kmodel输入、输出、类阈值和NMS阈值
         * @param kmodel_file kmodel文件路径
-        * @param obj_thresh 检测框阈值
-        * @param nms_thresh NMS阈值
-        * @param isp_shape   isp输入大小（chw）
-        * @param vaddr       isp对应虚拟地址
-        * @param paddr       isp对应物理地址
+        * @param obj_thresh  检测框阈值
+        * @param nms_thresh  NMS阈值
+        * @param image_size  输入大小
         * @param debug_mode 0（不调试）、 1（只显示时间）、2（显示所有打印信息）
         * @return None
         */
-        falldownDetect(const char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+        FalldownDetect(char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize image_size,int debug_mode);
+
         /** 
-        * @brief  falldownDetect 析构函数
+        * @brief  FalldownDetect 析构函数
         * @return None
         */
-        ~falldownDetect();
+        ~FalldownDetect();
 
-        /**
-         * @brief 图片预处理（ai2d for image）
-         * @param ori_img 原始图片
-         * @return None
-         */
-        void pre_process(cv::Mat ori_img);
-
-        /**
-         * @brief 视频流预处理（ai2d for video）
-         * @return None
-         */
-        void pre_process();
+        void pre_process(runtime_tensor &input_tensor);
 
         /**
          * @brief kmodel推理
@@ -95,11 +80,17 @@ class falldownDetect: public AIBase
         * @param result   所有候选检测框
         * @return None
         */
-        void post_process(FrameSize frame_size,std::vector<BoxInfo> &result);
+        void post_process(FrameCHWSize frame_size,std::vector<BoxInfo> &result);
+
+        void draw_result(cv::Mat& draw_img,vector<BoxInfo>& results);
 
         std::vector<std::string> labels { "Fall","NoFall" }; // 类别标签
 
     private:
+        std::vector<BoxInfo> decode_infer(float *data, int net_size, int stride, int num_classes, FrameCHWSize frame_size, float anchors[][2], float threshold);
+
+        void nms(std::vector<BoxInfo> &input_boxes, float NMS_THRESH);
+
         float obj_thresh_;  // 检测框阈值
         float nms_thresh_;  // NMS阈值
         
@@ -111,10 +102,9 @@ class falldownDetect: public AIBase
         float anchors_2_[3][2] = { { 116, 90 }, { 156, 198 }, { 373, 326 } }; // 第三组锚框
 
         std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
-        runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
         runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-        uintptr_t vaddr_;                            // isp的虚拟地址
-        FrameCHWSize isp_shape_;                     // isp对应的地址大小
+        FrameCHWSize image_size_;
+        FrameCHWSize input_size_;
 
 };
 #endif

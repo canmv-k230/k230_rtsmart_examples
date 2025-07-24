@@ -26,9 +26,15 @@
 #ifndef _OB_DET_H
 #define _OB_DET_H
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
+
+typedef struct YOLOBbox{
+	cv::Rect box;
+	float confidence;
+	int index;
+}YOLOBbox;
 
 /**
  * @brief 多目标检测
@@ -39,27 +45,15 @@ class OBDet : public AIBase
     public:
 
     /**
-        * @brief OBDet构造函数，加载kmodel,并初始化kmodel输入、输出和多目标检测阈值
-        * @param kmodel_file kmodel文件路径
-        * @param score_thres 多目标检测score_thres
-        * @param nms_thres   多目标检测nms阈值
-        * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-        * @return None
-        */
-    OBDet(const char *kmodel_file, float score_thres, float nms_thres, const int debug_mode = 1);
-
-    /**
     * @brief OBDet构造函数，加载kmodel,并初始化kmodel输入、输出和多目标检测阈值
     * @param kmodel_file kmodel文件路径
     * @param score_thres 多目标检测score_thres
     * @param nms_thres   多目标检测nms阈值
-    * @param isp_shape   isp输入大小（chw）
-    * @param vaddr       isp对应虚拟地址
-    * @param paddr       isp对应物理地址
+    * @param image_size   图片大小
     * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
     * @return None
     */    
-    OBDet(const char *kmodel_file, float score_thres, float nms_thres, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr,const int debug_mode);
+    OBDet(char *kmodel_file, float score_thres, float nms_thres, FrameCHWSize image_size, int debug_mode);
     
     /**
     * @brief OBDet析构函数
@@ -67,18 +61,7 @@ class OBDet : public AIBase
     */
     ~OBDet();
 
-    /**
-    * @brief 图片预处理
-    * @param ori_img 原始图片
-    * @return None
-    */
-    void pre_process(cv::Mat ori_img);
-
-    /**
-    * @brief 视频流预处理（ai2d for isp）
-    * @return None
-    */
-    void pre_process();
+    void pre_process(runtime_tensor &input_tensor);
 
     /**
     * @brief kmodel推理
@@ -88,55 +71,38 @@ class OBDet : public AIBase
 
     /**
     * @brief kmodel推理结果后处理
-    * @param frame_size 原始图像/帧宽高，用于将结果放到原始图像大小
     * @param results 后处理之后的基于原始图像的检测结果集合
     * @return None
     */
-    void post_process(FrameSize frame_size, vector<Detection> &detections);
+    void post_process(vector<YOLOBbox> &results);
+
+    void draw_result(cv::Mat &draw_frame, std::vector<YOLOBbox> &results);
 
     private:
 
-    /**
-    * @brief nms 非极大值抑制
-    * @param boxes  模型初始预测的检测框
-    * @param confidences 模型初始预测检测框对应的置信度
-    * @param confThreshold 置信度阈值
-    * @param nmsThreshold 非极大值抑制阈值
-    * @param indices 非极大值抑制后的检测框索引
-    * @return None
-    */
-    void nms_boxes(vector<Rect> &boxes, vector<float> &confidences, float confThreshold, float nmsThreshold, vector<int> &indices);
+    void yolov8_nms(std::vector<YOLOBbox> &bboxes,  float confThreshold, float nmsThreshold, std::vector<int> &indices);
     
-    /**
-    * @brief 计算 iou 
-    * @param rect1  检测框1
-    * @param rect2  检测框2
-    * @return float iou值
-    */
-    float get_iou_value(Rect rect1, Rect rect2);
+    float yolov8_iou_calculate(cv::Rect &rect1, cv::Rect &rect2);
 
     std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
     runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-    uintptr_t vaddr_;                            // isp的虚拟地址
-    FrameCHWSize isp_shape_;                     // isp对应的地址大小
+    FrameCHWSize image_size_;                    // 输入图像大小
+    FrameCHWSize input_size_;                    // 输入图像大小
 
     // 多目标检测类别名字
-    std::vector<std::string> classes{"person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"};
+    std::vector<std::string> labels{"person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"};
 
-    // 多目标检测 分数阈值
-    float score_thres;
-
-    // 多目标检测 nms阈值
-    float nms_thres;
-
-    // 检测条目的总数
-    int rows_det;
-
-    // 检测单个条目的维度
-    int dimensions_det;
-
-    // kmodel的输出初步处理结果
-    float *output_det;
+    int label_num_=80;
+    std::vector<cv::Scalar> colors;
+    // 置信度阈值
+    float conf_thres_;
+    // nms阈值
+    float nms_thres_;
+    // 检测框的总数
+    int box_num_;
+    int max_box_num_=50;
+    // 每个检测框的特征维度
+    int box_feature_len_;
 };
 #endif

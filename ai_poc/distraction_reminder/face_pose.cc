@@ -27,67 +27,26 @@
 
 #define PI (3.1415926)
 
-FacePose::FacePose(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"FacePose",debug_mode)
-{
-    model_name_ = "FacePose";
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-FacePose::FacePose(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : AIBase(kmodel_file,"FacePose", debug_mode)
+FacePose::FacePose(char *kmodel_file, FrameCHWSize image_size, int debug_mode) : AIBase(kmodel_file,"FacePose", debug_mode)
 {
     model_name_ = "FacePose";
 	
-    // input->isp（Fixed size）
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-#if 0
-    int in_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, in_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
-    ai2d_out_tensor_ = get_input_tensor(0);
+    image_size_=image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
+    ai2d_out_tensor_=get_input_tensor(0);
 }
 
 FacePose::~FacePose()
 {
 }
 
-// ai2d for image
-void FacePose::pre_process(cv::Mat ori_img, Bbox& bbox)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    get_affine_matrix(bbox);
-
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);
-    Utils::affine({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, affine_matrix_, ai2d_out_tensor_);
-    
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("FacePose_input_gray.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
-}
-
 // ai2d for video
-void FacePose::pre_process(Bbox& bbox)
+void FacePose::pre_process(runtime_tensor& input_tensor, Bbox& bbox)
 {
     ScopedTiming st(model_name_ + " pre_process_video", debug_mode_);
     get_affine_matrix(bbox);
-
-#if 1
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    // run ai2d
-#endif
-    Utils::affine(affine_matrix_, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("FacePose_input.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
+	Utils::affine_set(image_size_,input_size_,ai2d_builder_,affine_matrix_);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void FacePose::inference()
@@ -106,7 +65,6 @@ void FacePose::draw_result(cv::Mat& src_img,Bbox& bbox,FacePoseInfo& result, boo
 {
 	int src_width = src_img.cols;
     int src_height = src_img.rows;
-
 	float height = bbox.h;
 	float width = bbox.w;
 	float center_x = bbox.x + bbox.w / 2.0 ;
@@ -114,7 +72,6 @@ void FacePose::draw_result(cv::Mat& src_img,Bbox& bbox,FacePoseInfo& result, boo
 	float projections[8][3] = { 0.0 };
 	float radius = 0.5 * (height > width ? height : width);
 	build_projection_matrix(radius, &projections[0][0]);
-
 	std::vector<cv::Point> first_points;
 	std::vector<cv::Point> second_points;
 	for (uint32_t pp = 0; pp < 8; pp++)
@@ -134,10 +91,9 @@ void FacePose::draw_result(cv::Mat& src_img,Bbox& bbox,FacePoseInfo& result, boo
 		}
 		else
 		{
-			x = (sum_x + center_x)/isp_shape_.width*src_width;
-            y = (sum_y + center_y)/isp_shape_.height*src_height;
+			x = (sum_x + center_x)/image_size_.width*src_width;
+            y = (sum_y + center_y)/image_size_.height*src_height;
 		}
-		//check
 		point.x = std::max(0, std::min(x, src_width));
 		point.y = std::max(0, std::min(y, src_height));
 		if(pp<4)
@@ -145,7 +101,6 @@ void FacePose::draw_result(cv::Mat& src_img,Bbox& bbox,FacePoseInfo& result, boo
 		else
 			second_points.push_back(point);
 	}
-
 	if(pic_mode)
 	{
 		cv::polylines(src_img, first_points, true, cv::Scalar(0, 0, 255), 2, 8, 0);

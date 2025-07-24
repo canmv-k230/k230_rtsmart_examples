@@ -5,7 +5,6 @@ dir-y :=
 dir-$(CONFIG_RTT_AI_EXAMPLES_ANOMALY_DET) += anomaly_det
 dir-$(CONFIG_RTT_AI_EXAMPLES_BYTETRACK) += bytetrack
 dir-$(CONFIG_RTT_AI_EXAMPLES_CROSSWALK_DETECT) += crosswalk_detect
-dir-$(CONFIG_RTT_AI_EXAMPLES_DEMO_MIX) += demo_mix
 dir-$(CONFIG_RTT_AI_EXAMPLES_DISTRACTION_REMINDER) += distraction_reminder
 dir-$(CONFIG_RTT_AI_EXAMPLES_DMS_SYSTEM) += dms_system
 dir-$(CONFIG_RTT_AI_EXAMPLES_DYNAMIC_GESTURE) += dynamic_gesture
@@ -61,14 +60,7 @@ dirs := $(sort $(dir-y))
 .PHONY: all clean
 
 # Default build arguments
-BUILD_ARG ?= "hdmi"
 BUILD_OUT ?= k230_bin
-
-# Change BUILD_OUT if LCD mode is enabled
-ifeq ($(CONFIG_RTT_AI_EXAMPLES_MODE_LCD),y)
-	BUILD_ARG := "lcd"
-	BUILD_OUT := k230_bin_lcd
-endif
 
 # Default target
 all:
@@ -79,8 +71,8 @@ ifeq ($(CONFIG_RTT_ENABLE_BUILD_AI_EXAMPLES),y)
 	@mkdir -p $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC)
 
 	@$(foreach dir,$(dirs), \
-		echo "Building in directory: $(dir) with BUILD_ARG=$(BUILD_ARG)"; \
-		./build_app_sub_rtos_only.sh $(dir) $(BUILD_ARG) || exit $?;\
+		echo "Building in directory: $(dir)"; \
+		./build_app.sh $(dir) || exit $?;\
 		if [ -d $(BUILD_OUT) ]; then \
 			echo "Copying $(BUILD_OUT) to $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC)"; \
 			cp -r $(BUILD_OUT)/* $(RTT_EXAMPLES_ELF_INSTALL_PATH_AI_POC); \

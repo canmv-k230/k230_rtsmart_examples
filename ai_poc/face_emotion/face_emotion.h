@@ -26,8 +26,9 @@
 #define _FACE_EMOTION_H
 
 #include <vector>
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
+#include "face_detection.h"
 
 using std::vector;
 
@@ -46,23 +47,13 @@ class FaceEmotion : public AIBase
 {
 public:
     /**
-     * @brief FaceEmotion构造函数，加载kmodel,并初始化kmodel输入、输出(for image)
-     * @param kmodel_file       kmodel文件路径
-     * @param debug_mode        0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-     * @return None
-     */
-    FaceEmotion(const char *kmodel_file, const int debug_mode);
-
-    /**
      * @brief FaceEmotion构造函数，加载kmodel,并初始化kmodel输入、输出和人脸检测阈值(for isp)
      * @param kmodel_file       kmodel文件路径
-     * @param isp_shape         isp输入大小（chw）
-     * @param vaddr             isp对应虚拟地址
-     * @param paddr             isp对应物理地址
+     * @param image_size         输入大小
      * @param debug_mode        0（不调试）、 1（只显示时间）、2（显示所有打印信息）
      * @return None
      */
-    FaceEmotion(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+    FaceEmotion(char *kmodel_file, FrameCHWSize image_size,int debug_mode);
 
     /**
      * @brief FaceEmotion析构函数
@@ -70,20 +61,7 @@ public:
      */
     ~FaceEmotion();
 
-    /**
-     * @brief 图片预处理        （ai2d for image）
-     * @param ori_img          原始图片
-     * @param sparse_points    原始人脸检测框对应的五官点
-     * @return None
-     */
-    void pre_process(cv::Mat ori_img, float* sparse_points);
-
-    /**
-     * @brief 视频流预处理（ai2d for video）
-     * @param sparse_points    原始人脸检测框对应的五官点
-     * @return None
-     */
-    void pre_process(float* sparse_points);
+    void pre_process(runtime_tensor &input_tensor, float* sparse_points);
 
     /**
      * @brief kmodel推理
@@ -141,11 +119,10 @@ private:
     void softmax(vector<float>& input,vector<float>& output);
 
     std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
-    runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
     
-    uintptr_t vaddr_;                            // isp的虚拟地址
-    FrameCHWSize isp_shape_;                     // isp对应的地址大小
+    FrameCHWSize image_size_;
+    FrameCHWSize input_size_;
     float matrix_dst_[10];                       // 人脸affine的变换矩阵
     vector<string> label_list_;                   // 情感分类标签列表
 };

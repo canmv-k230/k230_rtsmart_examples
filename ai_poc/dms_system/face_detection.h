@@ -28,7 +28,7 @@
 #include <iostream>
 #include <vector>
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
 using std::vector;
@@ -37,6 +37,25 @@ using std::vector;
 #define CONF_SIZE 2
 #define LAND_SIZE 10
 #define PI 3.1415926
+
+/**
+ * @brief 人脸检测框
+ */
+typedef struct Bbox
+{
+    float x; // 人脸检测框的左顶点x坐标
+    float y; // 人脸检测框的左顶点x坐标
+    float w;
+    float h;
+} Bbox;
+
+/**
+ * @brief 人脸五官点
+ */
+typedef struct SparseLandmarks
+{
+    float points[10]; // 人脸五官点,依次是图片的左眼（x,y）、右眼（x,y）,鼻子（x,y）,左嘴角（x,y）,右嘴角
+} SparseLandmarks;
 
 /**
  * @brief 用于NMS排序的roi对象
@@ -67,25 +86,13 @@ public:
     /**
      * @brief FaceDetection构造函数，加载kmodel,并初始化kmodel输入、输出和人脸检测阈值
      * @param kmodel_file kmodel文件路径
-     * @param obj_thresh 人脸检测阈值，用于过滤roi
-     * @param nms_thresh 人脸检测nms阈值
-     * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-     * @return None
-     */
-    FaceDetection(const char *kmodel_file, float obj_thresh,float nms_thresh, const int debug_mode = 1);
-
-    /**
-     * @brief FaceDetection构造函数，加载kmodel,并初始化kmodel输入、输出和人脸检测阈值
-     * @param kmodel_file kmodel文件路径
      * @param obj_thresh  人脸检测阈值，用于过滤roi
      * @param nms_thresh 人脸检测nms阈值
-     * @param isp_shape   isp输入大小（chw）
-     * @param vaddr       isp对应虚拟地址
-     * @param paddr       isp对应物理地址
+     * @param image_size   isp输入大小（chw）
      * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
      * @return None
      */
-    FaceDetection(const char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+    FaceDetection(char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize input_size, int debug_mode);
 
     /**
      * @brief FaceDetection析构函数
@@ -94,25 +101,10 @@ public:
     ~FaceDetection();
 
     /**
-     * @brief 图片预处理
-     * @param ori_img 原始图片
-     * @param dst 处理后NCHW的图像数据
-     * @return None
-     */
-    void pre_process(cv::Mat ori_img, std::vector<uint8_t> &dst);
-
-    /**
-     * @brief 图片预处理，（ai2d for image）
-     * @param ori_img 原始图片
-     * @return None
-     */
-    void pre_process(cv::Mat ori_img);
-
-    /**
      * @brief 视频流预处理（ai2d for isp）
      * @return None
      */
-    void pre_process();
+    void pre_process(runtime_tensor &input_tensor);
 
     /**
      * @brief kmodel推理
@@ -126,16 +118,8 @@ public:
      * @param results 后处理之后的基于原始图像的{检测框、五官点和得分}集合
      * @return None
      */
-    void post_process(FrameSize frame_size, vector<FaceDetectionInfo> &results);
+    void post_process(FrameCHWSize frame_size, vector<FaceDetectionInfo> &results);
 
-     /**
-     * @brief 将检测结果画到原图
-     * @param src_img     原图
-     * @param results     人脸检测结果
-     * @param pic_mode    ture(原图片)，false(osd)
-     * @return None
-     */
-    void draw_result(cv::Mat& src_img,vector<FaceDetectionInfo>& results, bool pic_mode = true);
 
 private:
     /**
@@ -233,13 +217,13 @@ private:
      * @param results     后处理之后的基于原始图像的{检测框、五官点和得分}集合
      * @return None
      */
-    void get_final_box(FrameSize &frame_size, vector<FaceDetectionInfo> &results);
+    void get_final_box(FrameCHWSize &frame_size, vector<FaceDetectionInfo> &results);
 
     std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
     runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-    uintptr_t vaddr_;                            // isp的虚拟地址
-    FrameCHWSize isp_shape_;                     // isp对应的地址大小
+    FrameCHWSize image_size_;
+    FrameCHWSize input_size_;
 
     int min_size_;
     float obj_thresh_; // 人脸检测阈值

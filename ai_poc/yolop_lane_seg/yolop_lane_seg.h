@@ -27,7 +27,7 @@
 #define _YOLOP_LANE_SEG
 
 #include <vector>
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
 /**
@@ -37,25 +37,14 @@
 class SEG: public AIBase
 {
     public:
-
         /** 
         * @brief SEG 构造函数，加载kmodel,并初始化kmodel输入、输出
         * @param kmodel_file kmodel文件路径
+        * @param image_size   图片大小
         * @param debug_mode 0（不调试）、 1（只显示时间）、2（显示所有打印信息）
         * @return None
         */
-        SEG(const char *kmodel_file, const int debug_mode);
-
-        /** 
-        * @brief SEG 构造函数，加载kmodel,并初始化kmodel输入、输出
-        * @param kmodel_file kmodel文件路径
-        * @param isp_shape   isp输入大小（chw）
-        * @param vaddr       isp对应虚拟地址
-        * @param paddr       isp对应物理地址
-        * @param debug_mode 0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-        * @return None
-        */
-        SEG(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+        SEG(char *kmodel_file, FrameCHWSize image_size, int debug_mode);
 
         /** 
         * @brief  SEG 析构函数
@@ -63,18 +52,7 @@ class SEG: public AIBase
         */
         ~SEG();
 
-        /**
-         * @brief 图片预处理（ai2d for image）
-         * @param ori_img 原始图片
-         * @return None
-         */
-        void pre_process(cv::Mat ori_img);
-
-        /**
-         * @brief 视频流预处理（ai2d for video）
-         * @return None
-         */
-        void pre_process();
+        void pre_process(runtime_tensor &input_tensor);
 
         /**
          * @brief kmodel推理
@@ -86,20 +64,14 @@ class SEG: public AIBase
         * @brief postprocess 函数 for img
         * @return None
         */
-        void post_process(  cv::Mat &outimg );
-
-        /** 
-        * @brief postprocess 函数 for video
-        * @return None
-        */
-        void post_process_video(  cv::Mat &outimg );
+        void post_process(cv::Mat &draw_frame);
 
     private:
         
         std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
         runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
         runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-        uintptr_t vaddr_;                            // isp的虚拟地址
-        FrameCHWSize isp_shape_;                     // isp对应的地址大小
+        FrameCHWSize image_size_;
+        FrameCHWSize input_size_;
 };
 #endif

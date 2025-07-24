@@ -26,7 +26,7 @@
 #ifndef _LICENCE_RECO_H
 #define _LICENCE_RECO_H
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
 /**
@@ -40,22 +40,11 @@ class LicenceReco : public AIBase
         * @brief LicenceReco构造函数，加载kmodel,并初始化kmodel输入、输出和车牌识别字典大小
         * @param kmodel_file kmodel文件路径
         * @param dict_size   车牌识别字典大小
+        * @param image_size  图片大小
         * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
         * @return None
         */
-        LicenceReco(const char *kmodel_file, int dict_size, const int debug_mode = 1);
-
-        /**
-        * @brief LicenceReco构造函数，加载kmodel,并初始化kmodel输入、输出和车牌识别字典大小
-        * @param kmodel_file kmodel文件路径
-        * @param dict_size   车牌识别字典大小
-        * @param isp_shape   isp输入大小（chw）
-        * @param vaddr       isp对应虚拟地址
-        * @param paddr       isp对应物理地址
-        * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-        * @return None
-        */
-        LicenceReco(const char *kmodel_file, int dict_size, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+        LicenceReco(char *kmodel_file,int debug_mode);
         
         /**
         * @brief LicenceReco析构函数
@@ -63,18 +52,7 @@ class LicenceReco : public AIBase
         */
         ~LicenceReco();
 
-        /**
-        * @brief 图片预处理
-        * @param ori_img 原始图片
-        * @return None
-        */
-        void pre_process(cv::Mat ori_img);
-        
-        /**
-        * @brief 视频流预处理（ai2d for isp）
-        * @return None
-        */
-        void pre_process();
+        void pre_process(cv::Mat &input_img);
 
         /**
         * @brief kmodel推理
@@ -87,24 +65,27 @@ class LicenceReco : public AIBase
         * @param results 后处理之后的字符的十六进制集合
         * @return None
         */
-        void post_process(vector<unsigned char> &results);
+        void post_process(std::string &results);
 
-
+        // void draw_result(cv::Mat& draw_frame, int x,int y,std::string &results);
 
     private:
         std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
         runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
         runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-        uintptr_t vaddr_;                            // isp的虚拟地址
-        FrameCHWSize isp_shape_;                     // isp对应的地址大小
+        FrameCHWSize image_size_;                    // 图片大小
+        FrameCHWSize input_size_;                    // 模型输入大小
 
         int input_width;        //车牌识别model输入高
         int input_height;       //车牌识别model输入宽
-        
-        int dict_size;          //车牌识别字典大小
-
+        // 字符字典表
+        std::vector<std::string> dict = {
+            "挂", "使", "领", "澳", "港", "皖", "沪", "津", "渝", "冀", "晋", "蒙", "辽", "吉", "黑", "苏", "浙", "京", "闽", "赣", "鲁", "豫", "鄂", "湘", "粤", "桂", "琼", "川", "贵", "云", "藏", "陕", "甘", "青", "宁", "新", "警", "学",
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+            "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+            "_", "-"
+        };
+        int dict_size=74;          //车牌识别字典大小
         int flag;               //车牌用于控制是否带空格
-
-        float *output;          //车牌后处理的输入
 };
 #endif

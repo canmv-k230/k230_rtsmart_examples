@@ -25,70 +25,23 @@
 
 #include "pphumanseg.h"
 
-// for image
-SEG::SEG(const char *kmodel_file, const int debug_mode): AIBase(kmodel_file,"pphumanseg", debug_mode)
-{
-
-    model_name_ = "pphumanseg";
-    
-    ai2d_out_tensor_ = get_input_tensor(0);
-
-}
-
-
-// for video
-SEG::SEG(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode):AIBase(kmodel_file,"pphumanseg", debug_mode)
+SEG::SEG(char *kmodel_file, FrameCHWSize image_size, int debug_mode):AIBase(kmodel_file,"pphumanseg", debug_mode)
 {
     model_name_ = "pphumanseg";
-    
-    vaddr_ = vaddr;
-
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape_.channel, isp_shape_.height, isp_shape_.width};
-    int isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    #if 0
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, isp_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-    #else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-    #endif
-
-    // ai2d_out_tensor
-    ai2d_out_tensor_ = get_input_tensor(0);
-    // fixed padding resize param
-    Utils::resize(ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
+    image_size_=image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
+    ai2d_out_tensor_=get_input_tensor(0);
+    Utils::resize_set(image_size_,input_size_,ai2d_builder_);
 }
 
 
 SEG::~SEG()
 {
-
 }
 
-// ai2d for image
-void SEG::pre_process(cv::Mat ori_img)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    std::vector<uint8_t> chw_vec;
-    Utils::hwc_to_chw(ori_img, chw_vec);
-    // Utils::padding_resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_out_tensor_, cv::Scalar(114, 114, 114));
-    Utils::resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, ai2d_out_tensor_);
-}
-
-// ai2d for video
-void SEG::pre_process()
-{
+void SEG::pre_process(runtime_tensor& input_tensor){
     ScopedTiming st(model_name_ + " pre_process video", debug_mode_);
-    #if 0
-    ai2d_builder_->invoke().expect("error occurred in ai2d running");
-    #else
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    ai2d_builder_->invoke(ai2d_in_tensor_,ai2d_out_tensor_).expect("error occurred in ai2d running");
-    // run ai2d
-    #endif
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");	
 }
 
 void SEG::inference()
@@ -98,26 +51,13 @@ void SEG::inference()
     this->get_output();
 }
 
-cv::Mat SEG::post_process( )
+void SEG::post_process(cv::Mat &draw_frame)
 {
-
     ScopedTiming st(model_name_ + " post_process", debug_mode_);
     float *output = p_outputs_[0];
     int net_len_w = input_shapes_[0][2];
     int net_len_h = input_shapes_[0][3];
     cv::Mat mask = cv::Mat::ones(net_len_w, net_len_h, CV_8UC1) * 255;
-
-    // {
-    //     // for NCHW
-	// 	for (int i = 0; i < net_len_h; i++)
-	// 	{
-	// 		for (int j = 0; j < net_len_w; j++)
-	// 		{
-	// 			mask.at<uchar>(i, j) = (output[j + net_len_w * i] > output[j + net_len_w * i + net_len_w * net_len_h] ? 255 : 0);
-	// 		}
-	// 	}
-    // }
-
 	{
         // for NHWC
 		for (int i = 0; i < net_len_h; i++)
@@ -130,6 +70,9 @@ cv::Mat SEG::post_process( )
 		}
 	}
 
-	cv::imwrite("mask.jpg", mask);
-	return mask;
+    cv::resize(mask, mask, cv::Size(draw_frame.cols, draw_frame.rows), 0, 0); 
+    draw_frame.setTo(cv::Scalar(255, 255, 255, 255), mask);
+
 }
+
+

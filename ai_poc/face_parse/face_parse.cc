@@ -48,47 +48,32 @@ cv::Vec3b color_list_for_pixel[] = {
 	};
 
 cv::Vec4b color_list_for_osd_pixel[] = {
-    cv::Vec4b(255,220, 20, 60),
-    cv::Vec4b(255,0, 0, 142),
-    cv::Vec4b(255,119, 11, 32),
-    cv::Vec4b(255,0, 0, 230),
-    cv::Vec4b(255,106, 0, 228),
-    cv::Vec4b(255,0, 60, 100),
-    cv::Vec4b(255,0, 80, 100),
-    cv::Vec4b(255,0, 0, 70),
-    cv::Vec4b(255,0, 0, 192),
-    cv::Vec4b(255,250, 170, 30),
-	cv::Vec4b(255,100, 170, 30),
-	cv::Vec4b(255,220, 220, 0),
-	cv::Vec4b(255,175, 116, 175),
-	cv::Vec4b(255,250, 0, 30),
-	cv::Vec4b(255,165, 42, 42),
-	cv::Vec4b(255,255, 77, 255),
-	cv::Vec4b(255,0, 226, 252),
-	cv::Vec4b(255,182, 182, 255),
-	cv::Vec4b(255,0, 82, 0)
+    cv::Vec4b(60, 20, 220, 255),
+    cv::Vec4b(142, 0, 0, 255),
+    cv::Vec4b(32, 11, 119, 255),
+    cv::Vec4b(230, 0, 0, 255),
+    cv::Vec4b(228, 0, 106, 255),
+    cv::Vec4b(100, 60, 0, 255),
+    cv::Vec4b(100, 80, 0, 255),
+    cv::Vec4b(70, 0, 0, 255),
+    cv::Vec4b(192, 0, 0, 255),
+    cv::Vec4b(30, 170, 250, 255),
+    cv::Vec4b(30, 170, 100, 255),
+    cv::Vec4b(0, 220, 220, 255),
+    cv::Vec4b(175, 116, 175, 255),
+    cv::Vec4b(30, 0, 250, 255),
+    cv::Vec4b(42, 42, 165, 255),
+    cv::Vec4b(255, 77, 255, 255),
+    cv::Vec4b(252, 226, 0, 255),
+    cv::Vec4b(255, 182, 182, 255),
+    cv::Vec4b(0, 82, 0, 255)
 };
 
-FaceParse::FaceParse(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"FaceParse",debug_mode)
+FaceParse::FaceParse(char *kmodel_file, FrameCHWSize image_size, int debug_mode) : AIBase(kmodel_file,"FaceParse", debug_mode)
 {
     model_name_ = "FaceParse";
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-FaceParse::FaceParse(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : AIBase(kmodel_file,"FaceParse", debug_mode)
-{
-    model_name_ = "FaceParse";
-    // input->isp（Fixed size）
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-#if 0
-    int in_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, in_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
+    image_size_=image_size;
+	input_size_={input_shapes_[0][1],input_shapes_[0][2],input_shapes_[0][3]};
     ai2d_out_tensor_ = get_input_tensor(0);
 }
 
@@ -96,42 +81,12 @@ FaceParse::~FaceParse()
 {
 }
 
-// ai2d for image
-void FaceParse::pre_process(cv::Mat ori_img, Bbox &bbox)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
+void FaceParse::pre_process(runtime_tensor& input_tensor, Bbox &bbox){
+	ScopedTiming st(model_name_ + " pre_process", debug_mode_);
     get_affine_matrix(bbox);
-
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);
-
 	float *matrix_dst_ptr = matrix_dst_.ptr<float>();
-    Utils::affine({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, matrix_dst_ptr, ai2d_out_tensor_);
-    
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("FaceParse_input_gray.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
-}
-
-// ai2d for video
-void FaceParse::pre_process(Bbox& bbox)
-{
-    ScopedTiming st(model_name_ + " pre_process_video", debug_mode_);
-    get_affine_matrix(bbox);
-
-#if 1
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    // run ai2d
-#endif
-	float *matrix_dst_ptr = matrix_dst_.ptr<float>();
-    Utils::affine(matrix_dst_ptr, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("FaceParse_input.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
+    Utils::affine_set(image_size_, input_size_,ai2d_builder_, matrix_dst_ptr);
+	ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void FaceParse::inference()
@@ -174,10 +129,10 @@ void FaceParse::post_process(cv::Mat& src_img,Bbox& bbox, bool pic_mode)
 		
 		//1. get final affine matrix
 		//1.1 get affine matrix for osd shape
-		bbox.x = float(bbox.x)/isp_shape_.width*src_w;
-		bbox.y = float(bbox.y)/isp_shape_.height*src_h;
-		bbox.w = float(bbox.w)/isp_shape_.width*src_w;
-		bbox.h = float(bbox.h)/isp_shape_.height*src_h;
+		bbox.x = float(bbox.x)/image_size_.width*src_w;
+		bbox.y = float(bbox.y)/image_size_.height*src_h;
+		bbox.w = float(bbox.w)/image_size_.width*src_w;
+		bbox.h = float(bbox.h)/image_size_.height*src_h;
 		get_affine_matrix_for_osd(bbox);
 		
 		//1.2 get invert affine matrix

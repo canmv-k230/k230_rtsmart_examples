@@ -26,8 +26,9 @@
 #define _FACE_VERIFICATION_H
 
 #include <vector>
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
+#include "face_detection.h"
 
 using std::vector;
 
@@ -44,7 +45,7 @@ public:
      * @param debug_mode        0（不调试）、 1（只显示时间）、2（显示所有打印信息）
      * @return None
      */
-    FaceVerification(const char *kmodel_file, const int debug_mode);
+    FaceVerification(char *kmodel_file, FrameCHWSize image_size,int debug_mode);
 
     /**
      * @brief FaceVerification析构函数
@@ -52,13 +53,7 @@ public:
      */
     ~FaceVerification();
 
-    /**
-     * @brief 图片预处理        （ai2d for image）
-     * @param ori_img          原始图片
-     * @param sparse_points    原始人脸检测框对应的五官点
-     * @return None
-     */
-    void pre_process(cv::Mat ori_img, float *sparse_points);
+    void pre_process(runtime_tensor& input_tensor, float *sparse_points);
 
     /**
      * @brief kmodel推理
@@ -121,11 +116,10 @@ private:
     float cal_cosine_distance(float *feature_0, float *feature_1, int feature_len);
 
     std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
-    runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
 
-    uintptr_t vaddr_;        // isp的虚拟地址
-    FrameCHWSize isp_shape_; // isp对应的地址大小
+    FrameCHWSize image_size_; 
+    FrameCHWSize input_size_;
     float matrix_dst_[10];   // 人脸affine的变换矩阵
     int feature_num_;        // 人脸识别提取特征长度
 };

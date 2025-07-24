@@ -27,7 +27,7 @@
 #include "constant.h"
 
 // for image
-FaceMeshPost::FaceMeshPost(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"FaceMeshPost", debug_mode)
+FaceMeshPost::FaceMeshPost(char *kmodel_file,int debug_mode) : AIBase(kmodel_file,"FaceMeshPost", debug_mode)
 {
     model_name_ = "FaceMeshPost";
 }
@@ -80,7 +80,7 @@ void FaceMeshPost::inference()
 void FaceMeshPost::post_process(vector<float>& vertices)
 {
     ScopedTiming st(model_name_ + " post_process", debug_mode_);
-    int out_size = (each_output_size_by_byte_[1]-each_output_size_by_byte_[0])/sizeof(float);
+    int out_size = output_shapes_[0][0] * output_shapes_[0][1];
     vertices.insert(vertices.end(),p_outputs_[0],p_outputs_[0]+out_size);
 }
 

@@ -39,10 +39,10 @@ cv::Scalar color_list_for_det[] = {
 
 cv::Scalar color_list_for_osd_det[] = {
     cv::Scalar(255, 0, 0, 255),
-    cv::Scalar(255, 0, 255, 255),
     cv::Scalar(255, 255, 0, 255),
-    cv::Scalar(255, 0, 255, 0),
-    cv::Scalar(255, 255, 0, 0)
+    cv::Scalar(0, 255, 255, 255),
+    cv::Scalar(0, 255, 0, 255),
+    cv::Scalar(0, 0, 255, 255)
 };
 
 int nms_comparator(const void *pa, const void *pb)
@@ -58,26 +58,9 @@ int nms_comparator(const void *pa, const void *pb)
     return 0;
 }
 
-// for image
-FaceDetection::FaceDetection(const char *kmodel_file, float obj_thresh,float nms_thresh, const int debug_mode) : obj_thresh_(obj_thresh), AIBase(kmodel_file,"FaceDetection", debug_mode)
-{
-    model_name_ = "FaceDetection";
-    nms_thresh_ = nms_thresh;
-
-    int net_len = input_shapes_[0][2]; // input_shapes_[0][2]==input_shapes_[0][3]
-    min_size_ = (net_len == 320 ? 200 : 800);
-    g_anchors = (net_len == 320 ? kAnchors320 : kAnchors640);
-    objs_num_ = min_size_ * (1 + 4 + 16);
-
-    so_ = new NMSRoiObj[objs_num_];
-    boxes_ = new float[objs_num_ * LOC_SIZE];
-    landmarks_ = new float[objs_num_ * LAND_SIZE];
-
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
 // for video
-FaceDetection::FaceDetection(const char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : obj_thresh_(obj_thresh), AIBase(kmodel_file,"FaceDetection", debug_mode)
+FaceDetection::FaceDetection(const char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize image_size, int debug_mode) 
+:obj_thresh_(obj_thresh), AIBase(kmodel_file,"FaceDetection", debug_mode)
 {
     model_name_ = "FaceDetection";
     nms_thresh_ = nms_thresh;
@@ -85,62 +68,20 @@ FaceDetection::FaceDetection(const char *kmodel_file, float obj_thresh,float nms
     min_size_ = (net_len == 320 ? 200 : 800);
     g_anchors = (net_len == 320 ? kAnchors320 : kAnchors640);
     objs_num_ = min_size_ * (1 + 4 + 16);
-    vaddr_ = vaddr;
-
     so_ = new NMSRoiObj[objs_num_];
     boxes_ = new float[objs_num_ * LOC_SIZE];
     landmarks_ = new float[objs_num_ * LAND_SIZE];
-
-    // ai2d_in_tensor to isp
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-    int isp_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-#if 0
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, isp_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
-
-    ai2d_out_tensor_ = get_input_tensor(0);
-
-    // fixed padding resize param
-    Utils::padding_resize_one_side(isp_shape, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_, cv::Scalar(104, 117, 123));
+    image_size_=image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
+    ai2d_out_tensor_=get_input_tensor(0);
+    Utils::padding_resize_one_side_set(image_size_,input_size_,ai2d_builder_, cv::Scalar(114, 114, 114));
 }
 
 // opencv for image
-void FaceDetection::pre_process(cv::Mat ori_img, std::vector<uint8_t> &dst)
+void FaceDetection::pre_process(runtime_tensor &input_tensor)
 {
     ScopedTiming st(model_name_ + " pre_process", debug_mode_);
-    cv::Mat padding_resize_img = Utils::padding_resize(ori_img, {input_shapes_[0][3], input_shapes_[0][2]});
-    Utils::bgr2rgb_and_hwc2chw(padding_resize_img,dst);
-}
-
-// ai2d for image
-void FaceDetection::pre_process(cv::Mat ori_img)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img,chw_vec);
-    Utils::padding_resize_one_side({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_out_tensor_, cv::Scalar(104, 117, 123));
-}
-
-// ai2d for video
-void FaceDetection::pre_process()
-{
-    ScopedTiming st(model_name_ + " pre_process video", debug_mode_);
-#if 0
-    ai2d_builder_->invoke(ai2d_in_tensor_,ai2d_out_tensor_).expect("error occurred in ai2d running");
-#else
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    ai2d_builder_->invoke(ai2d_in_tensor_,ai2d_out_tensor_).expect("error occurred in ai2d running");
-#endif
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_color_image("FaceDetection_input_padding.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void FaceDetection::inference()
@@ -149,7 +90,7 @@ void FaceDetection::inference()
     this->get_output();
 }
 
-void FaceDetection::post_process(FrameSize frame_size, vector<FaceDetectionInfo> &results)
+void FaceDetection::post_process(FrameCHWSize frame_size, vector<FaceDetectionInfo> &results)
 {
     ScopedTiming st(model_name_ + " post_process", debug_mode_);
     int obj_cnt = 0;
@@ -187,8 +128,8 @@ void FaceDetection::draw_result(cv::Mat& src_img,vector<FaceDetectionInfo>& resu
             }
             else
             {
-                int32_t x0 = l.points[2 * ll]/isp_shape_.width*src_w;
-                int32_t y0 = l.points[2 * ll+1]/isp_shape_.height*src_h;
+                int32_t x0 = l.points[2 * ll]/image_size_.width*src_w;
+                int32_t y0 = l.points[2 * ll+1]/image_size_.height*src_h;
                 cv::circle(src_img, cv::Point(x0, y0), 4, color_list_for_osd_det[ll], 8); 
             }
         }
@@ -203,16 +144,16 @@ void FaceDetection::draw_result(cv::Mat& src_img,vector<FaceDetectionInfo>& resu
         }
         else
         {
-            int x = b.x / isp_shape_.width * src_w;
-            int y = b.y / isp_shape_.height * src_h;
-            int w = b.w / isp_shape_.width * src_w;
-            int h = b.h / isp_shape_.height * src_h;
+            int x = b.x / image_size_.width * src_w;
+            int y = b.y / image_size_.height * src_h;
+            int w = b.w / image_size_.width * src_w;
+            int h = b.h / image_size_.height * src_h;
             cv::rectangle(src_img, cv::Rect(x, y , w, h), cv::Scalar(255,255, 255, 255), 6, 2, 0);
         }        
     }
 }
 
-void FaceDetection::get_final_box(FrameSize &frame_size, vector<FaceDetectionInfo> &results)
+void FaceDetection::get_final_box(FrameCHWSize &frame_size, vector<FaceDetectionInfo> &results)
 {
     int iou_cal_times = 0;
     int i, j, obj_index;

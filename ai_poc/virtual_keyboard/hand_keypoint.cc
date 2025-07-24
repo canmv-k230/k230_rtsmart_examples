@@ -24,28 +24,12 @@
  */
 #include "hand_keypoint.h"
 
-HandKeypoint::HandKeypoint(const char *kmodel_file, const int debug_mode)
-:AIBase(kmodel_file, "HandKeypoint", debug_mode)
-{
-    model_name_ = "HandKeypoint";
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-HandKeypoint::HandKeypoint(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode)
+HandKeypoint::HandKeypoint(char *kmodel_file, FrameCHWSize image_size, int debug_mode)
 : AIBase(kmodel_file,"HandKeypoint", debug_mode)
 {
     model_name_ = "HandKeypoint";
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-    int isp_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-#if 0
-    int in_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, in_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
+    image_size_ = image_size;
+    input_size_ = {input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
     ai2d_out_tensor_ = get_input_tensor(0);
 }
 
@@ -53,25 +37,11 @@ HandKeypoint::~HandKeypoint()
 {
 }
 
-void HandKeypoint::pre_process(cv::Mat ori_img, Bbox &bbox)
+void HandKeypoint::pre_process(runtime_tensor& input_tensor,Bbox &bbox)
 {
     ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    std::vector<uint8_t> chw_vec;
-    Utils::hwc_to_chw(ori_img, chw_vec);
-    Utils::crop_resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, bbox, ai2d_out_tensor_);
-}
-
-// for video
-void HandKeypoint::pre_process(Bbox &bbox)
-{
-    ScopedTiming st(model_name_ + " pre_process_video", debug_mode_);
-#if 1
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-#endif
-    Utils::crop_resize(bbox, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
+    Utils::crop_resize_set(image_size_,input_size_,bbox.x,bbox.y,bbox.w,bbox.h,ai2d_builder_);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");   
 }
 
 void HandKeypoint::inference()
@@ -87,112 +57,178 @@ void HandKeypoint::post_process(Bbox &bbox)
     // 绘制关键点像素坐标
     int64_t output_tensor_size = output_shapes_[0][1];// 关键点输出 （x,y）*21= 42
     results.clear();
-    minX = 1088;
-    maxX = 0;
-    minY = 1088;
-    maxY = 0;
-
     for (unsigned i = 0; i < output_tensor_size / 2; i++)
     {
         float x_kp;
         float y_kp;
-        x_kp = static_cast<int>(pred[i * 2] * bbox.w + bbox.x);
-        if (x_kp<minX)
-        {
-            minX = x_kp;
-        }
-        if (x_kp>maxX)
-        {
-            maxX = x_kp;
-        }
-        y_kp = static_cast<int>(pred[i * 2 + 1] * bbox.h + bbox.y);
-        if (y_kp<minY)
-        {
-            minY = y_kp;
-        }
-        if (y_kp>maxY)
-        {
-            maxY = y_kp;
-        }
+        x_kp = pred[i * 2] * bbox.w + bbox.x;
+        y_kp = pred[i * 2 + 1] * bbox.h + bbox.y;
 
-        results.push_back(x_kp);
-        results.push_back(y_kp);
+        results.push_back(static_cast<int>(x_kp));
+        results.push_back(static_cast<int>(y_kp));
 
     }
 }
 
-void HandKeypoint::draw_keypoints(cv::Mat &img, Bbox &bbox, bool pic_mode)
+void HandKeypoint::draw_result(cv::Mat &img, std::string text, Bbox &bbox)
 {
     ScopedTiming st(model_name_ + " draw_keypoints", debug_mode_);
-    // 绘制关键点像素坐标
-    if(pic_mode)
+    int img_w = img.cols;
+    int img_h = img.rows;
+    int64_t output_tensor_size = output_shapes_[0][1];// 关键点输出 （x,y）*21= 42
+    std::vector<int>results_vd(output_tensor_size);
+
+    int x =  int(bbox.x / image_size_.width * img_w);
+    int y =  int(bbox.y / image_size_.height  * img_h);
+    int w = int((bbox.w) / image_size_.width * img_w);
+    int h = int((bbox.h) / image_size_.height  * img_h);
+    if(img.channels()==3){
+        cv::rectangle(img, cv::Rect( x,y,w,h ), cv::Scalar(0,0, 255), 4, 2, 0); 
+        cv::putText(img, text, cv::Point(x, y-20), cv::FONT_HERSHEY_SIMPLEX, 2, cv::Scalar(0, 255, 0), 1);
+    }
+    else{
+        cv::rectangle(img, cv::Rect( x,y,w,h ), cv::Scalar(0,0,255, 255), 4, 2, 0); 
+        cv::putText(img, text, cv::Point(x, y-20), cv::FONT_HERSHEY_SIMPLEX, 2, cv::Scalar(0, 255, 0,255), 1);
+    }
+
+    for (unsigned i = 0; i < output_tensor_size / 2; i++)
     {
-        for (unsigned i = 0; i < results.size() / 2; i++)
+        results_vd[i * 2] = static_cast<float>(results[i*2]) / image_size_.width * img_w;
+        results_vd[i * 2 + 1] = static_cast<float>(results[i*2+1]) / image_size_.height * img_h;
+        if(img.channels()==3){
+            cv::circle(img, cv::Point(results_vd[i * 2], results_vd[i * 2 + 1]), 4, cv::Scalar(155, 255, 255), 3);
+        }else{
+            cv::circle(img, cv::Point(results_vd[i * 2], results_vd[i * 2 + 1]), 4, cv::Scalar(155, 255, 255, 255), 4);
+        }
+        
+    }
+
+    for (unsigned k = 0; k < 5; k++)
+    {
+        int i = k*8;
+        unsigned char R = 255, G = 0, B = 0;
+
+        switch(k)
         {
-            cv::circle(img, cv::Point(results[i * 2], results[i * 2 + 1]), 2, cv::Scalar(255, 155, 0), 3);
+            case 0:R = 255; G = 0; B = 0;break;
+            case 1:R = 255; G = 0; B = 255;break;
+            case 2:R = 255; G = 255; B = 0;break;
+            case 3:R = 0; G = 255; B = 0;break;
+            case 4:R = 0; G = 0; B = 255;break;
+            default: std::cout << "error" << std::endl;
         }
 
-        for (unsigned k = 0; k < 5; k++)
-        {
-            int i = k*8;
-            unsigned char R = 255, G = 0, B = 0;
-
-            switch(k)
-            {
-                case 0:R = 255; G = 0; B = 0;break;
-                case 1:R = 255; G = 0; B = 255;break;
-                case 2:R = 255; G = 255; B = 0;break;
-                case 3:R = 0; G = 255; B = 0;break;
-                case 4:R = 0; G = 0; B = 255;break;
-                default: std::cout << "error" << std::endl;
-            }
-
+        if(img.channels()==3){
             cv::line(img, cv::Point(results[0], results[1]), cv::Point(results[i + 2], results[i + 3]), cv::Scalar(B,G,R), 2, cv::LINE_AA);
             cv::line(img, cv::Point(results[i + 2], results[i + 3]), cv::Point(results[i + 4], results[i + 5]), cv::Scalar(B, G, R), 2, cv::LINE_AA);
             cv::line(img, cv::Point(results[i + 4], results[i + 5]), cv::Point(results[i + 6], results[i + 7]), cv::Scalar(B, G, R), 2, cv::LINE_AA);
             cv::line(img, cv::Point(results[i + 6], results[i + 7]), cv::Point(results[i + 8], results[i + 9]), cv::Scalar(B, G, R), 2, cv::LINE_AA);
         }
-    }
-    else
-    { 
-        int osd_width = img.cols;
-        int osd_height = img.rows;
-        int SENSOR_HEIGHT = isp_shape_.height;
-        int SENSOR_WIDTH =  isp_shape_.width;  
-        int64_t output_tensor_size = output_shapes_[0][1];// 关键点输出 （x,y）*21= 42
-        std::vector<int>results_vd(output_tensor_size);
-        for (unsigned i = 0; i < output_tensor_size / 2; i++)
-        {
-            results_vd[i * 2] = static_cast<float>(results[i*2]) / SENSOR_WIDTH * osd_width;
-            results_vd[i * 2 + 1] = static_cast<float>(results[i*2+1]) / SENSOR_HEIGHT * osd_height;
-            cv::circle(img, cv::Point(results_vd[i * 2], results_vd[i * 2 + 1]), 4, cv::Scalar(255, 255, 155, 0), 4);
-        }
-
-        for (unsigned k = 0; k < 5; k++)
-        {
-            int i = k*8;
-            unsigned char R = 255, G = 0, B = 0;
-
-            switch(k)
-            {
-                case 0:R = 255; G = 0; B = 0;break;
-                case 1:R = 255; G = 0; B = 255;break;
-                case 2:R = 255; G = 255; B = 0;break;
-                case 3:R = 0; G = 255; B = 0;break;
-                case 4:R = 0; G = 0; B = 255;break;
-                default: std::cout << "error" << std::endl;
-            }
-
-            cv::line(img, cv::Point(results_vd[0], results_vd[1]), cv::Point(results_vd[i + 2], results_vd[i + 3]), cv::Scalar(255, B,G,R), 2, cv::LINE_AA);
-            cv::line(img, cv::Point(results_vd[i + 2], results_vd[i + 3]), cv::Point(results_vd[i + 4], results_vd[i + 5]), cv::Scalar(255, B, G, R), 2, cv::LINE_AA);
-            cv::line(img, cv::Point(results_vd[i + 4], results_vd[i + 5]), cv::Point(results_vd[i + 6], results_vd[i + 7]), cv::Scalar(255, B, G, R), 2, cv::LINE_AA);
-            cv::line(img, cv::Point(results_vd[i + 6], results_vd[i + 7]), cv::Point(results_vd[i + 8], results_vd[i + 9]), cv::Scalar(255, B, G, R), 2, cv::LINE_AA);
+        else{
+            cv::line(img, cv::Point(results_vd[0], results_vd[1]), cv::Point(results_vd[i + 2], results_vd[i + 3]), cv::Scalar(B,G,R,255), 2, cv::LINE_AA);
+            cv::line(img, cv::Point(results_vd[i + 2], results_vd[i + 3]), cv::Point(results_vd[i + 4], results_vd[i + 5]), cv::Scalar(B, G, R,255), 2, cv::LINE_AA);
+            cv::line(img, cv::Point(results_vd[i + 4], results_vd[i + 5]), cv::Point(results_vd[i + 6], results_vd[i + 7]), cv::Scalar(B, G, R,255), 2, cv::LINE_AA);
+            cv::line(img, cv::Point(results_vd[i + 6], results_vd[i + 7]), cv::Point(results_vd[i + 8], results_vd[i + 9]), cv::Scalar(B, G, R,255), 2, cv::LINE_AA);
         }
     }
 }
 
-vector<float*> HandKeypoint::get_out()
+void HandKeypoint::get_two_point(cv::Mat &img,std::vector<int> &two_point)
 {
-    return p_outputs_;
+    ScopedTiming st(model_name_ + " draw_keypoints", debug_mode_);
+    //食指和中指指尖坐标
+    two_point.push_back(results[8]*1.0/image_size_.width*img.cols);
+    two_point.push_back(results[9]*1.0/image_size_.height*img.rows);
+    two_point.push_back(results[16]*1.0/image_size_.width*img.cols);
+    two_point.push_back(results[17]*1.0/image_size_.height*img.rows);
+
 }
 
+double HandKeypoint::vector_2d_angle(std::vector<double> v1, std::vector<double> v2)
+{
+    double v1_x = v1[0];
+    double v1_y = v1[1];
+    double v2_x = v2[0];
+    double v2_y = v2[1];
+    double v1_norm = std::sqrt(v1_x * v1_x + v1_y * v1_y);
+    double v2_norm = std::sqrt(v2_x * v2_x + v2_y * v2_y);
+    double dot_product = v1_x * v2_x + v1_y * v2_y;
+    double cos_angle = dot_product / (v1_norm * v2_norm);
+    double angle = std::acos(cos_angle) * 180 / M_PI;
+    if (angle > 180.0)
+    {
+        return 65535.0;
+    }
+    return angle;
+}
+
+std::vector<double> HandKeypoint::hand_angle()
+{
+    double angle_;
+    std::vector<double> angle_list;
+    //---------------------------- thumb 大拇指角度
+    angle_ = vector_2d_angle(
+        {(results[0] - results[4]), (results[1] - results[5])},
+        {(results[6] - results[8]), (results[7] - results[9])}
+    );
+    angle_list.push_back(angle_);
+    //---------------------------- index 食指角度
+    angle_ = vector_2d_angle(
+        {(results[0] - results[12]), (results[1] - results[13])},
+        {(results[14] - results[16]), (results[15] - results[17])}
+    );
+    angle_list.push_back(angle_);
+    //---------------------------- middle 中指角度
+    angle_ = vector_2d_angle(
+        {(results[0] - results[20]), (results[1] - results[21])},
+        {(results[22] - results[24]), (results[23] - results[25])}
+    );
+    angle_list.push_back(angle_);
+    //---------------------------- ring 无名指角度
+    angle_ = vector_2d_angle(
+        {(results[0] - results[28]), (results[1] - results[29])},
+        {(results[30] - results[32]), (results[31] - results[33])}
+    );
+    angle_list.push_back(angle_);
+    //---------------------------- pink 小拇指角度
+    angle_ = vector_2d_angle(
+        {(results[0] - results[36]), (results[1] - results[37])},
+        {(results[38] - results[40]), (results[39] - results[41])}
+    );
+    angle_list.push_back(angle_);
+    return angle_list;
+}
+
+std::string HandKeypoint::h_gesture(std::vector<double> angle_list)
+{
+    int thr_angle = 65;
+    int thr_angle_thumb = 53;
+    int thr_angle_s = 49;
+    std::string gesture_str="other";
+
+    bool present = std::find(angle_list.begin(),angle_list.end(),65535) != angle_list.end();
+    if (present)
+    {
+        std::cout<<"gesture_str:"<<gesture_str<<std::endl;
+    }else{
+        if (angle_list[0]>thr_angle_thumb && angle_list[1]>thr_angle && angle_list[2]>thr_angle && (angle_list[3]>thr_angle) && (angle_list[4]>thr_angle))
+            {gesture_str = "fist";}
+        else if ((angle_list[1]<thr_angle_s) && (angle_list[2]<thr_angle_s) && (angle_list[3]<thr_angle_s) && (angle_list[4]<thr_angle_s))
+            {gesture_str = "five";}
+        else if ((angle_list[0]<thr_angle_s)  && (angle_list[1]<thr_angle_s) && (angle_list[2]>thr_angle) && (angle_list[3]>thr_angle) && (angle_list[4]>thr_angle))
+            {gesture_str = "gun";}
+        else if ((angle_list[0]<thr_angle_s)  && (angle_list[1]<thr_angle_s) && (angle_list[2]>thr_angle) && (angle_list[3]>thr_angle) && (angle_list[4]<thr_angle_s))
+            {gesture_str = "love";}
+        else if ((angle_list[0]>5)  && (angle_list[1]<thr_angle_s) && (angle_list[2]>thr_angle) && (angle_list[3]>thr_angle) && (angle_list[4]>thr_angle))
+            {gesture_str = "one";}
+        else if ((angle_list[0]<thr_angle_s)  && (angle_list[1]>thr_angle) && (angle_list[2]>thr_angle) && (angle_list[3]>thr_angle) && (angle_list[4]<thr_angle_s))
+            {gesture_str = "six";}
+        else if ((angle_list[0]>thr_angle_thumb)  && (angle_list[1]<thr_angle_s) && (angle_list[2]<thr_angle_s) && (angle_list[3]<thr_angle_s) && (angle_list[4]>thr_angle))
+            {gesture_str = "three";}
+        else if ((angle_list[0]<thr_angle_s)  && (angle_list[1]>thr_angle) && (angle_list[2]>thr_angle) && (angle_list[3]>thr_angle) && (angle_list[4]>thr_angle))
+            {gesture_str = "thumbUp";}
+        else if ((angle_list[0]>thr_angle_thumb)  && (angle_list[1]<thr_angle_s) && (angle_list[2]<thr_angle_s) && (angle_list[3]>thr_angle) && (angle_list[4]>thr_angle))
+            {gesture_str = "yeah";}
+    }
+    return gesture_str;
+}

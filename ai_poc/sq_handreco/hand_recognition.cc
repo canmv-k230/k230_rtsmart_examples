@@ -23,56 +23,23 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #include "hand_recognition.h"
-#include "utils.h"
 
-HandRecognition::HandRecognition(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"HandRecognition",debug_mode)
+HandRecognition::HandRecognition(char *kmodel_file, FrameCHWSize image_size, int debug_mode)
+: AIBase(kmodel_file,"HandRecognition", debug_mode)
 {
     model_name_ = "HandRecognition";
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-
-HandRecognition::HandRecognition(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : AIBase(kmodel_file,"HandRecognition", debug_mode)
-{
-    model_name_ = "HandRecognition";
-    // input->isp（Fixed size）
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-#if 0
-    int in_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, in_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
-    // ouput（Fixed size）
-    dims_t out_shape{1, input_shapes_[0][1], input_shapes_[0][2], input_shapes_[0][3]};
+    image_size_ = image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
     ai2d_out_tensor_ = get_input_tensor(0);
 }
 HandRecognition::~HandRecognition()
 {
 }
 
-void HandRecognition::pre_process(cv::Mat ori_img, Bbox &bbox)
-{
+void HandRecognition::pre_process(runtime_tensor& input_tensor,Bbox &bbox){
     ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);
-    Utils::crop_resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, bbox, ai2d_out_tensor_);
-}
-
-void HandRecognition::pre_process(Bbox &bbox)
-{
-    ScopedTiming st(model_name_ + " pre_process_video", debug_mode_);
-#if 1
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-#endif
-    Utils::crop_resize(bbox, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
+    Utils::crop_resize_set(image_size_,input_size_,bbox.x,bbox.y,bbox.w,bbox.h,ai2d_builder_);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");   
 }
 
 void HandRecognition::inference()
@@ -82,7 +49,7 @@ void HandRecognition::inference()
 }
 
 
-std::string HandRecognition::post_process()
+void HandRecognition::post_process(string &result)
 {
     ScopedTiming st(model_name_ + " post_process", debug_mode_);
     float *output = p_outputs_[0];
@@ -90,9 +57,25 @@ std::string HandRecognition::post_process()
     softmax(output, pred, output_shapes_[0][1] );
     auto it = std::max_element(pred, pred + output_shapes_[0][1]);
     size_t idx = it - pred;
-    std::string text = labels[idx] + ":" + std::to_string(round(*it * 100) / 100.0);
+    result = labels[idx] + ":" + std::to_string(round(*it * 100) / 100.0);
+}
 
-    return text;
+void HandRecognition::draw_result(cv::Mat &draw_frame, string &result,Bbox &bbox)
+{
+    int w_=draw_frame.cols;
+    int h_=draw_frame.rows;
+    int x =  int(bbox.x / image_size_.width * w_);
+    int y =  int(bbox.y / image_size_.height  * h_);
+    int w = int((bbox.w) / image_size_.width * w_);
+    int h = int((bbox.h) / image_size_.height  * h_);
+    if(draw_frame.channels()==3){
+        cv::rectangle(draw_frame, cv::Point(x, y), cv::Point(x + w, y + h), cv::Scalar(0, 0, 255), 2);
+        cv::putText(draw_frame, result, cv::Point(x, y), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 0, 255), 2);
+    }
+    else{
+        cv::rectangle(draw_frame, cv::Point(x, y), cv::Point(x + w, y + h), cv::Scalar(0, 0, 255,255), 2);
+        cv::putText(draw_frame, result, cv::Point(x, y), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 0, 255,255), 2);
+    }
 }
 
 void HandRecognition::softmax(float* x, float* dx, uint32_t len)

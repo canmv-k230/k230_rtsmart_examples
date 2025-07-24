@@ -28,7 +28,7 @@
 #include <iostream>
 #include <vector>
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
 /**
@@ -45,7 +45,7 @@ public:
      * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
      * @return None
      */
-    DynamicGesture(const char *kmodel_file, const int debug_mode = 1);
+    DynamicGesture(char *kmodel_file, int debug_mode = 1);
 
     /**
      * @brief DynamicGesture析构函数
@@ -58,7 +58,7 @@ public:
      * @param ori_img 原始图片
      * @return None
      */
-    void pre_process(cv::Mat ori_img);
+    void pre_process(cv::Mat &ori_img);
 
     /**
      * @brief kmodel推理
@@ -71,7 +71,7 @@ public:
      * @return None
      */
     void post_process();
-
+    
     /**
      * @brief 返回kmodel推理结果后处理
      * @return 识别结果
@@ -79,6 +79,8 @@ public:
     void get_out(vector<float> &output);
 
     void softmax(float* x, float* dx, uint32_t len);
+
+    cv::Mat resize_centercrop(cv::Mat img,int frame_size,int crop_size);
 
     std::vector<std::string> labels
     {
@@ -120,10 +122,8 @@ public:
     int process_output(int pred, std::vector<int>& history);
 
 private:
-
     std::vector<runtime_tensor> in_tensors_;    //输入tensor
     std::vector<float*> input_bins;             //kmodel的输入和输出数据
-
     const int max_hist_len = 20;                //最多存储多少帧的结果
 };
 #endif

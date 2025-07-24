@@ -25,82 +25,25 @@
 
 #include "licence_det.h"
 
-LicenceDetect::LicenceDetect(const char *kmodel_file, float obj_thresh, float nms_thresh, const int debug_mode)
+LicenceDetect::LicenceDetect(char *kmodel_file, float obj_thresh, float nms_thresh, FrameCHWSize image_size, int debug_mode)
 :obj_thresh(obj_thresh), nms_thresh(nms_thresh), AIBase(kmodel_file,"LicenceDetect", debug_mode)
 {
     model_name_ = "LicenceDetect";
-    ai2d_out_tensor_ = this -> get_input_tensor(0);
-
     anchors = (input_shapes_[0][2] == 320 ? anchors320 : anchors640);
     min_size = (input_shapes_[0][2] == 320 ? 200 : 800);
-}
-
-LicenceDetect::LicenceDetect(const char *kmodel_file, float obj_thresh, float nms_thresh, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr,const int debug_mode)
-:obj_thresh(obj_thresh), nms_thresh(nms_thresh), AIBase(kmodel_file,"LicenceDetect", debug_mode)
-{
-    model_name_ = "LicenceDetect";
-
-    anchors = (input_shapes_[0][2] == 320 ? anchors320 : anchors640);
-    min_size = (input_shapes_[0][2] == 320 ? 200 : 800);
-
-    vaddr_ = vaddr;
-
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-    // int isp_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-
-    ai2d_out_tensor_ = this -> get_input_tensor(0);
-
-    Utils::resize(ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
+	image_size_=image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
+    ai2d_out_tensor_=get_input_tensor(0);
+    Utils::resize_set(image_size_,input_size_,ai2d_builder_);
 }
 
 LicenceDetect::~LicenceDetect()
 {
-
 }
 
-void LicenceDetect::pre_process(cv::Mat ori_img)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    std::vector<uint8_t> chw_vec;
-    Utils::hwc_to_chw(ori_img, chw_vec);
-    Utils::resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, ai2d_out_tensor_);
-
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output0 = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_color_image("ai2d_out_tensor_0.png",{input_shapes_[0][3],input_shapes_[0][2]},output0);
-}
-
-void LicenceDetect::pre_process()
-{
+void LicenceDetect::pre_process(runtime_tensor &input_tensor){
     ScopedTiming st(model_name_ + " pre_process video", debug_mode_);
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    ai2d_builder_->invoke(ai2d_in_tensor_, ai2d_out_tensor_).expect("error occurred in ai2d running");
-
-    auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    unsigned char *output_rgb_chw = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    std::vector<uint8_t> chw_bgr_vec;
-    Utils::chw_rgb2bgr({input_shapes_[0][3], input_shapes_[0][2]}, output_rgb_chw, chw_bgr_vec);
-
-    auto buf_out = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf_out.data()), chw_bgr_vec.data(), input_shapes_[0][3]*input_shapes_[0][2]*input_shapes_[0][1]);
-    hrt::sync(ai2d_out_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-
-    // static int index = 0;
-    // if (index == 50)
-    // {
-    //     auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    //     unsigned char *output0 = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    //     Utils::dump_color_image("box_input100.png",{input_shapes_[0][3],input_shapes_[0][2]},output0);
-    // }
-
-    // index += 1;
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void LicenceDetect::inference()
@@ -109,7 +52,6 @@ void LicenceDetect::inference()
     this->get_output();
 }
 
-// int LicenceDetect::nms_comparator(void* pa, void* pb)
 int nms_comparator(const void *pa, const void *pb)
 {
 	sortable_obj_t a = *(sortable_obj_t*)pa;
@@ -123,7 +65,7 @@ int nms_comparator(const void *pa, const void *pb)
 	return 0;
 }
 
-void LicenceDetect::post_process(FrameSize frame_size, vector<BoxPoint> &results)
+void LicenceDetect::post_process(vector<BoxPoint> &results)
 {
     ScopedTiming st(model_name_ + " post_process", debug_mode_);
 
@@ -192,23 +134,46 @@ void LicenceDetect::post_process(FrameSize frame_size, vector<BoxPoint> &results
 	BoxPoint boxPoint;
 	for (auto l : valid_landmarks)
 	{
-
-		boxPoint.vertices[0].x = l.points[2 * 0 + 0] * frame_size.width;
-        boxPoint.vertices[0].y = l.points[2 * 0 + 1] * frame_size.height;
-        boxPoint.vertices[1].x = l.points[2 * 1 + 0] * frame_size.width;
-        boxPoint.vertices[1].y = l.points[2 * 1 + 1] * frame_size.height;
-        boxPoint.vertices[2].x = l.points[2 * 2 + 0] * frame_size.width;
-        boxPoint.vertices[2].y = l.points[2 * 2 + 1] * frame_size.height;
-        boxPoint.vertices[3].x = l.points[2 * 3 + 0] * frame_size.width;
-        boxPoint.vertices[3].y = l.points[2 * 3 + 1] * frame_size.height;
-
+		boxPoint.vertices[0].x = l.points[2 * 0 + 0] * image_size_.width;
+        boxPoint.vertices[0].y = l.points[2 * 0 + 1] * image_size_.height;
+        boxPoint.vertices[1].x = l.points[2 * 1 + 0] * image_size_.width;
+        boxPoint.vertices[1].y = l.points[2 * 1 + 1] * image_size_.height;
+        boxPoint.vertices[2].x = l.points[2 * 2 + 0] * image_size_.width;
+        boxPoint.vertices[2].y = l.points[2 * 2 + 1] * image_size_.height;
+        boxPoint.vertices[3].x = l.points[2 * 3 + 0] * image_size_.width;
+        boxPoint.vertices[3].y = l.points[2 * 3 + 1] * image_size_.height;
         results.push_back(boxPoint);
 	}
-
     free(s_probs);
 	free(boxes);
 	free(landmarks);
 	free(s);
+}
+
+void LicenceDetect::draw_result(cv::Mat& draw_frame, vector<BoxPoint>& results)
+{
+	int w_=draw_frame.cols;
+    int h_=draw_frame.rows;
+    for(int i = 0; i < results.size(); i++)
+    {   
+        std::vector<cv::Point> vec;
+        vec.clear();
+        for(int j = 0; j < 4; j++)
+        {
+            vec.push_back(results[i].vertices[j]);
+        }
+        cv::RotatedRect rect = minAreaRect(vec);
+        cv::Point2f ver[4];
+        rect.points(ver);
+        for(int i = 0; i < 4; i++){
+			int x1 = int(ver[i].x * w_ / image_size_.width);
+            int y1 = int(ver[i].y * h_ / image_size_.height);
+			int x2 = int(ver[(i + 1) % 4].x * w_ / image_size_.width);
+            int y2 = int(ver[(i + 1) % 4].y * h_ / image_size_.height);
+            cv::line(draw_frame,cv::Point2d(x1,y1),cv::Point2d(x2,y2), cv::Scalar(255, 0, 0,255), 3);
+		}
+			
+    }
 }
 
 void LicenceDetect::local_softmax(float* x, float* dx, uint32_t len)

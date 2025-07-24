@@ -28,9 +28,19 @@
 
 #include <iostream>
 #include <vector>
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
+
+typedef struct BoxInfo
+{
+    float x1;   // 检测框左上顶点x坐标
+    float y1;   // 检测框左上顶点y坐标
+    float x2;   // 检测框右下顶点x坐标
+    float y2;   // 检测框右下顶点y坐标
+    float score;    // 检测框的得分
+    int label;  // 检测框的标签
+} BoxInfo;
 
 /**
  * @brief crosswalkDetect 人行横道检测
@@ -41,29 +51,16 @@ class crosswalkDetect: public AIBase
     public:
 
         /** 
-        * for image
-        * @brief crosswalkDetect 构造函数，加载kmodel,并初始化kmodel输入、输出、类阈值和NMS阈值
-        * @param kmodel_file kmodel文件路径
-        * @param obj_thresh 检测框阈值
-        * @param nms_thresh NMS阈值
-        * @param debug_mode 0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-        * @return None
-        */
-        crosswalkDetect(const char *kmodel_file, float obj_thresh,float nms_thresh,  const int debug_mode);
-
-        /** 
         * for video
         * @brief crosswalkDetect 构造函数，加载kmodel,并初始化kmodel输入、输出、类阈值和NMS阈值
         * @param kmodel_file kmodel文件路径
         * @param obj_thresh 检测框阈值
         * @param nms_thresh NMS阈值
         * @param isp_shape   isp输入大小（chw）
-        * @param vaddr       isp对应虚拟地址
-        * @param paddr       isp对应物理地址
         * @param debug_mode 0（不调试）、 1（只显示时间）、2（显示所有打印信息）
         * @return None
         */
-        crosswalkDetect(const char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+        crosswalkDetect(char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize image_size, int debug_mode);
         /** 
         * @brief  crosswalkDetect 析构函数
         * @return None
@@ -75,13 +72,7 @@ class crosswalkDetect: public AIBase
          * @param ori_img 原始图片
          * @return None
          */
-        void pre_process(cv::Mat ori_img);
-
-        /**
-         * @brief 视频流预处理（ai2d for video）
-         * @return None
-         */
-        void pre_process();
+        void pre_process(runtime_tensor &input_tensor);
 
         /**
          * @brief kmodel推理
@@ -95,31 +86,18 @@ class crosswalkDetect: public AIBase
         * @param result   所有候选检测框
         * @return None
         */
-        void post_process(FrameSize frame_size,std::vector<BoxInfo> &result);
+        void post_process(FrameCHWSize frame_size,std::vector<BoxInfo> &result);
 
-        /**
-         * @brief 解码
-         * @data kmodel 推理结果
-         * @net_size kmodel 输入尺寸大小
-         * @stride 步长
-         * @num_classes 类别数
-         * @frame_size 分辨率
-         * @anchors 锚框
-         * @threshold 检测框阈值
-        **/
-        std::vector<BoxInfo> decode_infer(float *data, int net_size, int stride, int num_classes, FrameSize frame_size, float anchors[][2], float threshold);
-
-        /**
-         * @brief 非极大值抑制
-         * @input_boxes 所有候选框
-         * @NMS_THRESH NMS阈值 
-         * @return None
-        **/
-        void nms(std::vector<BoxInfo> &input_boxes, float NMS_THRESH);
+        void draw_result(cv::Mat& draw_img,vector<BoxInfo>& results);
 
         std::vector<std::string> labels { "crosswalk","None" };
 
     private:
+
+        std::vector<BoxInfo> decode_infer(float *data, int net_size, int stride, int num_classes, FrameCHWSize frame_size, float anchors[][2], float threshold);
+
+        void nms(std::vector<BoxInfo> &input_boxes, float NMS_THRESH);
+
         float obj_thresh_;  // 检测框阈值
         float nms_thresh_;  // NMS阈值
         
@@ -135,6 +113,8 @@ class crosswalkDetect: public AIBase
         runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
         uintptr_t vaddr_;                            // isp的虚拟地址
         FrameCHWSize isp_shape_;                     // isp对应的地址大小
+        FrameCHWSize image_size_;
+        FrameCHWSize input_size_;
 
 };
 #endif

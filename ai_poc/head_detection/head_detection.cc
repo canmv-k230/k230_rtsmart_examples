@@ -25,66 +25,26 @@
 
 #include "head_detection.h"
 
-HeadDetection::HeadDetection(const char *kmodel_file, float score_thres, float nms_thres, const int debug_mode)
-:score_thres(score_thres), nms_thres(nms_thres), AIBase(kmodel_file,"HeadDetection", debug_mode)
+HeadDetection::HeadDetection(char *kmodel_file, float score_thres, float nms_thres, FrameCHWSize image_size, int debug_mode)
+:AIBase(kmodel_file,"HeadDetection", debug_mode)
 {
     model_name_ = "HeadDetection";
-    ai2d_out_tensor_ = this -> get_input_tensor(0);
-
-    dimensions_det = classes.size() + 4;
-    output_det = new float[output_shapes_[0][2] * dimensions_det];
-}
-
-HeadDetection::HeadDetection(const char *kmodel_file, float score_thres, float nms_thres, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr,const int debug_mode)
-:score_thres(score_thres), nms_thres(nms_thres), AIBase(kmodel_file,"HeadDetection", debug_mode)
-{
-    model_name_ = "HeadDetection";
-
-    dimensions_det = classes.size() + 4;
-    output_det = new float[output_shapes_[0][2] * dimensions_det];
-
-    vaddr_ = vaddr;
-
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-    // int isp_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-
-    ai2d_out_tensor_ = this -> get_input_tensor(0);
-
-    Utils::padding_resize(isp_shape, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_, cv::Scalar(114, 114, 114));
+    conf_thresh_=score_thres;
+    nms_thresh_=nms_thres;
+    image_size_=image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
+    ai2d_out_tensor_=get_input_tensor(0);
+    Utils::padding_resize_one_side_set(image_size_,input_size_,ai2d_builder_, cv::Scalar(114, 114, 114));
 }
 
 HeadDetection::~HeadDetection()
 {
-    delete[] output_det;
 }
 
-void HeadDetection::pre_process(cv::Mat ori_img)
+void HeadDetection::pre_process(runtime_tensor &input_tensor)
 {
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);
-    Utils::padding_resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_out_tensor_, cv::Scalar(114, 114, 114));
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_color_image("input_color.png", {input_shapes_[0][3],input_shapes_[0][2]},output);
-}
-
-void HeadDetection::pre_process()
-{
-    ScopedTiming st(model_name_ + " pre_process video", debug_mode_);
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    ai2d_builder_->invoke(ai2d_in_tensor_, ai2d_out_tensor_).expect("error occurred in ai2d running");
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_color_image("input_color_isp.png", {input_shapes_[0][3],input_shapes_[0][2]},output);
+    ScopedTiming st(model_name_ + " pre_process", debug_mode_);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void HeadDetection::inference()
@@ -93,238 +53,127 @@ void HeadDetection::inference()
     this->get_output();
 }
 
-void HeadDetection::post_process(FrameSize frame_size, vector<Detection> &detections,bool pic_mode)
+void HeadDetection::post_process(vector<HeadDetBox> &results)
 {
     ScopedTiming st(model_name_ + " post_process", debug_mode_);
-    float *ori_data = p_outputs_[0];
-
-    float x_factor,y_factor;
-    float dw,dh;
-    if(pic_mode)
+    float ratiow = (float)input_size_.width / image_size_.width;
+    float ratioh = (float)input_size_.height / image_size_.height;
+    float ratio = ratiow < ratioh ? ratiow : ratioh;
+    int box_num_=output_shapes_[0][2];
+    int box_feature_len_=output_shapes_[0][1];
+    float *output_det = new float[box_num_ * box_feature_len_];
+    // 模型推理结束后，进行后处理
+    float* output0= p_outputs_[0];
+    // 将输出数据排布从[label_num_+4+51,(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32)]调整为[(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32),label_num_+4+51],方便后续处理
+    for(int r = 0; r < box_num_; r++)
     {
-        x_factor = float(frame_size.width) / input_shapes_[0][3];
-        y_factor = float(frame_size.height) / input_shapes_[0][2];
-        float ratio = (1/x_factor) < (1/y_factor) ? (1/x_factor) : (1/y_factor);
-        int new_w = (int)(ratio * frame_size.width);
-        int new_h = (int)(ratio * frame_size.height);
-        dw = (float)(input_shapes_[0][3] - new_w) / 2 / ratio;   //dw for ori(not input_shapes)
-        dh = (float)(input_shapes_[0][2] - new_h) / 2 / ratio;
-        x_factor = float(frame_size.width + 2*dw) / input_shapes_[0][3];
-        y_factor = float(frame_size.height + 2*dh) / input_shapes_[0][2];
-    }
-    else
-    {
-        x_factor = float(isp_shape_.width) / input_shapes_[0][3];
-        y_factor = float(isp_shape_.height) / input_shapes_[0][2];
-        float ratio = (1/x_factor) < (1/y_factor) ? (1/x_factor) : (1/y_factor);
-        int new_w = (int)(ratio * isp_shape_.width);
-        int new_h = (int)(ratio * isp_shape_.height);
-        dw = (float)(input_shapes_[0][3] - new_w) / 2 / ratio;     //for isp shape
-        dh = (float)(input_shapes_[0][2] - new_h) / 2 / ratio;
-        x_factor = float(isp_shape_.width + 2*dw) / input_shapes_[0][3];
-        y_factor = float(isp_shape_.height + 2*dh) / input_shapes_[0][2];
-    }
-
-    float *data = output_det;
-    // ncw -> nwc
-    for(int r = 0; r < output_shapes_[0][2]; r++)
-    {
-        for(int c = 0; c < dimensions_det; c++)
+        for(int c = 0; c < box_feature_len_; c++)
         {
-            data[r*dimensions_det + c] = ori_data[c*output_shapes_[0][2] + r];
+            output_det[r*box_feature_len_ + c] = output0[c*box_num_ + r];
         }
     }
-
-
-    std::vector<int> class_ids;
-    std::vector<float> confidences;
-    std::vector<cv::Rect> boxes;
-
-    for (int i = 0; i < output_shapes_[0][2]; ++i)
-    {
-        float *classes_scores = data+4;
-
-        cv::Mat scores(1, classes.size(), CV_32FC1, classes_scores);
-        cv::Point class_id;
-        double maxClassScore;
-
-        minMaxLoc(scores, 0, &maxClassScore, 0, &class_id);
-
-        if (maxClassScore > score_thres)
-        {
-            confidences.push_back(maxClassScore);
-            class_ids.push_back(class_id.x);
-
-            float x = data[0];
-            float y = data[1];
-            float w = data[2];
-            float h = data[3];
-
-            int left = int((x - 0.5 * w) * x_factor) - dw;
-            int top = int((y - 0.5 * h) * y_factor) - dh;
-
-            int width = int(w * x_factor);
-            int height = int(h * y_factor);
-
-            boxes.push_back(cv::Rect(left, top, width, height));
+    for(int i=0;i<box_num_;i++){
+        float* vec=output_det+i*box_feature_len_;
+        float box[4]={vec[0],vec[1],vec[2],vec[3]};
+        float* class_scores=vec+4;
+        float* max_class_score_ptr=std::max_element(class_scores,class_scores+label_num_);
+        float score=*max_class_score_ptr;
+        int max_class_index = max_class_score_ptr - class_scores; // 计算索引
+        if(score>conf_thresh_){
+            HeadDetBox bbox;
+            float x_=box[0]/ratio*1.0;
+            float y_=box[1]/ratio*1.0;
+            float w_=box[2]/ratio*1.0;
+            float h_=box[3]/ratio*1.0;
+            int x=int(MAX(x_-0.5*w_,0));
+            int y=int(MAX(y_-0.5*h_,0));
+            int w=int(w_);
+            int h=int(h_);
+            if (w <= 0 || h <= 0) { continue; }
+            bbox.box=cv::Rect(x,y,w,h);
+            bbox.confidence=score;
+            bbox.index=max_class_index;
+            results.push_back(bbox);
         }
-
-        data += dimensions_det;
     }
-
+    //执行非最大抑制以消除具有较低置信度的冗余重叠框（NMS）
     std::vector<int> nms_result;
-    nms_boxes(boxes, confidences, score_thres, nms_thres, nms_result);
-
-    for (unsigned long i = 0; i < nms_result.size(); ++i)
-    {
-        int idx = nms_result[i];
-
-        Detection result;
-        result.class_id = class_ids[idx];
-        result.confidence = confidences[idx];
-
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<int> dis(100, 255);
-        result.color = cv::Scalar(dis(gen),
-                                  dis(gen),
-                                  dis(gen));
-
-        result.className = classes[result.class_id];
-        result.box = boxes[idx];
-        detections.push_back(result);
-    }
-
-    delete[] data;
+    nms(results, conf_thresh_, nms_thresh_, nms_result);
+    delete[] output_det;
 }
 
 
-void HeadDetection::draw_result(cv::Mat& src_img,vector<Detection> &results, bool pic_mode)
+void HeadDetection::draw_result(cv::Mat& img,vector<HeadDetBox> &results)
 {
-    int src_w = src_img.cols;
-    int src_h = src_img.rows;
-    int max_src_size = std::max(src_w,src_h);
-
+    ScopedTiming st(model_name_ + " draw_result", debug_mode_);
     int head_count = 0;
-    for (int i = 0; i < results.size(); ++i)
-    {
-        auto& bbox = results[i].box;
-        if(pic_mode)
+    int w_=img.cols;
+    int h_=img.rows;
+    int res_size=results.size();
+    for(int i=0;i<res_size;i++){
+        HeadDetBox box_=results[i];
+        cv::Rect box=box_.box;
+        int idx=box_.index;
+        float score=box_.confidence;
+        int x=int(box.x*float(w_)/image_size_.width);
+        int y=int(box.y*float(h_)/image_size_.height);
+        int w=int(box.width*float(w_)/image_size_.width);
+        int h=int(box.height*float(h_)/image_size_.height);
+        int x_right = x + w;
+        int y_bottom = y + h;
+        if (x_right > w_)
         {
-            if (debug_mode_ > 0)
-            {
-                cv::rectangle(src_img, cv::Rect(bbox.x, bbox.y , bbox.width, bbox.height), cv::Scalar(255, 255, 255), 2, 2, 0);
-                std::string label_name = results[i].className;
-                cv::putText(src_img, label_name , cv::Point(bbox.x,bbox.y), cv::FONT_HERSHEY_COMPLEX, 0.5, cv::Scalar(255, 255, 255), 1, 8, 0);
-                if(results[i].class_id==0)
-                {    
-                    head_count += 1;
-                }
-            }
-            else
-            {   
-                if(results[i].class_id==0)
-                {    
-                    cv::rectangle(src_img, cv::Rect(bbox.x, bbox.y , bbox.width, bbox.height), cv::Scalar(255, 255, 255), 2, 2, 0);
-                    head_count += 1;
-                }
-            }
+            w = w_ - x;
         }
-        else
-        {		
-            int x = std::max(0,int(float(bbox.x)/ isp_shape_.width * src_w));
-            int y = std::max(0,int(float(bbox.y) / isp_shape_.height * src_h));
-            int w = float(bbox.width) / isp_shape_.width * src_w;
-            int h = float(bbox.height) / isp_shape_.height  * src_h;
-            
-            if (debug_mode_ > 0)
-            {
-                cv::rectangle(src_img, cv::Rect(x, y , w, h), cv::Scalar(255,0, 0, 255), 3, 2, 0);
-                std::string label_name = results[i].className; 
-                cv::putText(src_img,label_name,cv::Point(x,y),cv::FONT_HERSHEY_COMPLEX,2,cv::Scalar(255,255, 0, 255), 1, 8, 0);
-                if(results[i].class_id==0)
-                {    
-                    head_count += 1;
-                }
-            }
-            else
-            {
-                if(results[i].class_id==0)
-                {    
-                    cv::rectangle(src_img, cv::Rect(x, y , w, h), cv::Scalar(255,0, 0, 255), 3, 2, 0);
-                    head_count += 1;
-                }
-            }           
-        } 
+        if (y_bottom > h_)
+        {
+            h = h_ - y;
+        }
+        cv::Rect new_box(x,y,w,h);
+        if (idx == 0){
+            head_count++;
+            cv::rectangle(img, new_box, cv::Scalar(255, 0, 0,255), 2, 8);
+        }else{
+            continue;
+        }
     }
-
-    if(pic_mode)
-    {
-        std::string str = "headcount : " + std::to_string(head_count);   
-        cv::Size textSize = cv::getTextSize(str, cv::FONT_HERSHEY_COMPLEX, 0.5, 1, 0);
-        cv::Rect textBox(0, 0, textSize.width, textSize.height+8);
-        cv::rectangle(src_img, textBox, cv::Scalar(0, 0, 0), cv::FILLED);
-        cv::putText(src_img, str , cv::Point(0, textSize.height - 1), cv::FONT_HERSHEY_COMPLEX, 0.5, cv::Scalar(255, 255, 255), 1, 8, 0);
-    }
-    else
-    {
-        std::string str = "headcount : " + std::to_string(head_count); 
-        cv::putText(src_img,str,cv::Point(10,50),cv::FONT_HERSHEY_COMPLEX,2,cv::Scalar(255,255, 0, 255), 1, 8, 0);
-    }
+    cv::putText(img, "head count:"+std::to_string(head_count), cv::Point(100,100), cv::FONT_HERSHEY_DUPLEX, 1, cv::Scalar(255, 0, 0,255), 4, 0);
 }
 
-void HeadDetection::nms_boxes(vector<Rect> &boxes, vector<float> &confidences, float confThreshold, float nmsThreshold, vector<int> &indices)
+void HeadDetection::nms(std::vector<HeadDetBox> &bboxes,  float confThreshold, float nmsThreshold, std::vector<int> &indices)
 {	
-	BBOX bbox;
-	vector<BBOX> bboxes;
-	int i, j;
-	for (i = 0; i < boxes.size(); i++)
-	{
-		bbox.box = boxes[i];
-		bbox.confidence = confidences[i];
-		bbox.index = i;
-		bboxes.push_back(bbox);
-	}
-
-	sort(bboxes.begin(), bboxes.end(), [](BBOX a, BBOX b) { return a.confidence < b.confidence; });
-
-	int updated_size = bboxes.size();
-	for (i = 0; i < updated_size; i++)
-	{
-		if (bboxes[i].confidence < confThreshold)
-			continue;
-		indices.push_back(bboxes[i].index);
-
-		for (j = i + 1; j < updated_size;)
-		{
-			float iou = get_iou_value(bboxes[i].box, bboxes[j].box);
-
-			if (iou > nmsThreshold)
-			{
-				bboxes.erase(bboxes.begin() + j);
-				updated_size = bboxes.size();
-			}
-            else
-            {
-                j++;    
+    std::sort(bboxes.begin(), bboxes.end(), [](HeadDetBox &a, HeadDetBox &b) { return a.confidence > b.confidence; });
+    int updated_size = bboxes.size();
+    for (int i = 0; i < updated_size; i++) {
+        if (bboxes[i].confidence < confThreshold)
+            continue;
+        indices.push_back(i);
+        // 这里使用移除冗余框，而不是 erase 操作，减少内存移动的开销
+        for (int j = i + 1; j < updated_size;) {
+            float iou = iou_calculate(bboxes[i].box, bboxes[j].box);
+            if (iou > nmsThreshold) {
+                bboxes[j].confidence = -1;  // 设置为负值，后续不会再计算其IOU
             }
-		}
-	}
+            j++;
+        }
+    }
+
+    // 移除那些置信度小于0的框
+    bboxes.erase(std::remove_if(bboxes.begin(), bboxes.end(), [](HeadDetBox &b) { return b.confidence < 0; }), bboxes.end());
 }
 
-
-float HeadDetection::get_iou_value(Rect rect1, Rect rect2)
+float HeadDetection::iou_calculate(cv::Rect &rect1, cv::Rect &rect2)
 {
-	int xx1, yy1, xx2, yy2;
+    int xx1, yy1, xx2, yy2;
  
-	xx1 = max(rect1.x, rect2.x);
-	yy1 = max(rect1.y, rect2.y);
-	xx2 = min(rect1.x + rect1.width - 1, rect2.x + rect2.width - 1);
-	yy2 = min(rect1.y + rect1.height - 1, rect2.y + rect2.height - 1);
+	xx1 = std::max(rect1.x, rect2.x);
+	yy1 = std::max(rect1.y, rect2.y);
+	xx2 = std::min(rect1.x + rect1.width - 1, rect2.x + rect2.width - 1);
+	yy2 = std::min(rect1.y + rect1.height - 1, rect2.y + rect2.height - 1);
  
 	int insection_width, insection_height;
-	insection_width = max(0, xx2 - xx1 + 1);
-	insection_height = max(0, yy2 - yy1 + 1);
+	insection_width = std::max(0, xx2 - xx1 + 1);
+	insection_height = std::max(0, yy2 - yy1 + 1);
  
 	float insection_area, union_area, iou;
 	insection_area = float(insection_width) * insection_height;

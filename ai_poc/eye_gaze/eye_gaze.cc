@@ -25,29 +25,11 @@
 #include "eye_gaze.h"
 #include <vector>
 
-const float PI = 3.1415926;
-
-EyeGaze::EyeGaze(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"EyeGaze",debug_mode)
+EyeGaze::EyeGaze(char *kmodel_file, FrameCHWSize image_size, int debug_mode) : AIBase(kmodel_file,"EyeGaze", debug_mode)
 {
     model_name_ = "EyeGaze";
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-EyeGaze::EyeGaze(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : AIBase(kmodel_file,"EyeGaze", debug_mode)
-{
-    model_name_ = "EyeGaze";
-
-    // input->isp（Fixed size）
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-#if 0
-    int in_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, in_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
+    image_size_=image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
     ai2d_out_tensor_ = get_input_tensor(0);
 }
 
@@ -55,28 +37,10 @@ EyeGaze::~EyeGaze()
 {
 }
 
-// ai2d for image
-void EyeGaze::pre_process(cv::Mat ori_img, Bbox &bbox)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);    
-    Utils::crop_resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec,bbox, ai2d_out_tensor_);
-}
-
-// ai2d for video
-void EyeGaze::pre_process(Bbox &bbox)
-{
+void EyeGaze::pre_process(runtime_tensor& input_tensor, Bbox &bbox){
     ScopedTiming st(model_name_ + " pre_process_video", debug_mode_);
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    Utils::crop_resize(bbox, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("EyeGaze_input.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
+	Utils::crop_resize_set(image_size_,input_size_,bbox.x,bbox.y,bbox.w,bbox.h,ai2d_builder_);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void EyeGaze::inference()
@@ -90,8 +54,7 @@ void EyeGaze::post_process(EyeGazeInfo& result)
 	ScopedTiming st(model_name_ + " post_process", debug_mode_);
 	for(int out_index = 0;out_index < output_shapes_.size(); ++out_index)
 	{
-		vector<float> pred(p_outputs_[out_index],p_outputs_[out_index]+
-			(each_output_size_by_byte_[out_index+1]-each_output_size_by_byte_[out_index])/4);
+		vector<float> pred(p_outputs_[out_index],p_outputs_[out_index]+output_shapes_[out_index][0]*output_shapes_[out_index][1]);
 		vector<float> softmax_pred;
 		softmax(pred,softmax_pred);
 		float pred_sum = 0;
@@ -128,13 +91,13 @@ void EyeGaze::draw_result(cv::Mat& src_img,Bbox& bbox,EyeGazeInfo& result, bool 
     else
     {
 		float length = float(src_w) / 2;
-		int center_x = float(bbox.x + bbox.w/2.0) / isp_shape_.width * src_w;
-		int center_y = float(bbox.y + bbox.h/2.0) / isp_shape_.height * src_h;
+		int center_x = float(bbox.x + bbox.w/2.0) / image_size_.width * src_w;
+		int center_y = float(bbox.y + bbox.h/2.0) / image_size_.height * src_h;
 
         double dx = -length * sin(result.pitch) * cos(result.yaw);
 		double dy = -length * sin(result.yaw);
 		cv::arrowedLine(src_img, cv::Point(cvRound(center_x), cvRound(center_y)),
-					cv::Point(cvRound(center_x + dx), cvRound(center_y + dy)), cv::Scalar(255, 255, 0),
+					cv::Point(cvRound(center_x + dx), cvRound(center_y + dy)), cv::Scalar(255, 255, 0,255),
 					2, cv::LINE_AA, 0, 0.18);
 	} 
 }

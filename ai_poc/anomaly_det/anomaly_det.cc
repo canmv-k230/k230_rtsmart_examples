@@ -22,27 +22,28 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
+#include "ai_utils.h"
+#include "scoped_timing.h"
 #include "anomaly_det.h"
-#include "utils.h"
-#include "scoped_timing.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/core/eigen.hpp>
 #include <opencv2/imgproc.hpp>
 
 // for image
-AnomalyDet::AnomalyDet(const char *kmodel_file, float obj_thresh, const int debug_mode) : obj_thresh_(obj_thresh), AIBase(kmodel_file,"AnomalyDet", debug_mode)
+AnomalyDet::AnomalyDet(char *kmodel_file, float obj_thresh,FrameCHWSize image_size,int debug_mode) 
+: obj_thresh_(obj_thresh), AIBase(kmodel_file,"AnomalyDet", debug_mode)
 {
     model_name_ = "AnomalyDet";
     ai2d_out_tensor_ = get_input_tensor(0);
+	image_size_ = image_size;
+	input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
+	Utils::resize_set(image_size_, input_size_, ai2d_builder_);
 }
 
-void AnomalyDet::pre_process(cv::Mat ori_img)
+void AnomalyDet::pre_process(runtime_tensor &input_tensor)
 {
 	ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    std::vector<uint8_t> chw_vec;
-    Utils::hwc_to_chw(ori_img, chw_vec);
-	Utils::resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, ai2d_out_tensor_);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void AnomalyDet::inference()
@@ -55,7 +56,6 @@ void AnomalyDet::inference()
 void AnomalyDet::post_process(vector<anomaly_res> &results)
 {
 	ScopedTiming st(model_name_ + " post_process", debug_mode_);
-
     //1.读取器模型常量
 	Eigen::Tensor<float, 2> memory;
 	{
@@ -64,12 +64,10 @@ void AnomalyDet::post_process(vector<anomaly_res> &results)
 		Eigen::Tensor<float, 2> memory_1 = eigen_tensor;
 		memory = memory_1.shuffle(Eigen::array<int, 2>{1, 0});
 	}
-
 	Eigen::Tensor<float, 2> embedding;
 	{
-
-		vector<float> out_1(p_outputs_[0] , p_outputs_[0]+ each_output_size_by_byte_[1]); //开始位置和超尾位置
-		vector<float> out_2(p_outputs_[1] , p_outputs_[1] + each_output_size_by_byte_[2]-each_output_size_by_byte_[1]);
+		vector<float> out_1(p_outputs_[0] , p_outputs_[0]+ output_shapes_[0][0]*output_shapes_[0][1]*output_shapes_[0][2]*output_shapes_[0][3]); //开始位置和超尾位置
+		vector<float> out_2(p_outputs_[1] , p_outputs_[1] + output_shapes_[1][0]*output_shapes_[1][1]*output_shapes_[1][2]*output_shapes_[1][3]);
 		
 		Eigen::TensorMap<Eigen::Tensor<float, 3>> out_1_tmap(out_1.data(), 32, 32, 16);
 		Eigen::TensorMap<Eigen::Tensor<float, 3>> out_2_tmap(out_2.data(), 16, 16, 24);
@@ -119,30 +117,37 @@ void AnomalyDet::post_process(vector<anomaly_res> &results)
 	results[0].score = final_score;
 }
 
+void AnomalyDet::draw_anomaly_res(cv::Mat& frame, vector<anomaly_res>& results){
+	double fontsize = (frame.cols * frame.rows * 1.0) / (300 * 250);
+    if (fontsize > 2)
+    {
+        fontsize = 2;
+    }
+    for(int i = 0; i < results.size(); i++)
+    {   
+        std::string text = "class: " + results[i].label + ", score: " + std::to_string(round(results[i].score * 100) / 100.0).substr(0, 4);
+        cv::putText(frame, text, cv::Point(1, 40), cv::FONT_HERSHEY_SIMPLEX, fontsize, cv::Scalar(255, 255, 0), 2);
+        std::cout << text << std::endl;
+    }
+}
+
 Eigen::MatrixXf AnomalyDet::cdist_eigen_matmul(const Eigen::MatrixXf& x1, const Eigen::MatrixXf& x2) 
 {
-	
-
  	Eigen::MatrixXf x1_norm = x1.rowwise().squaredNorm();
     Eigen::MatrixXf x2_norm = x2.rowwise().squaredNorm();
     Eigen::MatrixXf x1x2 = x1 * x2.transpose();
     Eigen::MatrixXf dists = (x1_norm.rowwise().replicate(x2.rows()) + x2_norm.transpose().colwise().replicate(x1.rows()) - 2 * x1x2).array().max(0.0).sqrt();
-
     return dists;
-
 }
 
 Eigen::MatrixXf AnomalyDet::softmax(Eigen::MatrixXf x) 
 {
 	// 按行取最大值，返回一个行向量
 	Eigen::VectorXf max_x = x.rowwise().maxCoeff();
-
 	// 按行做减法，每一行都减去该行的最大值
 	x = (x.array().colwise() - max_x.array()).matrix();
-
 	// 对每一行做exp操作
 	Eigen::MatrixXf exp_x = x.array().exp();
-
 	// 对每一行做除法操作
 	Eigen::VectorXf sum_exp_x = exp_x.rowwise().sum();
 	Eigen::MatrixXf result = (exp_x.array().colwise() / sum_exp_x.array()).matrix();
@@ -151,7 +156,6 @@ Eigen::MatrixXf AnomalyDet::softmax(Eigen::MatrixXf x)
 
 std::pair<Eigen::VectorXf, Eigen::VectorXi> AnomalyDet::find_top_k_values(Eigen::MatrixXf mat, int k) 
 {
-
 	std::vector<float> values_vec;
 	std::vector<int> indices_vec;
 	for (int i = 0; i < mat.rows(); i++) {
@@ -173,16 +177,12 @@ std::pair<Eigen::VectorXf, Eigen::VectorXi> AnomalyDet::find_top_k_values(Eigen:
 		indices(i) = indices_vec[i];
 	}
 	return std::make_pair(values, indices);
-
 }
 
 std::pair<Eigen::VectorXf, Eigen::VectorXi> AnomalyDet::nearest_neighbors(Eigen::MatrixXf embedding, Eigen::MatrixXf memory_bank, int k) 
 {
-
 	Eigen::MatrixXf distance = cdist_eigen_matmul(embedding, memory_bank);
-	
 	if (k == 1) {
-
 		//转换为cv::Mat加速计算
 		cv::Mat distance_cv;
 		cv::eigen2cv(distance, distance_cv);
@@ -201,7 +201,6 @@ std::pair<Eigen::VectorXf, Eigen::VectorXi> AnomalyDet::nearest_neighbors(Eigen:
 	else {
 		return find_top_k_values(distance, k);
 	}
-	
 }
 
 float AnomalyDet::compute_anomaly_score(Eigen::VectorXf patch_score, Eigen::VectorXi locations, Eigen::MatrixXf embedding, Eigen::MatrixXf memory_bank, int k) 
@@ -219,7 +218,6 @@ float AnomalyDet::compute_anomaly_score(Eigen::VectorXf patch_score, Eigen::Vect
 	Eigen::MatrixXf distances = cdist_eigen_matmul(max_patch_features, support_memory);
 	float weight = 1.0 - softmax(distances)(0, 0);
 	float final_score = weight * score;
-
 	return final_score;
 }
 
@@ -228,10 +226,8 @@ Eigen::Tensor<float, 3> AnomalyDet::nearest_neighbor_interpolation(Eigen::Tensor
 	// 计算每个目标像素对应的输入像素的位置
 	Eigen::VectorXd row_indices = Eigen::VectorXd::LinSpaced(target_size.first, 0, target_size.first - 1) * input_image.dimension(1) / target_size.first;
 	Eigen::VectorXd col_indices = Eigen::VectorXd::LinSpaced(target_size.second, 0, target_size.second - 1) * input_image.dimension(2) / target_size.second;
-
 	// 使用数组索引和广播机制进行最近邻插值
 	Eigen::Tensor<float, 3> output_image(input_image.dimension(0), target_size.first, target_size.second);
-
 	for (int c = 0; c < input_image.dimension(0); ++c) {
 		for (int i = 0; i < target_size.first; ++i) {
 			for (int j = 0; j < target_size.second; ++j) {
@@ -241,7 +237,6 @@ Eigen::Tensor<float, 3> AnomalyDet::nearest_neighbor_interpolation(Eigen::Tensor
 			}
 		}
 	}
-
 	return output_image;
 }
 
@@ -250,14 +245,12 @@ Eigen::Tensor<float, 3> AnomalyDet::avgPool(const Eigen::Tensor<float, 3>& input
 	// 计算输出的大小
 	int outHeight = ((input.dimension(1) - poolHeight + 2 * padH) / strideH) + 1;
 	int outWidth = ((input.dimension(2) - poolWidth + 2 * padW) / strideW) + 1;
-
 	// 创建输出矩阵并初始化为零
 	Eigen::Tensor<float, 3> output(input.dimension(0), outHeight, outWidth);
 	int channels = input.dimension(0);
 	int input_rows = input.dimension(1);
 	int input_cols = input.dimension(2);
 	int poolArea = poolHeight * poolWidth;
-
 	// 执行平均池化
 	for (int c = 0; c < channels; ++c) {
 		for (int h = 0; h < outHeight; ++h) {
@@ -283,4 +276,3 @@ Eigen::Tensor<float, 3> AnomalyDet::avgPool(const Eigen::Tensor<float, 3>& input
 	}
 	return output;
 }
-

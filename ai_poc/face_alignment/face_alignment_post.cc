@@ -28,7 +28,7 @@
 #include "rasterize.h"
 
 // for image
-FaceAlignmentPost::FaceAlignmentPost(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"FaceAlignmentPost", debug_mode)
+FaceAlignmentPost::FaceAlignmentPost(char *kmodel_file, int debug_mode) : AIBase(kmodel_file,"FaceAlignmentPost", debug_mode)
 {
     model_name_ = "FaceAlignmentPost";
 }
@@ -81,7 +81,7 @@ void FaceAlignmentPost::inference()
 void FaceAlignmentPost::post_process(vector<float>& vertices)
 {
     ScopedTiming st(model_name_ + " post_process", debug_mode_);
-    int out_size = (each_output_size_by_byte_[1]-each_output_size_by_byte_[0])/sizeof(float);
+    int out_size = output_shapes_[0][0] * output_shapes_[0][1];
     vertices.insert(vertices.end(),p_outputs_[0],p_outputs_[0]+out_size);
 }
 

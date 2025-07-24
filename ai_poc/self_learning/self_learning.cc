@@ -22,97 +22,38 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.f
  */
-
+#include <cmath>
+#include <algorithm>
 #include "self_learning.h"
 
-bool GreaterSort(Evec a, Evec b) // 降序
+
+SelfLearning::SelfLearning(char *kmodel_file, float thres, int topk, FrameCHWSize image_size, int debug_mode)
+: AIBase(kmodel_file,"self_learning", debug_mode)
 {
-    return (a.score > b.score);
-}
-bool LessSort(Evec a, Evec b)  // 升序
-{
-    return (a.score < b.score);
-}
+    thres_=thres;
+    topk_=topk;
+    image_size_=image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
+    ai2d_out_tensor_=get_input_tensor(0);
 
-float getMold(const vector<float>& vec){   //求向量的模长
-    int n = vec.size();
-    float sum = 0.0;
-    for (int i = 0; i<n; ++i)
-        sum += vec[i] * vec[i];
-    return sqrt(sum);
-}
-
-float getSimilarity(const vector<float>& lhs, const vector<float>& rhs){
-    int n = lhs.size();
-
-    float tmp = 0.0;  //内积
-    for (int i = 0; i<n; ++i)
-    {
-        tmp += lhs[i] * rhs[i];
-    }
-
-    return tmp / (getMold(lhs)*getMold(rhs));
-}
-
-bool endsWith(const std::string& str, const std::string suffix) {
-    if (suffix.length() > str.length()) 
-    { 
-        return false; 
-    }
-
-    return (str.rfind(suffix) == (str.length() - suffix.length()));
-} 
-
-vector<string> split(const string &str, const string &pattern)
-{
-    char * strc = new char[strlen(str.c_str())+1];
-    strcpy(strc, str.c_str());   //string转换成C-string
-    vector<string> res;
-    char* temp = strtok(strc, pattern.c_str());
-    while(temp != NULL)
-    {
-        res.push_back(string(temp));
-        temp = strtok(NULL, pattern.c_str());
-    }
-    delete[] strc;
-    return res;
-}
-
-
-SelfLearning::SelfLearning(const char *kmodel_file, FrameSize crop_wh, float thres, int topk, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode)
-:topk(topk), thres(thres), AIBase(kmodel_file,"self_learning", debug_mode)
-{
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape_.channel, isp_shape_.height, isp_shape_.width};
-
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-    ai2d_out_tensor_ = get_input_tensor(0);
-
-    crop_box.w = float(crop_wh.width);
-    crop_box.h = float(crop_wh.height);
-    crop_box.x = (isp_shape.width / 2.0) - (crop_box.w / 2.0);
-    crop_box.y = (isp_shape.height / 2.0) - (crop_box.h / 2.0);
-
-    Utils::crop_resize(crop_box, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
+    // 计算裁剪参数
+    int min_len=std::min(image_size_.height,image_size_.width);
+    crop_w=min_len*0.4;
+    crop_h=min_len*0.4;
+    crop_x=image_size_.width/2-crop_w/2;
+    crop_y=image_size_.height/2-crop_h/2;
+    // 配置ai2d裁剪方法
+    Utils::crop_resize_set(image_size_,input_size_,crop_x,crop_y,crop_w,crop_h,ai2d_builder_);
 }
 
 SelfLearning::~SelfLearning()
 {
-
 }
 
-void SelfLearning::pre_process()
+void SelfLearning::pre_process(runtime_tensor &input_tensor)
 {
-    ScopedTiming st(model_name_ + " pre_process video", debug_mode_);
-
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    ai2d_builder_->invoke(ai2d_in_tensor_,ai2d_out_tensor_).expect("error occurred in ai2d running");
+    ScopedTiming st(model_name_ + " pre_process", debug_mode_);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void SelfLearning::inference()
@@ -121,75 +62,74 @@ void SelfLearning::inference()
     this->get_output();
 }
 
-float* SelfLearning::get_kpu_output(int *out_len)
-{
-    *out_len = output_shapes_[0][1];
-    return p_outputs_[0];
-}
-
-void SelfLearning::post_process(std::vector<std::string> features, std::vector<Evec> &results)
-{
-    ScopedTiming st(model_name_ + " post_process", debug_mode_);
-
+void SelfLearning::register_object(string &name){
     float *output = p_outputs_[0];
     int length = output_shapes_[0][1];
+    std::vector<float> output_feature(output,output+length);
+    features_.push_back(output_feature);
+    names_.push_back(name);
+}
 
-    vector<float> output_vec(output, output + length);
-    for(auto file:features)
-    {
-        if( endsWith( file, ".bin") )
-        {
-            vector<float> vec = Utils::read_binary_file< float >(("features/" + file).c_str());
-            float score = getSimilarity(output_vec, vec);
-            if (score > thres)
-            {
-                vector<string> res = split( file, "_" );
-                bool is_same = false;
-                for (auto r: results)
-                {
-                    if (r.category ==  res[0])
-                    {
-                        if (r.score < score)
-                        {
-                            r.bin_file = file;
-                            r.score = score;
-                        }
-                        is_same = true;
-                    }
-                }
-                
-                if (!is_same)
-                {
-                    if( results.size() < topk)
-                    {
-                        Evec evec;
-                        evec.category = res[0];
-                        evec.score = score;
-                        evec.bin_file = file;
-                        results.push_back( evec );
-                        std::sort(results.begin(), results.end(), GreaterSort);
+void SelfLearning::post_process(std::vector<ClassResult> &results){
+    ScopedTiming st(model_name_ + " post_process", debug_mode_);
+    float* output = p_outputs_[0];
+    int length = output_shapes_[0][1];
+    std::vector<float> current_feature(output, output + length);
+    // 计算与特征库的相似度
+    std::vector<std::pair<int, float>> index_similarity;
+    for (size_t i = 0; i < features_.size(); ++i) {
+        std::vector<float>& registered = features_[i];
 
-                    }
-                    else
-                    {
-                        if( score <= results[topk-1].score )
-                        {
-                            continue;
-                        }
-                        else
-                        {
-                            Evec evec;
-                            evec.category = res[0];
-                            evec.score = score;
-                            evec.bin_file = file;
-                            results.push_back( evec );
-                            std::sort(results.begin(), results.end(), GreaterSort);
-                            
-                            results.pop_back();
-                        }
-                    }
-                }
-            }
+        // 计算余弦相似度：dot(a, b)
+        float dot_ = 0.0f;
+        float sum_0=0.0f;
+        float sum_1=0.0f;
+        for (int j = 0; j < length; ++j) {
+            dot_ += current_feature[j] * registered[j]; 
+            sum_0+=current_feature[j]*current_feature[j];
+            sum_1+=registered[j]*registered[j];
+        }
+        sum_0=std::sqrt(sum_0);
+        sum_1=std::sqrt(sum_1);
+        float simularity=dot_/(sum_0*sum_1);
+
+        index_similarity.emplace_back(i, simularity);
+    }
+
+    // 取 TopK 最大的相似度
+    int k = std::min(topk_, static_cast<int>(index_similarity.size()));
+    std::partial_sort(
+        index_similarity.begin(), index_similarity.begin() + k, index_similarity.end(),
+        [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
+            return a.second > b.second;
+        }
+    );
+
+    // 打印 TopK 结果
+    for (int i = 0; i < k; ++i) {
+        ClassResult res_i;
+        if(index_similarity[i].second>thres_){
+            res_i.res=names_[index_similarity[i].first];
+            res_i.score=index_similarity[i].second;
+            results.push_back(res_i);
+        }
+    }
+}
+
+void SelfLearning::draw_result(cv::Mat &draw_frame,std::vector<ClassResult> &results){
+    int w_=draw_frame.cols;
+    int h_=draw_frame.rows;
+
+    int draw_x=int((float)crop_x/image_size_.width*w_);
+    int draw_y=int((float)crop_y/image_size_.height*h_);
+    int draw_w=int((float)crop_w/image_size_.width*w_);
+    int draw_h=int((float)crop_h/image_size_.height*h_);
+    cv::rectangle(draw_frame,cv::Rect(draw_x,draw_y,draw_w,draw_h),cv::Scalar(0,255,0,255),2);
+
+    int s=results.size();
+    if(s>0){
+        for(int i=0;i<results.size();i++){
+            cv::putText(draw_frame,results[i].res+" "+std::to_string(results[i].score),cv::Point(draw_x,draw_y-30*(s-i)),cv::FONT_HERSHEY_SIMPLEX,1,cv::Scalar(0,255,0,255),3);
         }
     }
 }

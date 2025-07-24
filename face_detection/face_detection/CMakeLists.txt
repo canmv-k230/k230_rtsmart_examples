@@ -1,4 +1,5 @@
-set(src main.cc utils.cc ai_base.cc face_detection.cc anchors_320.cc anchors_640.cc)
+# set source_code
+set(src main.cc face_detection.cc anchors_320.cc anchors_640.cc ai_base.cc ai_utils.cc video_pipeline.cc)
 set(bin face_detection.elf)
 
 include_directories(${PROJECT_SOURCE_DIR})

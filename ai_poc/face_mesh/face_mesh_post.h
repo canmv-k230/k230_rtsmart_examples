@@ -28,7 +28,7 @@
 #include <iostream>
 #include <vector>
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
 using std::vector;
@@ -51,7 +51,7 @@ public:
      * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
      * @return None
      */
-    FaceMeshPost(const char *kmodel_file, const int debug_mode = 1);
+    FaceMeshPost(char *kmodel_file, int debug_mode = 1);
 
     /**
      * @brief FaceMeshPost析构函数

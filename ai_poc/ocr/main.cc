@@ -25,8 +25,8 @@
 
 #include <iostream>
 #include <thread>
-#include "utils.h"
-#include "vi_vo.h"
+#include "ai_utils.h"
+#include "video_pipeline.h"
 #include "ocr_box.h"
 #include "ocr_reco.h"
 
@@ -35,8 +35,6 @@ using std::cout;
 using std::endl;
 
 std::atomic<bool> isp_stop(false);
-
-#define dict_len 6549
 
 void print_usage(const char *name)
 {
@@ -54,225 +52,76 @@ void print_usage(const char *name)
 
 void video_proc(char *argv[])
 {
-    vivcap_start();
-    k_video_frame_info vf_info;
-    void *pic_vaddr = NULL;       //osd
-    memset(&vf_info, 0, sizeof(vf_info));
-    vf_info.v_frame.width = osd_width;
-    vf_info.v_frame.height = osd_height;
-    vf_info.v_frame.stride[0] = osd_width;
-    vf_info.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
-    block = vo_insert_frame(&vf_info, &pic_vaddr);
-    size_t paddr = 0;
-    void *vaddr = nullptr;
-    size_t size = SENSOR_CHANNEL * SENSOR_HEIGHT * SENSOR_WIDTH;
-    int ret = kd_mpi_sys_mmz_alloc_cached(&paddr, &vaddr, "allocate", "anonymous", size);
-    if (ret)
-    {
-        std::cerr << "physical_memory_block::allocate failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
+    int debug_mode = atoi(argv[6]);
+    FrameCHWSize image_size={AI_FRAME_CHANNEL,AI_FRAME_HEIGHT, AI_FRAME_WIDTH};
+    // 创建一个空的Mat对象，用于存储绘制的帧
+    cv::Mat draw_frame(OSD_HEIGHT, OSD_WIDTH, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    // 创建一个空的runtime_tensor对象，用于存储输入数据
+    runtime_tensor input_tensor;
+    dims_t in_shape { 1, AI_FRAME_CHANNEL, AI_FRAME_HEIGHT, AI_FRAME_WIDTH };
 
-    OCRBox ocrbox(argv[1], atof(argv[2]), atof(argv[3]), {SENSOR_CHANNEL, SENSOR_HEIGHT, SENSOR_WIDTH}, reinterpret_cast<uintptr_t>(vaddr), reinterpret_cast<uintptr_t>(paddr), atoi(argv[6]));
-    OCRReco ocrreco(argv[5],dict_len,atoi(argv[6]));
+    // 创建一个PipeLine对象，用于处理视频流
+    PipeLine pl(debug_mode);
+    // 初始化PipeLine对象
+    pl.Create();
+    // 创建一个DumpRes对象，用于存储帧数据
+    DumpRes dump_res;
+
+    OCRBox ocr_det(argv[1], atof(argv[2]), atof(argv[3]), image_size, debug_mode);
+    OCRReco ocr_rec(argv[5],atoi(argv[6]));
     vector<ocr_det_res> results;
-
-    while (!isp_stop)
-    {
+    vector<std::string> results_str;
+    while(!isp_stop){
+        // 创建一个ScopedTiming对象，用于计算总时间
         ScopedTiming st("total time", 1);
-        {
-            ScopedTiming st("read capture", atoi(argv[6]));
-            // VICAP_CHN_ID_1 out rgb888p
-            memset(&dump_info, 0 , sizeof(k_video_frame_info));
-            ret = kd_mpi_vicap_dump_frame(vicap_dev, VICAP_CHN_ID_1, VICAP_DUMP_YUV, &dump_info, 1000);
-            if (ret) {
-                printf("sample_vicap...kd_mpi_vicap_dump_frame failed.\n");
-                continue;
-            }
-        }
-        {
-            ScopedTiming st("isp copy", atoi(argv[6]));
-            // 从vivcap中读取一帧图像到dump_info
-            auto vbvaddr = kd_mpi_sys_mmap_cached(dump_info.v_frame.phys_addr[0], size);
-            memcpy(vaddr, (void *)vbvaddr, SENSOR_HEIGHT * SENSOR_WIDTH * 3);  // 这里以后可以去掉，不用copy
-            kd_mpi_sys_munmap(vbvaddr, size);
-        }
-
+        // 从PipeLine中获取一帧数据，并创建tensor
+        pl.GetFrame(dump_res);
+        input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)dump_res.virt_addr, compute_size(in_shape) },false, hrt::pool_shared, dump_res.phy_addr).expect("cannot create input tensor");
+        hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("sync write_back failed");
+        //前处理，推理，后处理
         results.clear();
-        ocrbox.pre_process();
-        ocrbox.inference();
-        ocrbox.post_process({SENSOR_WIDTH, SENSOR_HEIGHT}, results);
-
-        int matsize = SENSOR_WIDTH * SENSOR_HEIGHT;
+        results_str.clear();
+        ocr_det.pre_process(input_tensor);
+        ocr_det.inference();
+        ocr_det.post_process(results);
+        draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
+        
         cv::Mat ori_img;
-        std::vector<cv::Mat> sensor_bgr;
-        cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-
-        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
-        {
-        cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-        cv::Mat ori_img_R = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr);
-        cv::Mat ori_img_G = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 1 * matsize);
-        cv::Mat ori_img_B = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 2 * matsize);
-        sensor_bgr.push_back(ori_img_B);
-        sensor_bgr.push_back(ori_img_G);
-        sensor_bgr.push_back(ori_img_R);
-        cv::merge(sensor_bgr, ori_img);
-
+        void* vaddr=reinterpret_cast<void*>(dump_res.virt_addr);
+        cv::Mat ori_img_R = cv::Mat(image_size.height, image_size.width, CV_8UC1, vaddr);
+        cv::Mat ori_img_G = cv::Mat(image_size.height, image_size.width, CV_8UC1, vaddr + image_size.width * image_size.height);
+        cv::Mat ori_img_B = cv::Mat(image_size.height, image_size.width, CV_8UC1, vaddr + 2 * image_size.width * image_size.height);
+        std::vector<cv::Mat> sensor_rgb;
+        sensor_rgb.push_back(ori_img_B);
+        sensor_rgb.push_back(ori_img_G);
+        sensor_rgb.push_back(ori_img_R);
+        cv::merge(sensor_rgb, ori_img);
         for(int i = 0; i < results.size(); i++)
         {
-            vector<Point> vec;
-            vector<Point2f> sort_vtd(4);
-            vec.clear();
+            vector<cv::Point> ori_vec;
+            vector<cv::Point2f> sort_vtd(4);
             for(int j = 0; j < 4; j++)
-                vec.push_back(results[i].vertices[j]);
-            cv::RotatedRect rect = cv::minAreaRect(vec);
+            {
+                ori_vec.push_back(results[i].vertices[j]);
+            }
+            cv::RotatedRect rect = cv::minAreaRect(ori_vec);
             cv::Point2f ver[4];
             rect.points(ver);
             cv::Mat crop;
-            Utils::warppersp(ori_img, crop, results[i], sort_vtd);
-            ocrreco.pre_process(crop);
-            ocrreco.inference();
-            vector<unsigned char> results2;
-            ocrreco.post_process(results2);
-            Utils::draw_ocr_text(float(sort_vtd[3].x), float(sort_vtd[3].y),osd_frame,results2,{osd_height, osd_width}, {SENSOR_WIDTH, SENSOR_HEIGHT});
+            ocr_det.warppersp(ori_img, crop, results[i], sort_vtd);
+            ocr_rec.pre_process(crop);
+            ocr_rec.inference();
+            std::string result_reco;
+            ocr_rec.post_process(result_reco);
+            results_str.push_back(result_reco);
         }
-
-        {
-            ScopedTiming st("osd draw", atoi(argv[5]));
-            Utils::draw_ocr_det_res(osd_frame, results, {osd_height, osd_width}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-        }
-        cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
-        }
-        #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
-        {   
-            #if defined(STUDIO_HDMI)
-                cv::Mat ori_img_R = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr);
-                cv::Mat ori_img_G = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 1 * matsize);
-                cv::Mat ori_img_B = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 2 * matsize);
-                sensor_bgr.push_back(ori_img_B);
-                sensor_bgr.push_back(ori_img_G);
-                sensor_bgr.push_back(ori_img_R);
-                cv::merge(sensor_bgr, ori_img);
-
-                for(int i = 0; i < results.size(); i++)
-                {
-                    vector<Point> vec;
-                    vector<Point2f> sort_vtd(4);
-                    vec.clear();
-                    for(int j = 0; j < 4; j++)
-                        vec.push_back(results[i].vertices[j]);
-                    cv::RotatedRect rect = cv::minAreaRect(vec);
-                    cv::Point2f ver[4];
-                    rect.points(ver);
-                    cv::Mat crop;
-                    Utils::warppersp(ori_img, crop, results[i], sort_vtd);
-                    ocrreco.pre_process(crop);
-                    ocrreco.inference();
-                    vector<unsigned char> results2;
-                    ocrreco.post_process(results2);
-                    Utils::draw_ocr_text(float(sort_vtd[3].x), float(sort_vtd[3].y),osd_frame,results2,{osd_width, osd_height}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-                }
-
-                {
-                    ScopedTiming st("osd draw", atoi(argv[5]));
-                    Utils::draw_ocr_det_res(osd_frame, results, {osd_width, osd_height}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-                }
-            #else
-            
-                cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-                
-                cv::Mat ori_img_R = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr);
-                cv::Mat ori_img_G = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 1 * matsize);
-                cv::Mat ori_img_B = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 2 * matsize);
-                sensor_bgr.push_back(ori_img_B);
-                sensor_bgr.push_back(ori_img_G);
-                sensor_bgr.push_back(ori_img_R);
-                cv::merge(sensor_bgr, ori_img);
-
-                for(int i = 0; i < results.size(); i++)
-                {
-                    vector<Point> vec;
-                    vector<Point2f> sort_vtd(4);
-                    vec.clear();
-                    for(int j = 0; j < 4; j++)
-                        vec.push_back(results[i].vertices[j]);
-                    cv::RotatedRect rect = cv::minAreaRect(vec);
-                    cv::Point2f ver[4];
-                    rect.points(ver);
-                    cv::Mat crop;
-                    Utils::warppersp(ori_img, crop, results[i], sort_vtd);
-                    ocrreco.pre_process(crop);
-                    ocrreco.inference();
-                    vector<unsigned char> results2;
-                    ocrreco.post_process(results2);
-                    Utils::draw_ocr_text(float(sort_vtd[3].x), float(sort_vtd[3].y),osd_frame,results2,{osd_height, osd_width}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-                }
-
-                {
-                    ScopedTiming st("osd draw", atoi(argv[5]));
-                    Utils::draw_ocr_det_res(osd_frame, results, {osd_height, osd_width}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-                }
-            
-                cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
-            #endif
-        }
-        #else
-        {
-        cv::Mat ori_img_R = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr);
-        cv::Mat ori_img_G = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 1 * matsize);
-        cv::Mat ori_img_B = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 2 * matsize);
-        sensor_bgr.push_back(ori_img_B);
-        sensor_bgr.push_back(ori_img_G);
-        sensor_bgr.push_back(ori_img_R);
-        cv::merge(sensor_bgr, ori_img);
-
-        for(int i = 0; i < results.size(); i++)
-        {
-            vector<Point> vec;
-            vector<Point2f> sort_vtd(4);
-            vec.clear();
-            for(int j = 0; j < 4; j++)
-                vec.push_back(results[i].vertices[j]);
-            cv::RotatedRect rect = cv::minAreaRect(vec);
-            cv::Point2f ver[4];
-            rect.points(ver);
-            cv::Mat crop;
-            Utils::warppersp(ori_img, crop, results[i], sort_vtd);
-            ocrreco.pre_process(crop);
-            ocrreco.inference();
-            vector<unsigned char> results2;
-            ocrreco.post_process(results2);
-            Utils::draw_ocr_text(float(sort_vtd[3].x), float(sort_vtd[3].y),osd_frame,results2,{osd_width, osd_height}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-        }
-
-        {
-            ScopedTiming st("osd draw", atoi(argv[5]));
-            Utils::draw_ocr_det_res(osd_frame, results, {osd_width, osd_height}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-        }
-        }
-        #endif
-
-        {
-            ScopedTiming st("osd copy", atoi(argv[5]));
-            memcpy(pic_vaddr, osd_frame.data, osd_width * osd_height * 4);
-            //显示通道插入帧
-            kd_mpi_vo_chn_insert_frame(osd_id+3, &vf_info);  //K_VO_OSD0
-
-            ret = kd_mpi_vicap_dump_release(vicap_dev, VICAP_CHN_ID_1, &dump_info);
-            if (ret) 
-                printf("sample_vicap...kd_mpi_vicap_dump_release failed.\n");
-        }
+        ocr_det.draw_result(draw_frame, results, results_str);
+        // 将绘制的帧插入到PipeLine中
+        pl.InsertFrame(draw_frame.data);
+        // 释放帧数据
+        pl.ReleaseFrame();
     }
-    vo_osd_release_block();
-    vivcap_stop();
-    // free memory
-    ret = kd_mpi_sys_mmz_free(paddr, vaddr);
-    if (ret)
-    {
-        std::cerr << "free failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
+    pl.Destroy();
 }
 
 int main(int argc, char *argv[])
@@ -295,38 +144,54 @@ int main(int argc, char *argv[])
     }
     else
     {
-        vector<ocr_det_res> results;
+        int debug_mode = atoi(argv[6]);
+        // 读取图片
         cv::Mat ori_img = cv::imread(argv[4]);
-        cv::Mat draw_img = ori_img.clone();
-        int ori_w = ori_img.cols;
-        int ori_h = ori_img.rows;
-        OCRBox ocrbox(argv[1], atof(argv[2]), atof(argv[3]), atoi(argv[6]));
-        OCRReco ocrreco(argv[5],dict_len,atoi(argv[6]));
-        ocrbox.pre_process(ori_img);
-        ocrbox.inference();
-        ocrbox.post_process({ori_w, ori_h}, results);
+        FrameCHWSize image_size={ori_img.channels(),ori_img.rows,ori_img.cols};
+         // 创建一个空的向量，用于存储chw图像数据,将读入的hwc数据转换成chw数据
+        std::vector<uint8_t> chw_vec;
+        std::vector<cv::Mat> bgrChannels(3);
+        cv::split(ori_img, bgrChannels);
+        for (auto i = 2; i > -1; i--)
+        {
+            std::vector<uint8_t> data = std::vector<uint8_t>(bgrChannels[i].reshape(1, 1));
+            chw_vec.insert(chw_vec.end(), data.begin(), data.end());
+        }
+        // 创建tensor
+        dims_t in_shape { 1, 3, ori_img.rows, ori_img.cols };
+        runtime_tensor input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("cannot create input tensor");
+        auto input_buf = input_tensor.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
+        memcpy(reinterpret_cast<char *>(input_buf.data()), chw_vec.data(), chw_vec.size());
+        hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("write back input failed");
 
+        OCRBox ocr_det(argv[1], atof(argv[2]), atof(argv[3]), image_size, debug_mode);
+        OCRReco ocr_rec(argv[5],atoi(argv[6]));
+        vector<ocr_det_res> results;
+        vector<std::string> results_str;
+        ocr_det.pre_process(input_tensor);
+        ocr_det.inference();
+        ocr_det.post_process(results);
         for(int i = 0; i < results.size(); i++)
         {
-            vector<Point> vec;
-            vector<Point2f> sort_vtd(4);
-            vec.clear();
+            vector<cv::Point> ori_vec;
+            vector<cv::Point2f> sort_vtd(4);
             for(int j = 0; j < 4; j++)
-                vec.push_back(results[i].vertices[j]);
-            cv::RotatedRect rect = cv::minAreaRect(vec);
+            {
+                ori_vec.push_back(results[i].vertices[j]);
+            }
+            cv::RotatedRect rect = cv::minAreaRect(ori_vec);
             cv::Point2f ver[4];
             rect.points(ver);
             cv::Mat crop;
-            Utils::warppersp(ori_img, crop, results[i], sort_vtd);
-            ocrreco.pre_process(crop);
-            ocrreco.inference();
-            vector<unsigned char> results2;
-            ocrreco.post_process(results2);
-            Utils::draw_ocr_text(int(results[i].meanx), int(results[i].meany),draw_img,results2);
+            ocr_det.warppersp(ori_img, crop, results[i], sort_vtd);
+            ocr_rec.pre_process(crop);
+            ocr_rec.inference();
+            std::string result_reco;
+            ocr_rec.post_process(result_reco);
+            results_str.push_back(result_reco);
         }
-        Utils::draw_ocr_det_res(draw_img, results);
-        results.clear();
-        cv::imwrite("ocr_result.jpg", draw_img);
+        ocr_det.draw_result(ori_img, results, results_str);
+        cv::imwrite("ocr_det_rec.jpg", ori_img);
     }
     return 0;
 }

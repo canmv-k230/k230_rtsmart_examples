@@ -27,12 +27,21 @@
 #define _ANOMALY_DET_H_
 
 #include "ai_base.h"
-#include "utils.h"
+#include "ai_utils.h"
 #include <Eigen/Dense>
 #include <Eigen/Core>
 #include <unsupported/Eigen/CXX11/Tensor>
+#include <opencv2/core.hpp>
+#include <opencv2/core/eigen.hpp>
+#include <opencv2/imgproc.hpp>
 
 using namespace std;
+
+typedef struct anomaly_res
+{
+    float score;//异常分数
+    std::string label;//推理结果
+}anomaly_res;
 
 // ANOMALY_DET
 class AnomalyDet:public AIBase
@@ -45,7 +54,7 @@ public:
      * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
      * @return None
      */
-    AnomalyDet(const char *kmodel_file, float obj_thresh, const int debug_mode = 1);
+    AnomalyDet(char *kmodel_file, float obj_thresh,FrameCHWSize image_size, int debug_mode = 1);
 	
 	~AnomalyDet(){}
 	/**
@@ -53,7 +62,7 @@ public:
      * @param ori_img 原始图片
      * @return None
      */
-    void pre_process(cv::Mat ori_img);
+    void pre_process(runtime_tensor &input_tensor);
 
 	/**
      * @brief kmodel推理
@@ -67,6 +76,14 @@ public:
      * @return None
      */
     void post_process(vector<anomaly_res> &results);
+
+    /**
+     * @brief 将异常检测任务的结果绘制到图像上
+     * @param frame         原始图像
+     * @param results       分类的结果
+     * @return None
+     */
+    void draw_anomaly_res(cv::Mat& frame, vector<anomaly_res>& results);
 
 private:
 
@@ -138,8 +155,10 @@ private:
     runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
 
+    FrameCHWSize image_size_;
+    FrameCHWSize input_size_;
+
     float obj_thresh_; // 异常检测阈值
     string labels_;
 };
-
 #endif

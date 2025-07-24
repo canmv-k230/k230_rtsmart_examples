@@ -38,7 +38,7 @@ void Key::drawKey(cv::Mat& img,  float alpha = 0.5, double fontScale = 2)
     int fontFace = cv::FONT_HERSHEY_SIMPLEX;
     int thickness = 2;
     cv::Scalar text_color = cv::Scalar(255, 255, 255, 255);
-    cv::Scalar bg_color = cv::Scalar(255, 0, 0, 0);
+    cv::Scalar bg_color = cv::Scalar(0, 0, 0,255);
     cv::Mat bg_rec = img(cv::Rect(x_, y_, w_, h_));
     cv::Mat white_rect(bg_rec.size(), bg_rec.type(), bg_color);
     cv::addWeighted(bg_rec, alpha, white_rect, 1 - alpha, 1.0, bg_rec);

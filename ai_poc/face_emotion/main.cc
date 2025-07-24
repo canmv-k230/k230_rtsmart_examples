@@ -24,10 +24,10 @@
  */
 #include <iostream>
 #include <thread>
-#include "utils.h"
-#include "vi_vo.h"
+#include "ai_utils.h"
 #include "face_detection.h"
 #include "face_emotion.h"
+#include "video_pipeline.h"
 
 using std::cerr;
 using std::cout;
@@ -51,126 +51,53 @@ void print_usage(const char *name)
 
 void video_proc(char *argv[])
 {
-    vivcap_start();
-    // 设置osd参数
-    k_video_frame_info vf_info;
-    void *pic_vaddr = NULL;       //osd
-    memset(&vf_info, 0, sizeof(vf_info));
-    vf_info.v_frame.width = osd_width;
-    vf_info.v_frame.height = osd_height;
-    vf_info.v_frame.stride[0] = osd_width;
-    vf_info.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
-    block = vo_insert_frame(&vf_info, &pic_vaddr);
+    int debug_mode = atoi(argv[6]);
+    FrameCHWSize image_size={AI_FRAME_CHANNEL,AI_FRAME_HEIGHT, AI_FRAME_WIDTH};
+    // 创建一个空的Mat对象，用于存储绘制的帧
+    cv::Mat draw_frame(OSD_HEIGHT, OSD_WIDTH, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    // 创建一个空的runtime_tensor对象，用于存储输入数据
+    runtime_tensor input_tensor;
+    dims_t in_shape { 1, AI_FRAME_CHANNEL, AI_FRAME_HEIGHT, AI_FRAME_WIDTH };
 
-    // alloc memory,get isp memory
-    size_t paddr = 0;
-    void *vaddr = nullptr;
-    size_t size = SENSOR_CHANNEL * SENSOR_HEIGHT * SENSOR_WIDTH;
-    int ret = kd_mpi_sys_mmz_alloc_cached(&paddr, &vaddr, "allocate", "anonymous", size);
-    if (ret)
-    {
-        std::cerr << "physical_memory_block::allocate failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
-    FaceDetection face_det(argv[1], atof(argv[2]),atof(argv[3]), {SENSOR_CHANNEL, SENSOR_HEIGHT, SENSOR_WIDTH}, reinterpret_cast<uintptr_t>(vaddr), reinterpret_cast<uintptr_t>(paddr), atoi(argv[6]));
-    FaceEmotion face_emo(argv[4], {SENSOR_CHANNEL, SENSOR_HEIGHT, SENSOR_WIDTH}, reinterpret_cast<uintptr_t>(vaddr), reinterpret_cast<uintptr_t>(paddr), atoi(argv[6]));
+    // 创建一个PipeLine对象，用于处理视频流
+    PipeLine pl(debug_mode);
+    // 初始化PipeLine对象
+    pl.Create();
+    // 创建一个DumpRes对象，用于存储帧数据
+    DumpRes dump_res;
+    // 创建FaceDetection实例
+    FaceDetection face_det(argv[1], atof(argv[2]),atof(argv[3]), image_size, debug_mode);
+    FaceEmotion face_emo(argv[4], image_size, debug_mode);
 
     vector<FaceDetectionInfo> det_results;
-    while (!isp_stop)
-    {
+
+    while(!isp_stop){
+        // 创建一个ScopedTiming对象，用于计算总时间
         ScopedTiming st("total time", 1);
-
-        {
-            ScopedTiming st("read capture", atoi(argv[6]));
-            // 从vivcap中读取一帧图像到dump_info
-            memset(&dump_info, 0, sizeof(k_video_frame_info));
-            ret = kd_mpi_vicap_dump_frame(vicap_dev, VICAP_CHN_ID_1, VICAP_DUMP_YUV, &dump_info, 1000);
-            if (ret)
-            {
-                printf("sample_vicap...kd_mpi_vicap_dump_frame failed.\n");
-                continue;
-            }
-        }
-
-        {
-            ScopedTiming st("isp copy", atoi(argv[6]));
-            auto vbvaddr = kd_mpi_sys_mmap_cached(dump_info.v_frame.phys_addr[0], size);
-            memcpy(vaddr, (void *)vbvaddr, SENSOR_HEIGHT * SENSOR_WIDTH * 3);  // 这里以后可以去掉，不用copy
-            kd_mpi_sys_munmap(vbvaddr, size);
-        }
-
+        // 从PipeLine中获取一帧数据，并创建tensor
+        pl.GetFrame(dump_res);
+        input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)dump_res.virt_addr, compute_size(in_shape) },false, hrt::pool_shared, dump_res.phy_addr).expect("cannot create input tensor");
+        hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("sync write_back failed");
+        //前处理，推理，后处理
         det_results.clear();
-
-        face_det.pre_process();
+        face_det.pre_process(input_tensor);
         face_det.inference();
-        // 旋转后图像
-        face_det.post_process({SENSOR_WIDTH, SENSOR_HEIGHT}, det_results);
-
-        cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+        face_det.post_process(image_size,det_results);
+        draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
         for (int i = 0; i < det_results.size(); ++i)
         {
-            face_emo.pre_process(det_results[i].sparse_kps.points);
+            face_emo.pre_process(input_tensor,det_results[i].sparse_kps.points);
             face_emo.inference();
-
             FaceEmotionInfo emo_result;  
             face_emo.post_process(emo_result);
-            #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
-            {
-                ScopedTiming st("osd draw", atoi(argv[6]));
-                cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-                face_emo.draw_result(osd_frame,det_results[i].bbox,emo_result,false);
-                cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
-            }
-            #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
-            {
-                #if defined(STUDIO_HDMI)
-                {
-                    ScopedTiming st("osd draw", atoi(argv[6]));
-                    face_emo.draw_result(osd_frame,det_results[i].bbox,emo_result,false);
-                }
-                #else
-                {
-                    ScopedTiming st("osd draw", atoi(argv[6]));
-                    cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-                    face_emo.draw_result(osd_frame,det_results[i].bbox,emo_result,false);
-                    cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
-                }
-                #endif
-            }
-            #else
-            {
-                ScopedTiming st("osd draw", atoi(argv[6]));
-                face_emo.draw_result(osd_frame,det_results[i].bbox,emo_result,false);
-            }
-            #endif 
-            
+            face_emo.draw_result(draw_frame,det_results[i].bbox,emo_result,false);
         }
-
-        {
-            ScopedTiming st("osd copy", atoi(argv[6]));
-            memcpy(pic_vaddr, osd_frame.data, osd_width * osd_height * 4);
-            // 显示通道插入帧
-            kd_mpi_vo_chn_insert_frame(osd_id + 3, &vf_info); // K_VO_OSD0
-            // printf("kd_mpi_vo_chn_insert_frame success \n");
-            ret = kd_mpi_vicap_dump_release(vicap_dev, VICAP_CHN_ID_1, &dump_info);
-            if (ret)
-            {
-                printf("sample_vicap...kd_mpi_vicap_dump_release failed.\n");
-            }
-        }
+        // 将绘制的帧插入到PipeLine中
+        pl.InsertFrame(draw_frame.data);
+        // 释放帧数据
+        pl.ReleaseFrame();
     }
-
-    vo_osd_release_block();
-    vivcap_stop();
-
-    // free memory
-    ret = kd_mpi_sys_mmz_free(paddr, vaddr);
-    if (ret)
-    {
-        std::cerr << "free failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
+    pl.Destroy();
 }
 
 int main(int argc, char *argv[])
@@ -195,24 +122,37 @@ int main(int argc, char *argv[])
     }
     else
     {   
+        int debug_mode = atoi(argv[6]);
+        // 读取图片
         cv::Mat ori_img = cv::imread(argv[5]);
-        int ori_w = ori_img.cols;
-        int ori_h = ori_img.rows;
+        FrameCHWSize image_size={ori_img.channels(),ori_img.rows,ori_img.cols};
+        // 创建一个空的向量，用于存储chw图像数据,将读入的hwc数据转换成chw数据
+        std::vector<uint8_t> chw_vec;
+        std::vector<cv::Mat> bgrChannels(3);
+        cv::split(ori_img, bgrChannels);
+        for (auto i = 2; i > -1; i--)
+        {
+            std::vector<uint8_t> data = std::vector<uint8_t>(bgrChannels[i].reshape(1, 1));
+            chw_vec.insert(chw_vec.end(), data.begin(), data.end());
+        }
+        // 创建tensor
+        dims_t in_shape { 1, 3, ori_img.rows, ori_img.cols };
+        runtime_tensor input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("cannot create input tensor");
+        auto input_buf = input_tensor.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
+        memcpy(reinterpret_cast<char *>(input_buf.data()), chw_vec.data(), chw_vec.size());
+        hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("write back input failed");
 
-        FaceDetection face_det(argv[1], atof(argv[2]),atof(argv[3]), atoi(argv[6]));
-        face_det.pre_process(ori_img);
-        face_det.inference();
-
+        FaceDetection face_det(argv[1], atof(argv[2]),atof(argv[3]), image_size, debug_mode);
+        FaceEmotion face_emo(argv[4], image_size, debug_mode);
         vector<FaceDetectionInfo> det_results;
-        face_det.post_process({ori_w, ori_h}, det_results);
-    
-        FaceEmotion face_emo(argv[4], atoi(argv[6]));
 
+        face_det.pre_process(input_tensor);
+        face_det.inference();
+        face_det.post_process(image_size,det_results);
         for (int i = 0; i < det_results.size(); ++i)
         {
-            face_emo.pre_process(ori_img, det_results[i].sparse_kps.points);
+            face_emo.pre_process(input_tensor, det_results[i].sparse_kps.points);
             face_emo.inference();
-
             FaceEmotionInfo emo_result;
             face_emo.post_process(emo_result); 
             face_emo.draw_result(ori_img,det_results[i].bbox,emo_result);
