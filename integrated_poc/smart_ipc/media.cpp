@@ -587,6 +587,9 @@ int KdMedia::_init_vb_pool()
                 vb_config.comm_pool[pool_index].blk_cnt = 4;
                 vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
                 vb_config.comm_pool[pool_index].blk_size = input_config_.vo_width * input_config_.vo_height * 2;
+
+                input_config_.venc_width = input_config_.vo_width;
+                input_config_.venc_height = input_config_.vo_height;
             }
 
         }
@@ -1096,6 +1099,11 @@ int KdMedia::_init_wbc()
 
     kd_mpi_vo_set_wbc_attr(&wb_attr);
     kd_mpi_vo_enable_wbc();
+
+    //modify venc input config
+    input_config_.venc_width = wbc_width_;
+    input_config_.venc_height = wbc_height_;
+
     return 0;
 }
 
