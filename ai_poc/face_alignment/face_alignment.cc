@@ -27,62 +27,27 @@
 #include "constant.h"
 #include "rasterize.h"
 
-// for image
-FaceAlignment::FaceAlignment(const char *kmodel_file,const char *post_kmodel_file, const int debug_mode) : AIBase(kmodel_file,"FaceAlignment", debug_mode),post_obj_(post_kmodel_file,debug_mode)
-{
-    model_name_ = "FaceAlignment";
-    constant_init();
-    ai2d_out_tensor_ = get_input_tensor(0);
-    post_ver_dim_ = post_obj_.output_shapes_[0][1];
-}
-
-// for video
-FaceAlignment::FaceAlignment(const char *kmodel_file,const char *post_kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : AIBase(kmodel_file,"FaceAlignment", debug_mode),post_obj_(post_kmodel_file,debug_mode)
+FaceAlignment::FaceAlignment(char *kmodel_file,char *post_kmodel_file, FrameCHWSize image_size, int debug_mode) : AIBase(kmodel_file,"FaceAlignment", debug_mode),post_obj_(post_kmodel_file,debug_mode)
 {
     model_name_ = "FaceAlignment";
     constant_init();
     post_ver_dim_ = post_obj_.output_shapes_[0][1];
-    vaddr_ = vaddr;
-
-    // ai2d_in_tensor to isp
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-    int isp_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-#if 0
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, isp_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
-
+    image_size_=image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
     ai2d_out_tensor_ = get_input_tensor(0);
 }
 
-// ai2d for image
-void FaceAlignment::pre_process(cv::Mat ori_img,Bbox &bbox)
+FaceAlignment::~FaceAlignment()
 {
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    
-    Bbox roi_b;
-    roi = parse_roi_box_from_bbox({ori_img.cols,ori_img.rows},bbox,roi_b);
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img,chw_vec);
-    Utils::crop_resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, roi_b, ai2d_out_tensor_);
 }
 
-// ai2d for video
-void FaceAlignment::pre_process(Bbox &bbox)
-{
-    ScopedTiming st(model_name_ + " pre_process video", debug_mode_);
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-
+void FaceAlignment::pre_process(runtime_tensor& input_tensor,Bbox &bbox){
     Bbox roi_b;
-    roi = parse_roi_box_from_bbox({isp_shape_.width,isp_shape_.height},bbox,roi_b);
-    Utils::crop_resize(roi_b,ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
+    roi = parse_roi_box_from_bbox(image_size_,bbox,roi_b);
+    Utils::crop_resize_set(image_size_,input_size_,roi_b.x,roi_b.y,roi_b.w,roi_b.h,ai2d_builder_);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
+
 
 void FaceAlignment::inference()
 {
@@ -90,7 +55,7 @@ void FaceAlignment::inference()
     this->get_output();
 }
 
-void FaceAlignment::post_process(FrameSize frame_size,vector<float>& vertices, bool pic_mode)
+void FaceAlignment::post_process(FrameCHWSize frame_size,vector<float>& vertices, bool pic_mode)
 {
     ScopedTiming st(model_name_ + " post_process", debug_mode_);
     vector<float> param(p_outputs_[0],p_outputs_[0] + output_shapes_[0][1]);
@@ -99,14 +64,13 @@ void FaceAlignment::post_process(FrameSize frame_size,vector<float>& vertices, b
     post_obj_.pre_process(param);
     post_obj_.inference();
     post_obj_.post_process(vertices);
-    
     if (pic_mode==false)
     {
         //因为要在osd上画图，故需要把返回值变换到osd的长、宽
-        roi.x0 = roi.x0 / isp_shape_.width * frame_size.width;
-        roi.y0 = roi.y0 / isp_shape_.height * frame_size.height;
-        roi.x1 = roi.x1 / isp_shape_.width * frame_size.width;
-        roi.y1 = roi.y1 / isp_shape_.height * frame_size.height; 
+        roi.x0 = roi.x0 / image_size_.width * frame_size.width;
+        roi.y0 = roi.y0 / image_size_.height * frame_size.height;
+        roi.x1 = roi.x1 / image_size_.width * frame_size.width;
+        roi.y1 = roi.y1 / image_size_.height * frame_size.height; 
     }
     recon_vers(roi, vertices);
 }
@@ -118,7 +82,7 @@ void FaceAlignment::constant_init()
     ncc_code = Utils::read_binary_file<float>("ncc_code.bin");
 }
 /*************************前处理********************/
-LeftTopRightBottom FaceAlignment::parse_roi_box_from_bbox(FrameSize frame_size,Bbox& b,Bbox& roi_b)
+LeftTopRightBottom FaceAlignment::parse_roi_box_from_bbox(FrameCHWSize frame_size,Bbox& b,Bbox& roi_b)
 {
     ScopedTiming st(model_name_ + " parse_roi_box_from_bbox", debug_mode_);
     float old_size = ( b.w + b.h) / 2;
@@ -271,8 +235,4 @@ void FaceAlignment::rasterize(cv::Mat& img, vector<float>& vertices,vector<float
     ScopedTiming st(model_name_ + " rasterize", debug_mode_);
     vector<float> buffer(img.cols*img.rows,-1e8);
     _rasterize(img.data, vertices.data(), bfm_tri.data(), colors.data(), buffer.data(), bfm_tri.size()/3, img.rows, img.cols, img.channels(), alpha, reverse);
-}
-
-FaceAlignment::~FaceAlignment()
-{
 }

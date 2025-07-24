@@ -35,39 +35,24 @@ cv::Scalar color_list_for_emo[] = {
     cv::Scalar(0, 170, 255),
     cv::Scalar(0, 255, 255)};
 
-//图像颜色集
 cv::Scalar color_list_for_osd_emo[] = {
-    cv::Scalar(255, 255, 255, 0),
-    cv::Scalar(255, 0, 255, 0),
-    cv::Scalar(255, 50, 220, 255),
-    cv::Scalar(255, 255, 0, 255),
+    cv::Scalar(0, 255, 255, 255),
+    cv::Scalar(0, 255, 0, 255),
+    cv::Scalar(255, 220, 50, 255),
+    cv::Scalar(255, 0, 255, 255),
     cv::Scalar(255, 0, 0, 255),
-    cv::Scalar(255, 0, 170, 255),
-    cv::Scalar(255, 0, 255, 255)};
+    cv::Scalar(255, 170, 0, 255),
+    cv::Scalar(255, 255, 0, 255)
+};
 
-FaceEmotion::FaceEmotion(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"FaceEmotion",debug_mode)
+
+
+FaceEmotion::FaceEmotion(char *kmodel_file, FrameCHWSize image_size, int debug_mode) : AIBase(kmodel_file,"FaceEmotion", debug_mode)
 {
     model_name_ = "FaceEmotion";
 	label_list_ = {"Anger","Disgust","Fear","Happiness","Neutral","Sadness","Surprise"};    
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-FaceEmotion::FaceEmotion(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : AIBase(kmodel_file,"FaceEmotion", debug_mode)
-{
-    model_name_ = "FaceEmotion";
-	label_list_ = {"Anger","Disgust","Fear","Happiness","Neutral","Sadness","Surprise"};    
-
-    // input->isp（Fixed size）
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-#if 0
-    int in_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, in_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
+    image_size_=image_size;
+    input_size_ = {input_shapes_[0][1], input_shapes_[0][2], input_shapes_[0][3]};
     ai2d_out_tensor_ = get_input_tensor(0);
 }
 
@@ -75,38 +60,13 @@ FaceEmotion::~FaceEmotion()
 {
 }
 
-// ai2d for image
-void FaceEmotion::pre_process(cv::Mat ori_img, float* sparse_points)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    get_affine_matrix(sparse_points);
-
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);
-    Utils::affine({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, matrix_dst_, ai2d_out_tensor_);
-    
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("FaceEmotion_input_gray.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
+void FaceEmotion::pre_process(runtime_tensor &input_tensor, float* sparse_points){
+	ScopedTiming st(model_name_ + " pre_process", debug_mode_);
+	get_affine_matrix(sparse_points);
+	Utils::affine_set(image_size_, input_size_,ai2d_builder_, matrix_dst_);
+	ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
-// ai2d for video
-void FaceEmotion::pre_process(float* sparse_points)
-{
-    ScopedTiming st(model_name_ + " pre_process_video", debug_mode_);
-    get_affine_matrix(sparse_points);
-#if 1
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-#endif
-    Utils::affine(matrix_dst_, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("FaceEmotion_input.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
-}
 
 void FaceEmotion::inference()
 {
@@ -117,7 +77,7 @@ void FaceEmotion::inference()
 void FaceEmotion::post_process(FaceEmotionInfo& result)
 {
 	ScopedTiming st(model_name_ + " post_process", debug_mode_);
-	vector<float> pred(p_outputs_[0],p_outputs_[0]+each_output_size_by_byte_[1]/4);
+	vector<float> pred(p_outputs_[0],p_outputs_[0]+output_shapes_[0][0]*output_shapes_[0][1]);
 	vector<float> softmax_pred;
     softmax(pred,softmax_pred);
 	auto max_score = std::max_element(softmax_pred.begin(), softmax_pred.end());
@@ -135,7 +95,6 @@ void FaceEmotion::draw_result(cv::Mat& src_img,Bbox& bbox,FaceEmotionInfo& resul
 
     char text[30];
 	sprintf(text, "%s",result.label.c_str());
-	// sprintf(text, "%s:%.2f",result.name.c_str(), result.score);
 
 	if(pic_mode)
     {
@@ -144,10 +103,10 @@ void FaceEmotion::draw_result(cv::Mat& src_img,Bbox& bbox,FaceEmotionInfo& resul
     }
     else
     {
-        int x = bbox.x / isp_shape_.width * src_w;
-        int y = bbox.y / isp_shape_.height * src_h;
-        int w = bbox.w / isp_shape_.width * src_w;
-        int h = bbox.h / isp_shape_.height * src_h;
+        int x = bbox.x / image_size_.width * src_w;
+        int y = bbox.y / image_size_.height * src_h;
+        int w = bbox.w / image_size_.width * src_w;
+        int h = bbox.h / image_size_.height * src_h;
         cv::rectangle(src_img, cv::Rect(x, y , w, h), cv::Scalar(255,255, 255, 255), 2, 2, 0);
 		cv::putText(src_img, text , {x,std::max(int(y-10),0)}, cv::FONT_HERSHEY_COMPLEX, 2, color_list_for_osd_emo[result.idx], 2, 8, 0);
 	} 

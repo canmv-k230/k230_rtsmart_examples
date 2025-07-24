@@ -9,14 +9,14 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
             default n
 
         choice RTT_AI_EXAMPLES_MODE
-            bool "Display mode"
-            default RTT_AI_EXAMPLES_MODE_HDMI
-            depends on RTT_ENABLE_BUILD_AI_EXAMPLES && BOARD_K230_CANMV_01STUDIO
-
-            config RTT_AI_EXAMPLES_MODE_HDMI
-                bool "HDMI"
-            config RTT_AI_EXAMPLES_MODE_LCD
-                bool "LCD"
+            bool "Display Type"
+            default RTT_AI_EXAMPLES_MODE_LT9611
+            depends on RTT_ENABLE_BUILD_AI_EXAMPLES
+            
+            config RTT_AI_EXAMPLES_MODE_LT9611
+                bool "lt9611"
+            config RTT_AI_EXAMPLES_MODE_ST7701
+                bool "st7701"
         endchoice
 
         if RTT_ENABLE_BUILD_AI_EXAMPLES
@@ -31,10 +31,6 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
 
             config RTT_AI_EXAMPLES_CROSSWALK_DETECT
                 bool "Crosswalk detect Example"
-                default y
-
-            config RTT_AI_EXAMPLES_DEMO_MIX
-                bool "Demo mix Example"
                 default y
 
             config RTT_AI_EXAMPLES_DISTRACTION_REMINDER

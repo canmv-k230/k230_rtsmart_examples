@@ -25,8 +25,8 @@
 
 #include <iostream>
 #include <thread>
-#include "utils.h"
-#include "vi_vo.h"
+#include "ai_utils.h"
+#include "video_pipeline.h"
 #include "licence_det.h"
 #include "licence_reco.h"
 
@@ -34,8 +34,6 @@
 using std::cerr;
 using std::cout;
 using std::endl;
-
-const int g_dict_size = 74;
 
 std::atomic<bool> isp_stop(false);
 
@@ -53,604 +51,81 @@ void print_usage(const char *name)
          << endl;
 }
 
-void video_proc_v1(char *argv[])
+void video_proc(char *argv[])
 {
-    vivcap_start();
+    int debug_mode = atoi(argv[6]);
+    FrameCHWSize image_size={AI_FRAME_CHANNEL,AI_FRAME_HEIGHT, AI_FRAME_WIDTH};
+    // 创建一个空的Mat对象，用于存储绘制的帧
+    cv::Mat draw_frame(OSD_HEIGHT, OSD_WIDTH, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    // 创建一个空的runtime_tensor对象，用于存储输入数据
+    runtime_tensor input_tensor;
+    dims_t in_shape { 1, AI_FRAME_CHANNEL, AI_FRAME_HEIGHT, AI_FRAME_WIDTH };
 
-    k_video_frame_info vf_info;
-    void *pic_vaddr = NULL;       //osd
+    // 创建一个PipeLine对象，用于处理视频流
+    PipeLine pl(debug_mode);
+    // 初始化PipeLine对象
+    pl.Create();
+    // 创建一个DumpRes对象，用于存储帧数据
+    DumpRes dump_res;
 
-    memset(&vf_info, 0, sizeof(vf_info));
-
-    vf_info.v_frame.width = osd_width;
-    vf_info.v_frame.height = osd_height;
-    vf_info.v_frame.stride[0] = osd_width;
-    vf_info.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
-    block = vo_insert_frame(&vf_info, &pic_vaddr);
-
-    // alloc memory
-    size_t paddr = 0;
-    void *vaddr = nullptr;
-    size_t size = SENSOR_CHANNEL * SENSOR_HEIGHT * SENSOR_WIDTH;
-    int ret = kd_mpi_sys_mmz_alloc_cached(&paddr, &vaddr, "allocate", "anonymous", size);
-    if (ret)
-    {
-        std::cerr << "physical_memory_block::allocate failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
-    LicenceDetect licenceDet(argv[1], atof(argv[2]), atof(argv[3]), {SENSOR_CHANNEL, SENSOR_HEIGHT, SENSOR_WIDTH}, reinterpret_cast<uintptr_t>(vaddr), reinterpret_cast<uintptr_t>(paddr), atoi(argv[6]));
-    LicenceReco licenceReco(argv[5],g_dict_size,atoi(argv[6]));
-
-    vector<BoxPoint> results_det;
-
-    while (!isp_stop)
-    {
+    LicenceDetect licenceDet(argv[1], atof(argv[2]), atof(argv[3]), image_size,debug_mode);
+    LicenceReco licenceReco(argv[5],debug_mode);
+    vector<BoxPoint> results;
+    vector<std::string> results_str;
+    while(!isp_stop){
+        // 创建一个ScopedTiming对象，用于计算总时间
         ScopedTiming st("total time", 1);
-
-        {
-            ScopedTiming st("read capture", atoi(argv[6]));
-            // VICAP_CHN_ID_1 out rgb888p
-            memset(&dump_info, 0 , sizeof(k_video_frame_info));
-            ret = kd_mpi_vicap_dump_frame(vicap_dev, VICAP_CHN_ID_1, VICAP_DUMP_YUV, &dump_info, 1000);
-            if (ret) {
-                printf("sample_vicap...kd_mpi_vicap_dump_frame failed.\n");
-                continue;
-            }
-        }
-            
-
-        {
-            ScopedTiming st("isp copy", atoi(argv[6]));
-            // 从vivcap中读取一帧图像到dump_info
-            auto vbvaddr = kd_mpi_sys_mmap_cached(dump_info.v_frame.phys_addr[0], size);
-            memcpy(vaddr, (void *)vbvaddr, SENSOR_HEIGHT * SENSOR_WIDTH * 3);  // 这里以后可以去掉，不用copy
-            kd_mpi_sys_munmap(vbvaddr, size);
-        }
-
-        results_det.clear();
-
-        licenceDet.pre_process();
+        // 从PipeLine中获取一帧数据，并创建tensor
+        pl.GetFrame(dump_res);
+        input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)dump_res.virt_addr, compute_size(in_shape) },false, hrt::pool_shared, dump_res.phy_addr).expect("cannot create input tensor");
+        hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("sync write_back failed");
+        //前处理，推理，后处理
+        results.clear();
+        results_str.clear();
+        licenceDet.pre_process(input_tensor);
         licenceDet.inference();
-
-        licenceDet.post_process({SENSOR_WIDTH, SENSOR_HEIGHT}, results_det);
-
-        int matsize = SENSOR_WIDTH * SENSOR_HEIGHT;
+        licenceDet.post_process(results);
+        draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
+        
         cv::Mat ori_img;
-        cv::Mat ori_img_R = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr);
-        cv::Mat ori_img_G = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 1 * matsize);
-        cv::Mat ori_img_B = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 2 * matsize);
+        void* vaddr=reinterpret_cast<void*>(dump_res.virt_addr);
+        cv::Mat ori_img_R = cv::Mat(image_size.height, image_size.width, CV_8UC1, vaddr);
+        cv::Mat ori_img_G = cv::Mat(image_size.height, image_size.width, CV_8UC1, vaddr + image_size.width * image_size.height);
+        cv::Mat ori_img_B = cv::Mat(image_size.height, image_size.width, CV_8UC1, vaddr + 2 * image_size.width * image_size.height);
         std::vector<cv::Mat> sensor_rgb;
         sensor_rgb.push_back(ori_img_B);
         sensor_rgb.push_back(ori_img_G);
         sensor_rgb.push_back(ori_img_R);
         cv::merge(sensor_rgb, ori_img);
-
-        cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-
-        for(int i = 0; i < results_det.size(); i++)
+        for(int i = 0; i < results.size(); i++)
         {
-            vector<Point> ori_vec;
-            vector<Point2f> sort_vtd(4);
-            ori_vec.clear();
+            vector<cv::Point> ori_vec;
+            vector<cv::Point2f> sort_vtd(4);
             for(int j = 0; j < 4; j++)
             {
-                ori_vec.push_back(results_det[i].vertices[j]);
+                ori_vec.push_back(results[i].vertices[j]);
             }
             cv::RotatedRect rect = cv::minAreaRect(ori_vec);
             cv::Point2f ver[4];
             rect.points(ver);
-
             cv::Mat crop;
-            Utils::warppersp(ori_img, crop, results_det[i], sort_vtd);
+            licenceDet.warppersp(ori_img, crop, results[i], sort_vtd);
             cv::Mat crop_gray;
-            cv::cvtColor(crop, crop_gray, COLOR_BGR2GRAY);
-
+            cv::cvtColor(crop, crop_gray, cv::COLOR_BGR2GRAY);
             licenceReco.pre_process(crop_gray);
             licenceReco.inference();
-
-            vector<unsigned char> results_reco;
-            licenceReco.post_process(results_reco);
-
-            {
-                ScopedTiming st("osd_draw_text", atoi(argv[6]));
-                Utils::draw_text(float(sort_vtd[3].x), float(sort_vtd[3].y),osd_frame,results_reco,{osd_width, osd_height}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-            }
+            std::string result_reco;
+            licenceReco.post_process(result_reco);
+            results_str.push_back(result_reco);
         }
 
-
-        {
-            ScopedTiming st("osd draw_detections", atoi(argv[6]));
-            Utils::draw_detections(osd_frame, results_det, {osd_width, osd_height}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-        }
-
-        {
-            ScopedTiming st("osd copy", atoi(argv[6]));
-            memcpy(pic_vaddr, osd_frame.data, osd_width * osd_height * 4);
-            //显示通道插入帧
-            kd_mpi_vo_chn_insert_frame(osd_id+3, &vf_info);  //K_VO_OSD0
-
-            ret = kd_mpi_vicap_dump_release(vicap_dev, VICAP_CHN_ID_1, &dump_info);
-            if (ret) {
-                printf("sample_vicap...kd_mpi_vicap_dump_release failed.\n");
-            }
-        }
+        licenceDet.draw_result(draw_frame, results, results_str);
+        // 将绘制的帧插入到PipeLine中
+        pl.InsertFrame(draw_frame.data);
+        // 释放帧数据
+        pl.ReleaseFrame();
     }
-
-    vo_osd_release_block();
-    vivcap_stop();
-
-
-    // free memory
-    ret = kd_mpi_sys_mmz_free(paddr, vaddr);
-    if (ret)
-    {
-        std::cerr << "free failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
-}
-
-void video_proc_v2(char *argv[])
-{
-    vivcap_start();
-
-    k_video_frame_info vf_info;
-    void *pic_vaddr = NULL;       //osd
-
-    memset(&vf_info, 0, sizeof(vf_info));
-
-    vf_info.v_frame.width = osd_width;
-    vf_info.v_frame.height = osd_height;
-    vf_info.v_frame.stride[0] = osd_width;
-    vf_info.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
-    block = vo_insert_frame(&vf_info, &pic_vaddr);
-
-    // alloc memory
-    size_t paddr = 0;
-    void *vaddr = nullptr;
-    size_t size = SENSOR_CHANNEL * SENSOR_HEIGHT * SENSOR_WIDTH;
-    int ret = kd_mpi_sys_mmz_alloc_cached(&paddr, &vaddr, "allocate", "anonymous", size);
-    if (ret)
-    {
-        std::cerr << "physical_memory_block::allocate failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
-    LicenceDetect licenceDet(argv[1], atof(argv[2]), atof(argv[3]), {SENSOR_CHANNEL, SENSOR_HEIGHT, SENSOR_WIDTH}, reinterpret_cast<uintptr_t>(vaddr), reinterpret_cast<uintptr_t>(paddr), atoi(argv[6]));
-    LicenceReco licenceReco(argv[5],g_dict_size,atoi(argv[6]));
-
-    vector<BoxPoint> results_det;
-
-    while (!isp_stop)
-    {
-        ScopedTiming st("total time", 1);
-
-        {
-            ScopedTiming st("read capture", atoi(argv[6]));
-            // VICAP_CHN_ID_1 out rgb888p
-            memset(&dump_info, 0 , sizeof(k_video_frame_info));
-            ret = kd_mpi_vicap_dump_frame(vicap_dev, VICAP_CHN_ID_1, VICAP_DUMP_YUV, &dump_info, 1000);
-            if (ret) {
-                printf("sample_vicap...kd_mpi_vicap_dump_frame failed.\n");
-                continue;
-            }
-        }
-            
-
-        {
-            ScopedTiming st("isp copy", atoi(argv[6]));
-            // 从vivcap中读取一帧图像到dump_info
-            auto vbvaddr = kd_mpi_sys_mmap_cached(dump_info.v_frame.phys_addr[0], size);
-            memcpy(vaddr, (void *)vbvaddr, SENSOR_HEIGHT * SENSOR_WIDTH * 3);  // 这里以后可以去掉，不用copy
-            kd_mpi_sys_munmap(vbvaddr, size);
-        }
-
-        results_det.clear();
-
-        licenceDet.pre_process();
-        licenceDet.inference();
-
-        licenceDet.post_process({SENSOR_WIDTH, SENSOR_HEIGHT}, results_det);
-
-        int matsize = SENSOR_WIDTH * SENSOR_HEIGHT;
-        cv::Mat ori_img;
-        cv::Mat ori_img_R = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr);
-        cv::Mat ori_img_G = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 1 * matsize);
-        cv::Mat ori_img_B = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 2 * matsize);
-        std::vector<cv::Mat> sensor_rgb;
-        sensor_rgb.push_back(ori_img_B);
-        sensor_rgb.push_back(ori_img_G);
-        sensor_rgb.push_back(ori_img_R);
-        cv::merge(sensor_rgb, ori_img);
-
-        cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-
-        for(int i = 0; i < results_det.size(); i++)
-        {
-            vector<Point> ori_vec;
-            vector<Point2f> sort_vtd(4);
-            ori_vec.clear();
-            for(int j = 0; j < 4; j++)
-            {
-                ori_vec.push_back(results_det[i].vertices[j]);
-            }
-            cv::RotatedRect rect = cv::minAreaRect(ori_vec);
-            cv::Point2f ver[4];
-            rect.points(ver);
-
-            cv::Mat crop;
-            Utils::warppersp(ori_img, crop, results_det[i], sort_vtd);
-            cv::Mat crop_gray;
-            cv::cvtColor(crop, crop_gray, COLOR_BGR2GRAY);
-
-            licenceReco.pre_process(crop_gray);
-            licenceReco.inference();
-
-            vector<unsigned char> results_reco;
-            licenceReco.post_process(results_reco);
-
-            {
-                ScopedTiming st("osd_draw_text", atoi(argv[6]));
-                Utils::draw_text(float(sort_vtd[3].x), float(sort_vtd[3].y),osd_frame,results_reco,{osd_width, osd_height}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-            }
-        }
-
-
-        {
-            ScopedTiming st("osd draw_detections", atoi(argv[6]));
-            Utils::draw_detections(osd_frame, results_det, {osd_width, osd_height}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-        }
-
-        {
-            ScopedTiming st("osd copy", atoi(argv[6]));
-            memcpy(pic_vaddr, osd_frame.data, osd_width * osd_height * 4);
-            //显示通道插入帧
-            kd_mpi_vo_chn_insert_frame(osd_id+3, &vf_info);  //K_VO_OSD0
-
-            ret = kd_mpi_vicap_dump_release(vicap_dev, VICAP_CHN_ID_1, &dump_info);
-            if (ret) {
-                printf("sample_vicap...kd_mpi_vicap_dump_release failed.\n");
-            }
-        }
-    }
-
-    vo_osd_release_block();
-    vivcap_stop();
-
-
-    // free memory
-    ret = kd_mpi_sys_mmz_free(paddr, vaddr);
-    if (ret)
-    {
-        std::cerr << "free failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
-}
-
-void video_proc_k230d(char *argv[])
-{
-    vivcap_start();
-
-    k_video_frame_info vf_info;
-    void *pic_vaddr = NULL;       //osd
-
-    memset(&vf_info, 0, sizeof(vf_info));
-
-    vf_info.v_frame.width = osd_width;
-    vf_info.v_frame.height = osd_height;
-    vf_info.v_frame.stride[0] = osd_width;
-    vf_info.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
-    block = vo_insert_frame(&vf_info, &pic_vaddr);
-
-    // alloc memory
-    size_t paddr = 0;
-    void *vaddr = nullptr;
-    size_t size = SENSOR_CHANNEL * SENSOR_HEIGHT * SENSOR_WIDTH;
-    int ret = kd_mpi_sys_mmz_alloc_cached(&paddr, &vaddr, "allocate", "anonymous", size);
-    if (ret)
-    {
-        std::cerr << "physical_memory_block::allocate failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
-    LicenceDetect licenceDet(argv[1], atof(argv[2]), atof(argv[3]), {SENSOR_CHANNEL, SENSOR_HEIGHT, SENSOR_WIDTH}, reinterpret_cast<uintptr_t>(vaddr), reinterpret_cast<uintptr_t>(paddr), atoi(argv[6]));
-    LicenceReco licenceReco(argv[5],g_dict_size,atoi(argv[6]));
-
-    vector<BoxPoint> results_det;
-
-    while (!isp_stop)
-    {
-        ScopedTiming st("total time", 1);
-
-        {
-            ScopedTiming st("read capture", atoi(argv[6]));
-            // VICAP_CHN_ID_1 out rgb888p
-            memset(&dump_info, 0 , sizeof(k_video_frame_info));
-            ret = kd_mpi_vicap_dump_frame(vicap_dev, VICAP_CHN_ID_1, VICAP_DUMP_YUV, &dump_info, 1000);
-            if (ret) {
-                printf("sample_vicap...kd_mpi_vicap_dump_frame failed.\n");
-                continue;
-            }
-        }
-            
-
-        {
-            ScopedTiming st("isp copy", atoi(argv[6]));
-            // 从vivcap中读取一帧图像到dump_info
-            auto vbvaddr = kd_mpi_sys_mmap_cached(dump_info.v_frame.phys_addr[0], size);
-            memcpy(vaddr, (void *)vbvaddr, SENSOR_HEIGHT * SENSOR_WIDTH * 3);  // 这里以后可以去掉，不用copy
-            kd_mpi_sys_munmap(vbvaddr, size);
-        }
-
-        results_det.clear();
-
-        licenceDet.pre_process();
-        licenceDet.inference();
-
-        licenceDet.post_process({SENSOR_WIDTH, SENSOR_HEIGHT}, results_det);
-
-        int matsize = SENSOR_WIDTH * SENSOR_HEIGHT;
-        cv::Mat ori_img;
-        cv::Mat ori_img_R = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr);
-        cv::Mat ori_img_G = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 1 * matsize);
-        cv::Mat ori_img_B = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 2 * matsize);
-        std::vector<cv::Mat> sensor_rgb;
-        sensor_rgb.push_back(ori_img_B);
-        sensor_rgb.push_back(ori_img_G);
-        sensor_rgb.push_back(ori_img_R);
-        cv::merge(sensor_rgb, ori_img);
-
-        cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-        cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-
-        for(int i = 0; i < results_det.size(); i++)
-        {
-            vector<Point> ori_vec;
-            vector<Point2f> sort_vtd(4);
-            ori_vec.clear();
-            for(int j = 0; j < 4; j++)
-            {
-                ori_vec.push_back(results_det[i].vertices[j]);
-            }
-            cv::RotatedRect rect = cv::minAreaRect(ori_vec);
-            cv::Point2f ver[4];
-            rect.points(ver);
-
-            cv::Mat crop;
-            Utils::warppersp(ori_img, crop, results_det[i], sort_vtd);
-            cv::Mat crop_gray;
-            cv::cvtColor(crop, crop_gray, COLOR_BGR2GRAY);
-
-            licenceReco.pre_process(crop_gray);
-            licenceReco.inference();
-
-            vector<unsigned char> results_reco;
-            licenceReco.post_process(results_reco);
-
-            {
-                ScopedTiming st("osd_draw_text", atoi(argv[6]));
-                Utils::draw_text(float(sort_vtd[3].x), float(sort_vtd[3].y),osd_frame,results_reco,{osd_frame.cols, osd_frame.rows}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-            }
-        }
-
-
-        {
-            ScopedTiming st("osd draw_detections", atoi(argv[6]));
-            Utils::draw_detections(osd_frame, results_det, {osd_frame.cols, osd_frame.rows}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-        }
-        cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
-
-        {
-            ScopedTiming st("osd copy", atoi(argv[6]));
-            memcpy(pic_vaddr, osd_frame.data, osd_width * osd_height * 4);
-            //显示通道插入帧
-            kd_mpi_vo_chn_insert_frame(osd_id+3, &vf_info);  //K_VO_OSD0
-
-            ret = kd_mpi_vicap_dump_release(vicap_dev, VICAP_CHN_ID_1, &dump_info);
-            if (ret) {
-                printf("sample_vicap...kd_mpi_vicap_dump_release failed.\n");
-            }
-        }
-    }
-
-    vo_osd_release_block();
-    vivcap_stop();
-
-
-    // free memory
-    ret = kd_mpi_sys_mmz_free(paddr, vaddr);
-    if (ret)
-    {
-        std::cerr << "free failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
-}
-
-void video_proc_01(char *argv[])
-{
-    vivcap_start();
-
-    k_video_frame_info vf_info;
-    void *pic_vaddr = NULL;       //osd
-
-    memset(&vf_info, 0, sizeof(vf_info));
-
-    vf_info.v_frame.width = osd_width;
-    vf_info.v_frame.height = osd_height;
-    vf_info.v_frame.stride[0] = osd_width;
-    vf_info.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
-    block = vo_insert_frame(&vf_info, &pic_vaddr);
-
-    // alloc memory
-    size_t paddr = 0;
-    void *vaddr = nullptr;
-    size_t size = SENSOR_CHANNEL * SENSOR_HEIGHT * SENSOR_WIDTH;
-    int ret = kd_mpi_sys_mmz_alloc_cached(&paddr, &vaddr, "allocate", "anonymous", size);
-    if (ret)
-    {
-        std::cerr << "physical_memory_block::allocate failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
-    LicenceDetect licenceDet(argv[1], atof(argv[2]), atof(argv[3]), {SENSOR_CHANNEL, SENSOR_HEIGHT, SENSOR_WIDTH}, reinterpret_cast<uintptr_t>(vaddr), reinterpret_cast<uintptr_t>(paddr), atoi(argv[6]));
-    LicenceReco licenceReco(argv[5],g_dict_size,atoi(argv[6]));
-
-    vector<BoxPoint> results_det;
-
-    while (!isp_stop)
-    {
-        ScopedTiming st("total time", 1);
-
-        {
-            ScopedTiming st("read capture", atoi(argv[6]));
-            // VICAP_CHN_ID_1 out rgb888p
-            memset(&dump_info, 0 , sizeof(k_video_frame_info));
-            ret = kd_mpi_vicap_dump_frame(vicap_dev, VICAP_CHN_ID_1, VICAP_DUMP_YUV, &dump_info, 1000);
-            if (ret) {
-                printf("sample_vicap...kd_mpi_vicap_dump_frame failed.\n");
-                continue;
-            }
-        }
-            
-
-        {
-            ScopedTiming st("isp copy", atoi(argv[6]));
-            // 从vivcap中读取一帧图像到dump_info
-            auto vbvaddr = kd_mpi_sys_mmap_cached(dump_info.v_frame.phys_addr[0], size);
-            memcpy(vaddr, (void *)vbvaddr, SENSOR_HEIGHT * SENSOR_WIDTH * 3);  // 这里以后可以去掉，不用copy
-            kd_mpi_sys_munmap(vbvaddr, size);
-        }
-
-        results_det.clear();
-
-        licenceDet.pre_process();
-        licenceDet.inference();
-
-        licenceDet.post_process({SENSOR_WIDTH, SENSOR_HEIGHT}, results_det);
-
-        int matsize = SENSOR_WIDTH * SENSOR_HEIGHT;
-        cv::Mat ori_img;
-        cv::Mat ori_img_R = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr);
-        cv::Mat ori_img_G = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 1 * matsize);
-        cv::Mat ori_img_B = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 2 * matsize);
-        std::vector<cv::Mat> sensor_rgb;
-        sensor_rgb.push_back(ori_img_B);
-        sensor_rgb.push_back(ori_img_G);
-        sensor_rgb.push_back(ori_img_R);
-        cv::merge(sensor_rgb, ori_img);
-
-        cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-
-
-        #if defined(STUDIO_HDMI)
-        {
-            for(int i = 0; i < results_det.size(); i++)
-            {
-                vector<Point> ori_vec;
-                vector<Point2f> sort_vtd(4);
-                ori_vec.clear();
-                for(int j = 0; j < 4; j++)
-                {
-                    ori_vec.push_back(results_det[i].vertices[j]);
-                }
-                cv::RotatedRect rect = cv::minAreaRect(ori_vec);
-                cv::Point2f ver[4];
-                rect.points(ver);
-
-                cv::Mat crop;
-                Utils::warppersp(ori_img, crop, results_det[i], sort_vtd);
-                cv::Mat crop_gray;
-                cv::cvtColor(crop, crop_gray, COLOR_BGR2GRAY);
-
-                licenceReco.pre_process(crop_gray);
-                licenceReco.inference();
-
-                vector<unsigned char> results_reco;
-                licenceReco.post_process(results_reco);
-
-                {
-                    ScopedTiming st("osd_draw_text", atoi(argv[6]));
-                    Utils::draw_text(float(sort_vtd[3].x), float(sort_vtd[3].y),osd_frame,results_reco,{osd_frame.cols, osd_frame.rows}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-                }
-            }
-
-
-            {
-                ScopedTiming st("osd draw_detections", atoi(argv[6]));
-                Utils::draw_detections(osd_frame, results_det, {osd_frame.cols, osd_frame.rows}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-            }
-        }
-        #else
-        {
-            cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-
-            for(int i = 0; i < results_det.size(); i++)
-            {
-                vector<Point> ori_vec;
-                vector<Point2f> sort_vtd(4);
-                ori_vec.clear();
-                for(int j = 0; j < 4; j++)
-                {
-                    ori_vec.push_back(results_det[i].vertices[j]);
-                }
-                cv::RotatedRect rect = cv::minAreaRect(ori_vec);
-                cv::Point2f ver[4];
-                rect.points(ver);
-
-                cv::Mat crop;
-                Utils::warppersp(ori_img, crop, results_det[i], sort_vtd);
-                cv::Mat crop_gray;
-                cv::cvtColor(crop, crop_gray, COLOR_BGR2GRAY);
-
-                licenceReco.pre_process(crop_gray);
-                licenceReco.inference();
-
-                vector<unsigned char> results_reco;
-                licenceReco.post_process(results_reco);
-
-                {
-                    ScopedTiming st("osd_draw_text", atoi(argv[6]));
-                    Utils::draw_text(float(sort_vtd[3].x), float(sort_vtd[3].y),osd_frame,results_reco,{osd_frame.cols, osd_frame.rows}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-                }
-            }
-
-
-            {
-                ScopedTiming st("osd draw_detections", atoi(argv[6]));
-                Utils::draw_detections(osd_frame, results_det, {osd_frame.cols, osd_frame.rows}, {SENSOR_WIDTH, SENSOR_HEIGHT});
-            }
-            cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
-        }
-        #endif
-
-        {
-            ScopedTiming st("osd copy", atoi(argv[6]));
-            memcpy(pic_vaddr, osd_frame.data, osd_width * osd_height * 4);
-            //显示通道插入帧
-            kd_mpi_vo_chn_insert_frame(osd_id+3, &vf_info);  //K_VO_OSD0
-
-            ret = kd_mpi_vicap_dump_release(vicap_dev, VICAP_CHN_ID_1, &dump_info);
-            if (ret) {
-                printf("sample_vicap...kd_mpi_vicap_dump_release failed.\n");
-            }
-        }
-    }
-
-    vo_osd_release_block();
-    vivcap_stop();
-
-
-    // free memory
-    ret = kd_mpi_sys_mmz_free(paddr, vaddr);
-    if (ret)
-    {
-        std::cerr << "free failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
+    pl.Destroy();
 }
 
 
@@ -665,113 +140,66 @@ int main(int argc, char *argv[])
 
     if (strcmp(argv[4], "None") == 0)
     {
-        #if defined(CONFIG_BOARD_K230_CANMV)
+        std::thread thread_isp(video_proc, argv);
+        while (getchar() != 'q')
         {
-            std::thread thread_isp(video_proc_v1, argv);
-            while (getchar() != 'q')
-            {
-                usleep(10000);
-            }
-
-            isp_stop = true;
-            thread_isp.join();
+            usleep(10000);
         }
-        #elif defined(CONFIG_BOARD_K230_CANMV_V2)
-        {
-            std::thread thread_isp(video_proc_v2, argv);
-            while (getchar() != 'q')
-            {
-                usleep(10000);
-            }
-
-            isp_stop = true;
-            thread_isp.join();
-        }
-        #elif defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
-        {
-            std::thread thread_isp(video_proc_k230d, argv);
-            while (getchar() != 'q')
-            {
-                usleep(10000);
-            }
-
-            isp_stop = true;
-            thread_isp.join();
-        }
-        #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
-        {
-            std::thread thread_isp(video_proc_01, argv);
-            while (getchar() != 'q')
-            {
-                usleep(10000);
-            }
-
-            isp_stop = true;
-            thread_isp.join();
-        }
-        #else
-        {
-            std::thread thread_isp(video_proc_v1, argv);
-            while (getchar() != 'q')
-            {
-                usleep(10000);
-            }
-
-            isp_stop = true;
-            thread_isp.join();
-        }
-        #endif
+        isp_stop = true;
+        thread_isp.join();
     }
     else
     {
+        int debug_mode = atoi(argv[6]);
+        // 读取图片
         cv::Mat ori_img = cv::imread(argv[4]);
-        cv::Mat draw_img = ori_img.clone();
-        int ori_w = ori_img.cols;
-        int ori_h = ori_img.rows;
-
-        LicenceDetect licenceDet(argv[1], atof(argv[2]), atof(argv[3]), atoi(argv[6]));
-        LicenceReco licenceReco(argv[5],g_dict_size,atoi(argv[6]));
-
-        licenceDet.pre_process(ori_img);
-
-        licenceDet.inference();
-
-        vector<BoxPoint> results_det;
-        licenceDet.post_process({ori_w, ori_h}, results_det);
-
-        for(int i = 0; i < results_det.size(); i++)
+        FrameCHWSize image_size={ori_img.channels(),ori_img.rows,ori_img.cols};
+         // 创建一个空的向量，用于存储chw图像数据,将读入的hwc数据转换成chw数据
+        std::vector<uint8_t> chw_vec;
+        std::vector<cv::Mat> bgrChannels(3);
+        cv::split(ori_img, bgrChannels);
+        for (auto i = 2; i > -1; i--)
         {
-            vector<Point> ori_vec;
-            vector<Point2f> sort_vtd(4);
-            ori_vec.clear();
+            std::vector<uint8_t> data = std::vector<uint8_t>(bgrChannels[i].reshape(1, 1));
+            chw_vec.insert(chw_vec.end(), data.begin(), data.end());
+        }
+        // 创建tensor
+        dims_t in_shape { 1, 3, ori_img.rows, ori_img.cols };
+        runtime_tensor input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("cannot create input tensor");
+        auto input_buf = input_tensor.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
+        memcpy(reinterpret_cast<char *>(input_buf.data()), chw_vec.data(), chw_vec.size());
+        hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("write back input failed");
+
+        LicenceDetect licenceDet(argv[1], atof(argv[2]), atof(argv[3]), image_size,debug_mode);
+        LicenceReco licenceReco(argv[5],debug_mode);
+        vector<BoxPoint> results;
+        vector<std::string> results_str;
+        licenceDet.pre_process(input_tensor);
+        licenceDet.inference();
+        licenceDet.post_process(results);
+        for(int i = 0; i < results.size(); i++)
+        {
+            vector<cv::Point> ori_vec;
+            vector<cv::Point2f> sort_vtd(4);
             for(int j = 0; j < 4; j++)
             {
-                ori_vec.push_back(results_det[i].vertices[j]);
+                ori_vec.push_back(results[i].vertices[j]);
             }
             cv::RotatedRect rect = cv::minAreaRect(ori_vec);
             cv::Point2f ver[4];
             rect.points(ver);
             cv::Mat crop;
-            Utils::warppersp(ori_img, crop, results_det[i], sort_vtd);
+            licenceDet.warppersp(ori_img, crop, results[i], sort_vtd);
             cv::Mat crop_gray;
-            cv::cvtColor(crop, crop_gray, COLOR_BGR2GRAY);
-
+            cv::cvtColor(crop, crop_gray, cv::COLOR_BGR2GRAY);
             licenceReco.pre_process(crop_gray);
             licenceReco.inference();
-
-            vector<unsigned char> results_reco;
-            licenceReco.post_process(results_reco);
-            {
-                ScopedTiming st("draw_text", atoi(argv[6]));
-                Utils::draw_text(int(sort_vtd[3].x), int(sort_vtd[3].y),draw_img,results_reco);
-            } 
+            std::string result_reco;
+            licenceReco.post_process(result_reco);
+            results_str.push_back(result_reco);
         }
-
-        {
-            ScopedTiming st("draw_detections", atoi(argv[6]));
-            Utils::draw_detections(draw_img, results_det);
-        }
-        cv::imwrite("licence_det_rec.jpg", draw_img);
+        licenceDet.draw_result(ori_img, results, results_str);
+        cv::imwrite("licence_det_rec.jpg", ori_img);
     }
     return 0;
 }

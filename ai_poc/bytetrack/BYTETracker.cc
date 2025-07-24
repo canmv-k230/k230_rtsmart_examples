@@ -31,13 +31,9 @@
 #include "lapjv.h"
 #include <fstream>
 #include <iostream>
-#include<map>
+#include <map>
 
 using std::cout;
-
-
-
-
 
 BYTETracker::BYTETracker(int frame_rate, int track_buffer)
 {

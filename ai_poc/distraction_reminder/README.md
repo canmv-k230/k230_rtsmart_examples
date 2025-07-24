@@ -22,7 +22,7 @@ Options:
    warning_angle_pitch  达到需要提醒注意的俯仰角偏离角度
    debug_mode           是否需要调试，0、1、2分别表示不调试、简单调试、详细调试
 
- #视频流推理：（distraction_reminder_isp.sh）
+#视频流推理：（distraction_reminder_isp.sh）
 ./distraction_reminder.elf face_detection_320.kmodel 0.6 0.2 face_pose.kmodel 20 20 20 20 0
 ```
 

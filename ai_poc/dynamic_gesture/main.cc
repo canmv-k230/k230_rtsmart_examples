@@ -27,11 +27,11 @@
 #include <fstream>
 #include <thread>
 
-#include "utils.h"
-#include "vi_vo.h"
+#include "ai_utils.h"
 #include "hand_detection.h"
 #include "hand_keypoint.h"
 #include "dynamic_gesture.h"
+#include "video_pipeline.h"
 
 std::atomic<bool> isp_stop(false);
 
@@ -49,37 +49,25 @@ void print_usage(const char *name)
 		 << endl;
 }
 
-
 void video_proc(char *argv[])
 {
-    vivcap_start();
-    // 设置osd参数
-    k_video_frame_info vf_info;
-    void *pic_vaddr = NULL; // osd
-    memset(&vf_info, 0, sizeof(vf_info));
-    vf_info.v_frame.width = osd_width;
-    vf_info.v_frame.height = osd_height;
-    vf_info.v_frame.stride[0] = osd_width;
-    vf_info.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
-    block = vo_insert_frame(&vf_info, &pic_vaddr);
-
-    // alloc memory,get isp memory
-    size_t paddr = 0;
-    void *vaddr = nullptr;
-    size_t size = SENSOR_CHANNEL * SENSOR_HEIGHT * SENSOR_WIDTH;
-    int ret = kd_mpi_sys_mmz_alloc_cached(&paddr, &vaddr, "allocate", "anonymous", size);
-    if (ret)
-    {
-        std::cerr << "physical_memory_block::allocate failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
-
-    HandDetection hd(argv[1], atof(argv[2]), atof(argv[3]), {SENSOR_WIDTH, SENSOR_HEIGHT}, {SENSOR_CHANNEL, SENSOR_HEIGHT, SENSOR_WIDTH}, reinterpret_cast<uintptr_t>(vaddr), reinterpret_cast<uintptr_t>(paddr), atoi(argv[6]));
-    HandKeypoint hk(argv[4], {SENSOR_CHANNEL, SENSOR_HEIGHT, SENSOR_WIDTH}, reinterpret_cast<uintptr_t>(vaddr), reinterpret_cast<uintptr_t>(paddr), atoi(argv[6]));
-    DynamicGesture Dag(argv[5], atoi(argv[6]));
-
+    int debug_mode = atoi(argv[6]);
+    FrameCHWSize image_size={AI_FRAME_CHANNEL,AI_FRAME_HEIGHT, AI_FRAME_WIDTH};
+    // 创建一个空的Mat对象，用于存储绘制的帧
+    cv::Mat draw_frame(OSD_HEIGHT, OSD_WIDTH, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    // 创建一个空的runtime_tensor对象，用于存储输入数据
+    runtime_tensor input_tensor;
+    dims_t in_shape { 1, AI_FRAME_CHANNEL, AI_FRAME_HEIGHT, AI_FRAME_WIDTH };
+    // 创建一个PipeLine对象，用于处理视频流
+    PipeLine pl(debug_mode);
+    // 初始化PipeLine对象
+    pl.Create();
+    // 创建一个DumpRes对象，用于存储帧数据
+    DumpRes dump_res;
+    HandDetection hd(argv[1], atof(argv[2]), atof(argv[3]), image_size, debug_mode);
+    HandKeypoint hk(argv[4], image_size,debug_mode);
+    DynamicGesture Dag(argv[5], debug_mode);
     std::vector<BoxInfo> results;
-
     enum state {TRIGGER,UP,RIGHT,DOWN,LEFT,MIDDLE} cur_state_ = TRIGGER, pre_state_ = TRIGGER, draw_state_ = TRIGGER;
 
     int idx_ = 0;
@@ -91,7 +79,6 @@ void video_proc(char *argv[])
 	std::chrono::steady_clock::time_point m_stop;  // 计时结束时间
     std::chrono::steady_clock::time_point s_start; // 图片显示计时开始时间
     std::chrono::steady_clock::time_point s_stop;  // 图片显示计时结束时间
-
     int bin_width = 150;
     int bin_height = 216;
     cv::Mat shang_argb;
@@ -102,57 +89,23 @@ void video_proc(char *argv[])
     Utils::bin_2_mat("zuo.bin", bin_height, bin_width, zuo_argb);
     cv::Mat you_argb;
     Utils::bin_2_mat("you.bin", bin_height, bin_width, you_argb);
-
-    while (!isp_stop)
-    {
+    while(!isp_stop){
+        // 创建一个ScopedTiming对象，用于计算总时间
         ScopedTiming st("total time", 1);
-        {
-            ScopedTiming st("read capture", atoi(argv[6]));
-            // 从vivcap中读取一帧图像到dump_info
-            memset(&dump_info, 0, sizeof(k_video_frame_info));
-            ret = kd_mpi_vicap_dump_frame(vicap_dev, VICAP_CHN_ID_1, VICAP_DUMP_YUV, &dump_info, 1000);
-            if (ret)
-            {
-                printf("sample_vicap...kd_mpi_vicap_dump_frame failed.\n");
-                continue;
-            }
-        }
-        {
-            ScopedTiming st("isp copy", atoi(argv[6]));
-            auto vbvaddr = kd_mpi_sys_mmap_cached(dump_info.v_frame.phys_addr[0], size);
-            memcpy(vaddr, (void *)vbvaddr, SENSOR_HEIGHT * SENSOR_WIDTH * 3);
-            kd_mpi_sys_munmap(vbvaddr, size);
-        }
-
-        cv::Mat osd_frame(osd_height, osd_width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
-        {
-            cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-        }
-        #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
-        {
-            #if defined(STUDIO_HDMI)
-            {}
-            #else
-            {
-                cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-            }
-            #endif
-        }
-        #else
-        {
-        }
-        #endif
-        
+        // 从PipeLine中获取一帧数据，并创建tensor
+        pl.GetFrame(dump_res);
+        input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)dump_res.virt_addr, compute_size(in_shape) },false, hrt::pool_shared, dump_res.phy_addr).expect("cannot create input tensor");
+        hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("sync write_back failed");
+        //前处理，推理，后处理
+        draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
         if (cur_state_== TRIGGER)
         {
             ScopedTiming st("trigger time", atoi(argv[6]));
             results.clear();
 
-            hd.pre_process();
+            hd.pre_process(input_tensor);
             hd.inference();
-            hd.post_process(results);
-
+            hd.post_process(image_size,results);
             for (auto r: results)
             {
                 int w = r.x2 - r.x1 + 1;
@@ -165,13 +118,12 @@ void video_proc(char *argv[])
 
                 int x1_1 = std::max(0,cx-ratio_num);
                 int y1_1 = std::max(0,cy-ratio_num);
-                int x2_1 = std::min(SENSOR_WIDTH-1, cx+ratio_num);
-                int y2_1 = std::min(SENSOR_HEIGHT-1, cy+ratio_num);
+                int x2_1 = std::min(AI_FRAME_WIDTH-1, cx+ratio_num);
+                int y2_1 = std::min(AI_FRAME_HEIGHT-1, cy+ratio_num);
                 int w_1 = x2_1 - x1_1 + 1;
                 int h_1 = y2_1 - y1_1 + 1;
-                
                 struct Bbox bbox = {x:x1_1,y:y1_1,w:w_1,h:h_1};
-                hk.pre_process(bbox);
+                hk.pre_process(input_tensor,bbox);
                 hk.inference();
                 hk.post_process(bbox);
 
@@ -205,7 +157,7 @@ void video_proc(char *argv[])
                         }
                         if ((vec_flag.size()>10)||(pre_state_ == UP) || (pre_state_ == MIDDLE) ||(pre_state_ == TRIGGER))
                         {
-                            cv::Mat copy_image = osd_frame(cv::Rect(0,0,bin_width,bin_height));
+                            cv::Mat copy_image = draw_frame(cv::Rect(0,0,bin_width,bin_height));
                             shang_argb.copyTo(copy_image); 
                             cur_state_ = UP;
                         }
@@ -219,7 +171,7 @@ void video_proc(char *argv[])
                         }
                         if ((vec_flag.size()>10)||(pre_state_ == RIGHT)||(pre_state_ == TRIGGER))
                         {
-                            cv::Mat copy_image = osd_frame(cv::Rect(0,0,bin_height,bin_width));
+                            cv::Mat copy_image = draw_frame(cv::Rect(0,0,bin_height,bin_width));
                             you_argb.copyTo(copy_image); 
                             cur_state_ = RIGHT;
                         }
@@ -232,7 +184,7 @@ void video_proc(char *argv[])
                         }
                         if ((vec_flag.size()>10)||(pre_state_ == DOWN)||(pre_state_ == TRIGGER))
                         {
-                            cv::Mat copy_image = osd_frame(cv::Rect(0,0,bin_width,bin_height));
+                            cv::Mat copy_image = draw_frame(cv::Rect(0,0,bin_width,bin_height));
                             xia_argb.copyTo(copy_image); 
                             cur_state_ = DOWN;
                         }
@@ -245,7 +197,7 @@ void video_proc(char *argv[])
                         }
                         if ((vec_flag.size()>10)||(pre_state_ == LEFT)||(pre_state_ == TRIGGER))
                         {
-                            cv::Mat copy_image = osd_frame(cv::Rect(0,0,bin_height,bin_width));
+                            cv::Mat copy_image = draw_frame(cv::Rect(0,0,bin_height,bin_width));
                             zuo_argb.copyTo(copy_image);
                             cur_state_ = LEFT;
                         }
@@ -259,23 +211,20 @@ void video_proc(char *argv[])
         {
             ScopedTiming st("swipe time", atoi(argv[6]));
             {
-                int matsize = SENSOR_WIDTH * SENSOR_HEIGHT;
+                int matsize = AI_FRAME_WIDTH * AI_FRAME_HEIGHT;
+                void* ptr = reinterpret_cast<void*>(dump_res.virt_addr);
                 cv::Mat ori_img;
                 {
-                    cv::Mat ori_img_R = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr);
-                    cv::Mat ori_img_G = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 1 * matsize);
-                    cv::Mat ori_img_B = cv::Mat(SENSOR_HEIGHT, SENSOR_WIDTH, CV_8UC1, vaddr + 2 * matsize);
-                    std::vector<cv::Mat> sensor_rgb;
-                    sensor_rgb.push_back(ori_img_R);
-                    sensor_rgb.push_back(ori_img_G);
-                    sensor_rgb.push_back(ori_img_B); 
-                    cv::merge(sensor_rgb, ori_img);
+                    cv::Mat channels[] = {
+                        cv::Mat(AI_FRAME_HEIGHT, AI_FRAME_WIDTH, CV_8UC1, reinterpret_cast<void*>(dump_res.virt_addr)),
+                        cv::Mat(AI_FRAME_HEIGHT, AI_FRAME_WIDTH, CV_8UC1, reinterpret_cast<void*>(dump_res.virt_addr) + matsize),
+                        cv::Mat(AI_FRAME_HEIGHT, AI_FRAME_WIDTH, CV_8UC1, reinterpret_cast<void*>(dump_res.virt_addr) + 2 * matsize)
+                    };
+                    cv::merge(channels, 3, ori_img);
                 }
-
                 Dag.pre_process(ori_img);
                 Dag.inference();
                 Dag.post_process();
-
                 vector<float> avg_logit;
                 {
                     vector<float> output;
@@ -304,7 +253,7 @@ void video_proc(char *argv[])
 
                 if (cur_state_ == UP)
                 {
-                    cv::Mat copy_image = osd_frame(cv::Rect(0,0,bin_width,bin_height));
+                    cv::Mat copy_image = draw_frame(cv::Rect(0,0,bin_width,bin_height));
                     shang_argb.copyTo(copy_image); 
                     if ((idx==15) || (idx==10))
                     {
@@ -335,7 +284,7 @@ void video_proc(char *argv[])
                 }
                 else if (cur_state_ == RIGHT)
                 {
-                    cv::Mat copy_image = osd_frame(cv::Rect(0,0,bin_height,bin_width));
+                    cv::Mat copy_image = draw_frame(cv::Rect(0,0,bin_height,bin_width));
                     you_argb.copyTo(copy_image); 
                     if  ((idx==16)||(idx==11)) 
                     {
@@ -355,7 +304,7 @@ void video_proc(char *argv[])
                 }
                 else if (cur_state_ == DOWN)
                 {
-                    cv::Mat copy_image = osd_frame(cv::Rect(0,0,bin_width,bin_height));
+                    cv::Mat copy_image = draw_frame(cv::Rect(0,0,bin_width,bin_height));
                     xia_argb.copyTo(copy_image); 
                     if  ((idx==18)||(idx==13))
                     {
@@ -375,7 +324,7 @@ void video_proc(char *argv[])
                 }
                 else if (cur_state_ == LEFT)
                 {
-                    cv::Mat copy_image = osd_frame(cv::Rect(0,0,bin_height,bin_width));
+                    cv::Mat copy_image = draw_frame(cv::Rect(0,0,bin_height,bin_width));
                     zuo_argb.copyTo(copy_image);
                     if ((idx==17)||(idx==12))
                     {
@@ -405,148 +354,37 @@ void video_proc(char *argv[])
         }
         s_stop = std::chrono::steady_clock::now();
         double elapsed_ms_show = std::chrono::duration<double, std::milli>(s_stop - s_start).count();
+        if (elapsed_ms_show<1000)
+        {
+            if (draw_state_ == UP)
+            {
+                cv::putText(draw_frame, "UP", cv::Point(OSD_WIDTH*3/7,OSD_HEIGHT/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(0, 195,255, 255), 2);
+            } else if (draw_state_ == RIGHT)
+            {
+                cv::putText(draw_frame, "LEFT", cv::Point(OSD_WIDTH*3/7,OSD_HEIGHT/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(0, 195,255, 255), 2);
+            }else if (draw_state_ == DOWN)
+            {
+                cv::putText(draw_frame, "DOWN", cv::Point(OSD_WIDTH*3/7,OSD_HEIGHT/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(0, 195,255, 255), 2);
+            }else if (draw_state_ == LEFT)
+            {
+                cv::putText(draw_frame, "RIGHT", cv::Point(OSD_WIDTH*3/7,OSD_HEIGHT/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(0, 195,255, 255), 2);
+            }else if (draw_state_ == MIDDLE)
+            {
+                cv::putText(draw_frame, "MIDDLE", cv::Point(OSD_WIDTH*3/7,OSD_HEIGHT/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(0, 195,255, 255), 2);
+            }
 
+        }else
+        {
+            draw_state_ = TRIGGER;
+        }
         
-
-        #if defined(CONFIG_BOARD_K230D_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V3P0) || defined(CONFIG_BOARD_K230_CANMV_LCKFB)
-        {
-            if (elapsed_ms_show<1000)
-            {
-                if (draw_state_ == UP)
-                {
-                    cv::putText(osd_frame, "UP", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                } else if (draw_state_ == RIGHT)
-                {
-                    cv::putText(osd_frame, "LEFT", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                }else if (draw_state_ == DOWN)
-                {
-                    cv::putText(osd_frame, "DOWN", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                }else if (draw_state_ == LEFT)
-                {
-                    cv::putText(osd_frame, "RIGHT", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                }else if (draw_state_ == MIDDLE)
-                {
-                    cv::putText(osd_frame, "MIDDLE", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                }
-
-            }else
-            {
-                draw_state_ = TRIGGER;
-            }
-            cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
-        }
-        #elif defined(CONFIG_BOARD_K230_CANMV_01STUDIO)
-        {
-            #if defined(STUDIO_HDMI)
-            {
-                if (elapsed_ms_show<1000)
-                {
-                    if (draw_state_ == UP)
-                    {
-                        cv::putText(osd_frame, "UP", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                    } else if (draw_state_ == RIGHT)
-                    {
-                        cv::putText(osd_frame, "LEFT", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                    }else if (draw_state_ == DOWN)
-                    {
-                        cv::putText(osd_frame, "DOWN", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                    }else if (draw_state_ == LEFT)
-                    {
-                        cv::putText(osd_frame, "RIGHT", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                    }else if (draw_state_ == MIDDLE)
-                    {
-                        cv::putText(osd_frame, "MIDDLE", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                    }
-
-                }else
-                {
-                    draw_state_ = TRIGGER;
-                }
-
-            }
-            #else
-            {
-                if (elapsed_ms_show<1000)
-                {
-                    if (draw_state_ == UP)
-                    {
-                        cv::putText(osd_frame, "UP", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                    } else if (draw_state_ == RIGHT)
-                    {
-                        cv::putText(osd_frame, "LEFT", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                    }else if (draw_state_ == DOWN)
-                    {
-                        cv::putText(osd_frame, "DOWN", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                    }else if (draw_state_ == LEFT)
-                    {
-                        cv::putText(osd_frame, "RIGHT", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                    }else if (draw_state_ == MIDDLE)
-                    {
-                        cv::putText(osd_frame, "MIDDLE", cv::Point(osd_height * 3/7, osd_width/2),cv::FONT_HERSHEY_COMPLEX, 3, cv::Scalar(255, 255, 195, 0), 2);
-                    }
-
-                }else
-                {
-                    draw_state_ = TRIGGER;
-                }
-                cv::rotate(osd_frame, osd_frame, cv::ROTATE_90_CLOCKWISE);
-            }
-            #endif
-        }
-        #else
-        {
-            if (elapsed_ms_show<1000)
-            {
-                if (draw_state_ == UP)
-                {
-                    cv::putText(osd_frame, "UP", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                } else if (draw_state_ == RIGHT)
-                {
-                    cv::putText(osd_frame, "LEFT", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                }else if (draw_state_ == DOWN)
-                {
-                    cv::putText(osd_frame, "DOWN", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                }else if (draw_state_ == LEFT)
-                {
-                    cv::putText(osd_frame, "RIGHT", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                }else if (draw_state_ == MIDDLE)
-                {
-                    cv::putText(osd_frame, "MIDDLE", cv::Point(osd_width*3/7,osd_height/2),cv::FONT_HERSHEY_COMPLEX, 5, cv::Scalar(255, 255, 195, 0), 2);
-                }
-
-            }else
-            {
-                draw_state_ = TRIGGER;
-            }
-        }
-        #endif
-
-        {
-            ScopedTiming st("osd copy", atoi(argv[6]));
-            memcpy(pic_vaddr, osd_frame.data, osd_width * osd_height * 4);
-            // 显示通道插入帧
-            kd_mpi_vo_chn_insert_frame(osd_id + 3, &vf_info); // K_VO_OSD0
-
-            ret = kd_mpi_vicap_dump_release(vicap_dev, VICAP_CHN_ID_1, &dump_info);
-            if (ret)
-            {
-                printf("sample_vicap...kd_mpi_vicap_dump_release failed.\n");
-            }
-        }
+        // 将绘制的帧插入到PipeLine中
+        pl.InsertFrame(draw_frame.data);
+        // 释放帧数据
+        pl.ReleaseFrame();
     }
-
-    vo_osd_release_block();
-    vivcap_stop();
-
-    // free memory
-    ret = kd_mpi_sys_mmz_free(paddr, vaddr);
-    if (ret)
-    {
-        std::cerr << "free failed: ret = " << ret << ", errno = " << strerror(errno) << std::endl;
-        std::abort();
-    }
+    pl.Destroy();
 }
-
 
 int main(int argc, char *argv[])
 {
@@ -556,15 +394,12 @@ int main(int argc, char *argv[])
         print_usage(argv[0]);
         return -1;
     }
+    std::thread thread_isp(video_proc, argv);
+    while (getchar() != 'q')
     {
-        std::thread thread_isp(video_proc, argv);
-        while (getchar() != 'q')
-        {
-            usleep(10000);
-        }
-
-        isp_stop = true;
-        thread_isp.join();
+        usleep(10000);
     }
+    isp_stop = true;
+    thread_isp.join();
     return 0;
 }

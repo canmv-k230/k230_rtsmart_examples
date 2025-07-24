@@ -24,71 +24,27 @@
  */
 
 #include "helmet_detect.h"
-// #include "utils.h"
 
-
-// for image
-helmetDetect::helmetDetect(const char *kmodel_file, float obj_thresh,float nms_thresh, const int debug_mode) 
-: obj_thresh_(obj_thresh),nms_thresh_(nms_thresh), AIBase(kmodel_file,"helmetDetect", debug_mode)
-{
-
-    model_name_ = "helmetDetect";
-    
-    ai2d_out_tensor_ = get_input_tensor(0);
-}   
-
-// for video
-helmetDetect::helmetDetect(const char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) 
+helmetDetect::helmetDetect(char *kmodel_file, float obj_thresh,float nms_thresh, FrameCHWSize image_size, int debug_mode) 
 : obj_thresh_(obj_thresh),nms_thresh_(nms_thresh), AIBase(kmodel_file,"helmetDetect", debug_mode)
 {
     model_name_ = "helmetDetect";
+    obj_thresh_ = obj_thresh;
+    nms_thresh_ = nms_thresh;
+    image_size_=image_size;
+    input_size_={input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
+    ai2d_out_tensor_=get_input_tensor(0);
+    Utils::padding_resize_two_side_set(image_size_,input_size_,ai2d_builder_, cv::Scalar(114, 114, 114));
     
-    vaddr_ = vaddr;
-
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape_.channel, isp_shape_.height, isp_shape_.width};
-    int isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    #if 0
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, isp_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-    #else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-    #endif
-
-    // ai2d_out_tensor
-    ai2d_out_tensor_ = get_input_tensor(0);
-    // fixed padding resize param
-    Utils::padding_resize(isp_shape_, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_, cv::Scalar(114, 114, 114));
 }
 
 helmetDetect::~helmetDetect()
 {
-
 }
 
-// ai2d for image
-void helmetDetect::pre_process(cv::Mat ori_img)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    std::vector<uint8_t> chw_vec;
-    Utils::hwc_to_chw(ori_img, chw_vec);
-    Utils::padding_resize({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_out_tensor_, cv::Scalar(114, 114, 114));
-}
-
-// ai2d for video
-void helmetDetect::pre_process()
-{
+void helmetDetect::pre_process(runtime_tensor &input_tensor){
     ScopedTiming st(model_name_ + " pre_process video", debug_mode_);
-    #if 0
-    ai2d_builder_->invoke().expect("error occurred in ai2d running");
-    #else
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    //ai2d_builder_->invoke().expect("error occurred in ai2d running");
-    ai2d_builder_->invoke(ai2d_in_tensor_,ai2d_out_tensor_).expect("error occurred in ai2d running");
-    #endif
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void helmetDetect::inference()
@@ -102,42 +58,48 @@ static float sigmoid(float x)
     return 1.0f / (1.0f + expf(-x));
 }
 
-void helmetDetect::post_process(FrameSize frame_size,std::vector<BoxInfo> &result)
+void helmetDetect::post_process(std::vector<BoxInfo> &results)
 {
     ScopedTiming st(model_name_ + " post_process", debug_mode_);
     int net_len = input_shapes_[0][2];
-    // first output
-    {
+    float *output_0 = p_outputs_[0];
+    auto boxes0 = decode_infer(output_0, net_len, 8, classes_num_, image_size_, anchors_0_, obj_thresh_);
+    results.insert(results.begin(), boxes0.begin(), boxes0.end());
 
-        float *output_0 = p_outputs_[0];
-
-        auto boxes0 = decode_infer(output_0, net_len, 8, classes_num_, frame_size, anchors_0_, obj_thresh_);
-        result.insert(result.begin(), boxes0.begin(), boxes0.end());
-    }
-
-    // second output
-    {
-
-        float *output_1 = p_outputs_[1];
-
-        auto boxes1 = decode_infer(output_1, net_len, 16, classes_num_, frame_size, anchors_1_, obj_thresh_);
-        result.insert(result.begin(), boxes1.begin(), boxes1.end());
-    }
+    float *output_1 = p_outputs_[1];
+    auto boxes1 = decode_infer(output_1, net_len, 16, classes_num_, image_size_, anchors_1_, obj_thresh_);
+    results.insert(results.begin(), boxes1.begin(), boxes1.end());
     
-    // third output
-    {
-        float *output_2 = p_outputs_[2];
+    float *output_2 = p_outputs_[2];
+    auto boxes2 = decode_infer(output_2, net_len, 32, classes_num_, image_size_, anchors_2_, obj_thresh_);
+    results.insert(results.begin(), boxes2.begin(), boxes2.end());
 
-        auto boxes2 = decode_infer(output_2, net_len, 32, classes_num_, frame_size, anchors_2_, obj_thresh_);
-        result.insert(result.begin(), boxes2.begin(), boxes2.end());
-    }
-
-    nms(result, nms_thresh_);
+    nms(results, nms_thresh_);
 }
 
+void helmetDetect::draw_result(cv::Mat& img, std::vector<BoxInfo> &results){
+    ScopedTiming st(model_name_ + " draw_result", debug_mode_);
+    int w_=img.cols;
+    int h_=img.rows;
+    for(auto &box:results){
+        std::string text = labels[box.label] + ":" + std::to_string(round(box.score * 100) / 100).substr(0,4);
+        int x =  int(box.x1 / image_size_.width * w_);
+        int y =  int(box.y1 / image_size_.height  * h_);
+        int w = int((box.x2-box.x1) / image_size_.width * w_);
+        int h = int((box.y2-box.y1) / image_size_.height  * h_);
+        if(img.channels()==3){
+            cv::rectangle(img, cv::Rect( x,y,w,h ), cv::Scalar(0,255, 0), 6, 2, 0); 
+            cv::putText(img, text, cv::Point(x,y-20), cv::FONT_HERSHEY_COMPLEX, 1, cv::Scalar(0,255,0), 3, 0);
+        }
+        else{
+            cv::rectangle(img, cv::Rect( x,y,w,h ), cv::Scalar(0,255, 0,255), 6, 2, 0); 
+            cv::putText(img, text, cv::Point(x,y-20), cv::FONT_HERSHEY_COMPLEX, 1, cv::Scalar(0,255, 0,255), 3, 0);
+        }
+        
+    }
+}
 
-// for NHWC
-std::vector<BoxInfo> helmetDetect::decode_infer(float *data, int net_size, int stride, int num_classes, FrameSize frame_size, float anchors[][2], float threshold)
+std::vector<BoxInfo> helmetDetect::decode_infer(float *data, int net_size, int stride, int num_classes, FrameCHWSize frame_size, float anchors[][2], float threshold)
 {
     float ratiow = (float)net_size / frame_size.width;
     float ratioh = (float)net_size / frame_size.height;
@@ -157,20 +119,13 @@ std::vector<BoxInfo> helmetDetect::decode_infer(float *data, int net_size, int s
                 float *cls_ptr = record + 5;
                 for (int cls = 0; cls < num_classes; cls++)
                 {
-                    // float score = sigmoid(cls_ptr[cls]) * sigmoid(record[4]);
                     float score = cls_ptr[cls] * record[4];
                     if (score > threshold)
                     {
-                        // cx = (sigmoid(record[0]) * 2.f - 0.5f + (float)shift_x) * (float)stride;
-                        // cy = (sigmoid(record[1]) * 2.f - 0.5f + (float)shift_y) * (float)stride;
-                        // w = pow(sigmoid(record[2]) * 2.f, 2) * anchors[i][0];
-                        // h = pow(sigmoid(record[3]) * 2.f, 2) * anchors[i][1];
-
                         cx = (record[0] * 2.f - 0.5f + (float)shift_x) * (float)stride;
                         cy = (record[1] * 2.f - 0.5f + (float)shift_y) * (float)stride;
                         w = pow(record[2] * 2.f, 2) * anchors[i][0];
                         h = pow(record[3] * 2.f, 2) * anchors[i][1];
-
                         cx -= ((net_size - frame_size.width * gain) / 2);
                         cy -= ((net_size - frame_size.height * gain) / 2);
                         cx /= gain;

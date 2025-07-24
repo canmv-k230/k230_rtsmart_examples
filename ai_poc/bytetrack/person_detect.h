@@ -28,9 +28,19 @@
 
 #include <iostream>
 #include <vector>
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
+#include "BYTETracker.h"
 
+typedef struct BoxInfo
+{
+    float x1;   // 行人检测框左上顶点x坐标
+    float y1;   // 行人检测框左上顶点y坐标
+    float x2;   // 行人检测框右下顶点x坐标
+    float y2;   // 行人检测框右下顶点y坐标
+    float score;    // 行人检测框的得分
+    int label;  // 行人检测框的标签
+} BoxInfo;
 
 /**
  * @brief 基于 personDetect 的行人检测任务
@@ -41,29 +51,16 @@ class personDetect: public AIBase
     public:
 
         /** 
-        * for image
-        * @brief personDetect 构造函数，加载kmodel,并初始化kmodel输入、输出、类阈值和NMS阈值
-        * @param kmodel_file kmodel文件路径
-        * @param obj_thresh_ 检测框阈值
-        * @param nms_thresh_ NMS阈值
-        * @param debug_mode 0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-        * @return None
-        */
-        personDetect(const char *kmodel_file, float obj_thresh_,float nms_thresh_,  const int debug_mode);
-
-        /** 
         * for video
         * @brief personDetect 构造函数，加载kmodel,并初始化kmodel输入、输出、类阈值和NMS阈值
         * @param kmodel_file kmodel文件路径
         * @param obj_thresh_ 检测框阈值
         * @param nms_thresh_ NMS阈值
-        * @param isp_shape   isp输入大小（chw）
-        * @param vaddr       isp对应虚拟地址
-        * @param paddr       isp对应物理地址
+        * @param image_size  输入大小（chw）
         * @param debug_mode 0（不调试）、 1（只显示时间）、2（显示所有打印信息）
         * @return None
         */
-        personDetect(const char *kmodel_file, float obj_thresh_,float nms_thresh_, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+        personDetect(char *kmodel_file, float obj_thresh_,float nms_thresh_, FrameCHWSize image_size,int debug_mode);
         /** 
         * @brief  personDetect 析构函数
         * @return None
@@ -71,17 +68,10 @@ class personDetect: public AIBase
         ~personDetect();
 
         /**
-         * @brief 图片预处理（ai2d for image）
-         * @param ori_img 原始图片
-         * @return None
-         */
-        void pre_process(cv::Mat ori_img);
-
-        /**
          * @brief 视频流预处理（ai2d for video）
          * @return None
          */
-        void pre_process();
+        void pre_process(runtime_tensor &input_tensor);
 
         /**
          * @brief kmodel推理
@@ -95,11 +85,18 @@ class personDetect: public AIBase
         * @param frame_size 帧大小
         * @return None
         */
-        void post_process(FrameSize frame_size,std::vector<BoxInfo> &result);
+        void post_process(FrameCHWSize frame_size,std::vector<BoxInfo> &result);
+
+        void draw_result(cv::Mat& draw_img,vector<BoxInfo>& results,BYTETracker &tracker);
 
         std::vector<std::string> labels { "person" }; // 类别标签
 
     private:
+
+        void nms(std::vector<BoxInfo> &input_boxes, float NMS_THRESH);
+
+        std::vector<BoxInfo> decode_infer(float *data, int net_size, int stride, int num_classes, FrameCHWSize frame_size, float anchors[][2], float threshold);
+
         float obj_thresh_;  // 检测框阈值
         float nms_thresh_;  // NMS阈值
         
@@ -113,8 +110,8 @@ class personDetect: public AIBase
         std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
         runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
         runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-        uintptr_t vaddr_;                            // isp的虚拟地址
-        FrameCHWSize isp_shape_;                     // isp对应的地址大小
+        FrameCHWSize image_size_;
+        FrameCHWSize input_size_;
 
 };
 #endif

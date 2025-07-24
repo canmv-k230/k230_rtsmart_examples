@@ -25,33 +25,15 @@
 #include "hand_detection.h"
 #include <vector>
 
-HandDetection::HandDetection(const char *kmodel_file, float obj_thresh, float nms_thresh, FrameSize frame_size,const int debug_mode)
-:obj_thresh_(obj_thresh), nms_thresh_(nms_thresh),frame_size_(frame_size),AIBase(kmodel_file, "HandDetection", debug_mode)
+HandDetection::HandDetection(char *kmodel_file, float obj_thresh, float nms_thresh, FrameCHWSize image_size, int debug_mode)
+: obj_thresh_(obj_thresh), nms_thresh_(nms_thresh),AIBase(kmodel_file,"HandDetection", debug_mode)
 {
     model_name_ = "HandDetection";
     classes_num_ = 1;
-    int net_len = input_shapes_[0][2];
+    image_size_ = image_size;
+    input_size_ = {input_shapes_[0][1], input_shapes_[0][2],input_shapes_[0][3]};
     ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-HandDetection::HandDetection(const char *kmodel_file, float obj_thresh, float nms_thresh, FrameSize frame_size, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode)
-: obj_thresh_(obj_thresh), nms_thresh_(nms_thresh),frame_size_(frame_size), AIBase(kmodel_file,"HandDetection", debug_mode)
-{
-    model_name_ = "HandDetection";
-    classes_num_ = 1;
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-    int isp_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-#if 0
-    int in_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, in_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
-    ai2d_out_tensor_ = get_input_tensor(0);
-    Utils::padding_resize(isp_shape, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_, cv::Scalar(114, 114, 114));
+    Utils::padding_resize_two_side_set(image_size_, input_size_,ai2d_builder_, cv::Scalar(114, 114, 114));
 }
 
 
@@ -59,28 +41,10 @@ HandDetection::~HandDetection()
 {
 }
 
-// ai2d for image
-void HandDetection::pre_process(cv::Mat ori_img)
+void HandDetection::pre_process(runtime_tensor& input_tensor)
 {
     ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    std::vector<uint8_t> rgb_chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img, rgb_chw_vec);
-    Utils::padding_resize({ori_img.channels(), ori_img.rows, ori_img.cols}, rgb_chw_vec, {input_shapes_[0][3], input_shapes_[0][2]}, ai2d_out_tensor_, cv::Scalar(114, 114, 114));
-}
-
-// ai2d for video
-void HandDetection::pre_process()
-{
-    ScopedTiming st(model_name_ + " pre_process_video", debug_mode_);
-#if 0
-    ai2d_builder_->invoke(ai2d_in_tensor_, ai2d_out_tensor_).expect("error occurred in ai2d running");
-#else
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    ai2d_builder_->invoke(ai2d_in_tensor_, ai2d_out_tensor_).expect("error occurred in ai2d running");    
-#endif
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");   
 }
 
 void HandDetection::inference()
@@ -91,11 +55,12 @@ void HandDetection::inference()
 
 void HandDetection::post_process(std::vector<BoxInfo> &result)
 {
-    auto boxes0 = decode_infer(p_outputs_[0], 8, frame_size_, anchors_0);
+    result.clear();
+    auto boxes0 = decode_infer(p_outputs_[0], 8, image_size_, anchors_0);
     result.insert(result.begin(), boxes0.begin(), boxes0.end());
-    auto boxes1 = decode_infer(p_outputs_[1], 16, frame_size_, anchors_1);
+    auto boxes1 = decode_infer(p_outputs_[1], 16, image_size_, anchors_1);
     result.insert(result.begin(), boxes1.begin(), boxes1.end());
-    auto boxes2 = decode_infer(p_outputs_[2], 32, frame_size_, anchors_2);
+    auto boxes2 = decode_infer(p_outputs_[2], 32, image_size_, anchors_2);
     result.insert(result.begin(), boxes2.begin(), boxes2.end());
     nms(result);
 }
@@ -134,9 +99,8 @@ void HandDetection::nms(std::vector<BoxInfo> &input_boxes)
     }
 }
 
-std::vector<BoxInfo> HandDetection::decode_infer(float *data, int stride, FrameSize frame_size, float anchors[][2])
+std::vector<BoxInfo> HandDetection::decode_infer(float *data, int stride, FrameCHWSize frame_size, float anchors[][2])
 {
-//std::cout << "decode_infer!\n";
     float ratiow = (float)input_shapes_[0][3] / frame_size.width;
     float ratioh = (float)input_shapes_[0][2] / frame_size.height;
     float gain = ratiow < ratioh ? ratiow : ratioh;
@@ -144,10 +108,13 @@ std::vector<BoxInfo> HandDetection::decode_infer(float *data, int stride, FrameS
     int grid_size = input_shapes_[0][2] / stride;
     int one_rsize = classes_num_ + 5;
     float cx, cy, w, h;
+
     for (int shift_y = 0; shift_y < grid_size; shift_y++)
     {
         for (int shift_x = 0; shift_x < grid_size; shift_x++)
         {
+
+            
             int loc = shift_x + shift_y * grid_size;
             for (int i = 0; i < 3; i++)
             {
@@ -155,7 +122,6 @@ std::vector<BoxInfo> HandDetection::decode_infer(float *data, int stride, FrameS
                 float *cls_ptr = record + 5;
                 for (int cls = 0; cls < classes_num_; cls++)
                 {
-                    // float score = sigmoid(cls_ptr[cls]) * sigmoid(record[4]);
                     float score = cls_ptr[cls] * record[4];
                     if (score > obj_thresh_)
                     {
@@ -175,19 +141,8 @@ std::vector<BoxInfo> HandDetection::decode_infer(float *data, int stride, FrameS
                         box.y1 = std::max(0, std::min(int(frame_size.height), int(cy - h / 2.f)));
                         box.x2 = std::max(0, std::min(int(frame_size.width), int(cx + w / 2.f)));
                         box.y2 = std::max(0, std::min(int(frame_size.height), int(cy + h / 2.f)));
-
-                        #if defined(CONFIG_BOARD_K230_CANMV) || defined(CONFIG_BOARD_K230_CANMV_V2)
-                            if (abs(box.y1-box.y2)< 0.1*frame_size.height)
-                                continue;
-                            if ((abs(box.x1-box.x2)< 0.25*frame_size.width) && ((box.x1 < 0.03*frame_size.width) || (box.x2 > 0.97*frame_size.width))) 
-                                continue;
-                            if ((abs(box.x1-box.x2)< 0.15*frame_size.width) && ((box.x1 < 0.01*frame_size.width) || (box.x2 > 0.99*frame_size.width)))
-                                continue;
-                        #else
-                            if ((abs(box.x1-box.x2)< 0.1*frame_size.width) || (abs(box.y1-box.y2)< 0.1*frame_size.height))
-                                continue;
-                        #endif
-                        
+                        if ((abs(box.x1-box.x2)< 0.1*frame_size.width) || (abs(box.y1-box.y2)< 0.1*frame_size.height))
+                            continue;
                         box.score = score;
                         box.label = cls;
                         result.push_back(box);

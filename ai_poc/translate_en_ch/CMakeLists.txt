@@ -1,13 +1,19 @@
-set(src ai_base.cc main.cc etranslate.cc dtranslate.cc)
+# set common files
+set(common_files "../common_files")
+include_directories(${common_files})
+set(common_files_src 
+    ${common_files}/ai_base.cc
+)
+
+# set source_code
+set(src main.cc etranslate.cc dtranslate.cc)
+set(all_src ${src} ${common_files_src})
 set(bin translate_en_ch.elf)
 
 include_directories(${PROJECT_SOURCE_DIR})
-include_directories(${nncase_sdk_root}/riscv64/rvvlib/include)
+include_directories(.)
 
-link_directories(${PROJECT_SOURCE_DIR}/../../libs/kmodel/ai_poc/utils/)
-link_directories(${nncase_sdk_root}/riscv64/rvvlib/)
-
-add_executable(${bin} ${src})
+add_executable(${bin} ${all_src})
 target_link_libraries(${bin} sentencepiece.a)
 target_link_libraries(${bin} -Wl,--start-group rvv Nncase.Runtime.Native nncase.rt_modules.k230 functional_k230 sys)
 

@@ -26,7 +26,7 @@
 #ifndef _LICENCE_DET_H
 #define _LICENCE_DET_H
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
 extern float anchors320[4200][4];
@@ -36,6 +36,42 @@ extern float anchors640[16800][4];
 #define LAND_SIZE 8
 
 /**
+ * @brief 车牌检测框
+ */
+typedef struct Bbox
+{
+    float x; // 车牌检测框的左顶点x坐标
+    float y; // 车牌检测框的左顶点y坐标
+    float w;
+    float h;
+} Bbox;
+
+/**
+ * @brief 车牌检测索引
+ */
+typedef struct sortable_obj_t
+{
+	int index;
+	float* probs;
+} sortable_obj_t;
+
+/**
+ * @brief 车牌检测四个点的 x y值
+ */
+typedef struct landmarks_t
+{
+	float points[8];
+} landmarks_t;
+
+/**
+ * @brief 车牌检测框点集合
+ */
+typedef struct BoxPoint
+{
+    cv::Point2f vertices[4];
+} BoxPoint;
+
+/**
  * @brief 车牌检测
  * 主要封装了对于每一帧图片，从预处理、运行到后处理给出结果的过程
  */
@@ -43,27 +79,15 @@ class LicenceDetect : public AIBase
 {
     public:
     /**
-        * @brief LicenceDetect构造函数，加载kmodel,并初始化kmodel输入、输出和车牌检测阈值
-        * @param kmodel_file kmodel文件路径
-        * @param obj_thresh  车牌检测object阈值
-        * @param nms_thresh  车牌检测nms阈值
-        * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-        * @return None
-        */
-    LicenceDetect(const char *kmodel_file, float obj_thresh, float nms_thresh, const int debug_mode = 1);
-
-    /**
     * @brief LicenceDetect构造函数，加载kmodel,并初始化kmodel输入、输出和车牌检测阈值
     * @param kmodel_file kmodel文件路径
     * @param obj_thresh  车牌检测object阈值
     * @param nms_thresh  车牌检测nms阈值
-    * @param isp_shape   isp输入大小（chw）
-    * @param vaddr       isp对应虚拟地址
-    * @param paddr       isp对应物理地址
+    * @param image_size   输入图片大小
     * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
     * @return None
     */
-    LicenceDetect(const char *kmodel_file, float obj_thresh, float nms_thresh, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr,const int debug_mode);
+    LicenceDetect(char *kmodel_file, float obj_thresh, float nms_thresh, FrameCHWSize image_size, int debug_mode);
 
     /**
     * @brief LicenceDetect析构函数
@@ -71,18 +95,7 @@ class LicenceDetect : public AIBase
     */
     ~LicenceDetect();
 
-    /**
-    * @brief 图片预处理
-    * @param ori_img 原始图片
-    * @return None
-    */
-    void pre_process(cv::Mat ori_img);
-
-    /**
-    * @brief 视频流预处理（ai2d for isp）
-    * @return None
-    */
-    void pre_process();
+    void pre_process(runtime_tensor &input_tensor);
 
     /**
     * @brief kmodel推理
@@ -92,11 +105,12 @@ class LicenceDetect : public AIBase
 
     /**
     * @brief kmodel推理结果后处理
-    * @param frame_size 原始图像/帧宽高，用于将结果放到原始图像大小
     * @param results 后处理之后的基于原始图像的检测结果集合
     * @return None
     */
-    void post_process(FrameSize frame_size, vector<BoxPoint> &results);
+    void post_process(vector<BoxPoint> &results);
+
+    void draw_result(cv::Mat &draw_frame, vector<BoxPoint> &results);
 
     private:
 
@@ -202,8 +216,8 @@ class LicenceDetect : public AIBase
     std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
     runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-    uintptr_t vaddr_;                            // isp的虚拟地址
-    FrameCHWSize isp_shape_;                     // isp对应的地址大小
+    FrameCHWSize image_size_;                    // 输入图片大小
+    FrameCHWSize input_size_;                    // 输入图片大小
 
     float obj_thresh;  //车牌检测object阈值
     float nms_thresh;  //车牌检测nms阈值

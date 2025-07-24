@@ -26,9 +26,11 @@
 #include <vector>
 #include "face_verification.h"
 
-FaceVerification::FaceVerification(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file, "FaceVerification", debug_mode)
+FaceVerification::FaceVerification(char *kmodel_file,FrameCHWSize image_size, int debug_mode) : AIBase(kmodel_file, "FaceVerification", debug_mode)
 {
 	model_name_ = "FaceVerification";
+	image_size_ = image_size;
+	input_size_={input_shapes_[0][1],input_shapes_[0][2],input_shapes_[0][3]};
 	feature_num_ = output_shapes_[0][1];
 	ai2d_out_tensor_ = get_input_tensor(0);
 }
@@ -37,15 +39,12 @@ FaceVerification::~FaceVerification()
 {
 }
 
-// ai2d for image
-void FaceVerification::pre_process(cv::Mat ori_img, float *sparse_points)
+void FaceVerification::pre_process(runtime_tensor& input_tensor, float *sparse_points)
 {
-	ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
+	ScopedTiming st(model_name_ + " pre_process", debug_mode_);
 	get_affine_matrix(sparse_points);
-
-	std::vector<uint8_t> chw_vec;
-	Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);
-	Utils::affine({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, matrix_dst_, ai2d_out_tensor_);
+	Utils::affine_set(image_size_, input_size_,ai2d_builder_, matrix_dst_);
+	ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void FaceVerification::inference()

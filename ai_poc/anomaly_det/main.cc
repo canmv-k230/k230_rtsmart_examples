@@ -25,8 +25,8 @@
  
 #include <iostream>
 #include <thread>
-#include "utils.h"
-#include "vi_vo.h"
+#include <string>
+#include "ai_utils.h"
 #include "anomaly_det.h"
 
 using std::cerr;
@@ -59,20 +59,37 @@ int main(int argc, char *argv[])
     if (strcmp(argv[3], "None") == 0)
     {
         // isp not nonsupport yes
+        printf("Anomaly detection demo not support camera inference!\n");
     }
     else
     {
+        int debug_mode = atoi(argv[4]);
+        // 读取图片
         cv::Mat ori_img = cv::imread(argv[3]);
-        int ori_w = ori_img.cols;
-        int ori_h = ori_img.rows;
-        AnomalyDet ad(argv[1], atof(argv[2]), atoi(argv[4]));
-        ad.pre_process(ori_img);
-        ad.inference();
+        FrameCHWSize image_size={ori_img.channels(),ori_img.rows,ori_img.cols};
+         // 创建一个空的向量，用于存储chw图像数据,将读入的hwc数据转换成chw数据
+        std::vector<uint8_t> chw_vec;
+        std::vector<cv::Mat> bgrChannels(3);
+        cv::split(ori_img, bgrChannels);
+        for (auto i = 2; i > -1; i--)
+        {
+            std::vector<uint8_t> data = std::vector<uint8_t>(bgrChannels[i].reshape(1, 1));
+            chw_vec.insert(chw_vec.end(), data.begin(), data.end());
+        }
+        // 创建tensor
+        dims_t in_shape { 1, 3, (unsigned int)ori_img.rows, (unsigned int)ori_img.cols };
+        runtime_tensor input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("cannot create input tensor");
+        auto input_buf = input_tensor.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
+        memcpy(reinterpret_cast<char *>(input_buf.data()), chw_vec.data(), chw_vec.size());
+        hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("write back input failed");
+        // 创建AnomalyDet实例
         vector<anomaly_res> results;
+        AnomalyDet ad(argv[1], atof(argv[2]), image_size,atoi(argv[4]));
+        ad.pre_process(input_tensor);
+        ad.inference();
         ad.post_process(results);
-        Utils::draw_anomaly_res(ori_img, results);
+        ad.draw_anomaly_res(ori_img, results);
         cv::imwrite("anomaly_detection_result.jpg", ori_img);
-        
     }
     return 0;
 }

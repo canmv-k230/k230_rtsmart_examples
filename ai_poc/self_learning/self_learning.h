@@ -26,16 +26,16 @@
 #ifndef _SELF_LEARNING_H_
 #define _SELF_LEARNING_H_
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
-typedef struct Evec
+using namespace std;
+
+typedef struct ClassResult
 {
-    string category;
+    std::string res;
     float score; 
-    string bin_file;
-    
-} Evec;
+} ClassResult;
 
 /**
  * @brief 自学习类
@@ -46,18 +46,15 @@ class SelfLearning : public AIBase
     public:
 
         /** 
-        * for video
         * @brief SelfLearning 构造函数，加载kmodel,并初始化kmodel输入、输出
         * @param kmodel_file kmodel文件路径
-        * @param crop_wh     剪切范围
+        * @param thres       识别阈值
         * @param topk        识别范围
-        * @param isp_shape   isp输入大小（chw）
-        * @param vaddr       isp对应虚拟地址
-        * @param paddr       isp对应物理地址
+        * @param image_size  图片大小
         * @param debug_mode 0（不调试）、 1（只显示时间）、2（显示所有打印信息）
         * @return None
         */
-        SelfLearning(const char *kmodel_file, FrameSize crop_wh, float thres, int topk, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+        SelfLearning(char *kmodel_file,float thres, int topk, FrameCHWSize image_size, int debug_mode);
        
         /** 
         * @brief  SelfLearning 析构函数
@@ -65,11 +62,7 @@ class SelfLearning : public AIBase
         */
         ~SelfLearning();
 
-        /**
-         * @brief 视频流预处理（ai2d for video）
-         * @return None
-         */
-        void pre_process();
+        void pre_process(runtime_tensor &input_tensor);
 
 
         /**
@@ -78,30 +71,31 @@ class SelfLearning : public AIBase
          */
         void inference();
 
-        /**
-         * @brief 获取kmodel的输出
-         * @return None
-         */
-        float* get_kpu_output(int *out_len);
+        void register_object(string &name);
 
         /** 
         * @brief postprocess 函数
         * @return None
         */
-        void post_process(std::vector<std::string> features, std::vector<Evec> &results);
+        void post_process(std::vector<ClassResult> &results);
+
+
+        void draw_result(cv::Mat &draw_frame,std::vector<ClassResult> &results);
 
     private:
-
         std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
-        std::unique_ptr<ai2d_builder> ai2d_builder_pad_; // padding ai2d构建器
-        runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
         runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-        runtime_tensor ai2d_out_tensor_pad_;         // padding 后图像输出
-        uintptr_t vaddr_;                            // isp的虚拟地址
-        FrameCHWSize isp_shape_;                     // isp对应的地址大小
+        FrameCHWSize image_size_;
+        FrameCHWSize input_size_;
 
-        int topk;
-        Bbox crop_box;
-        float thres;
+        int topk_;
+        float thres_;
+        std::vector<string> names_;                        // 特征数据库名字
+        std::vector<std::vector<float>> features_;              // 特征数据库特征
+
+        int crop_x;
+        int crop_y;
+        int crop_w;
+        int crop_h;
 };
 #endif

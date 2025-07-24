@@ -25,27 +25,12 @@
 #include "face_glasses.h"
 #include <vector>
 
-FaceGlasses::FaceGlasses(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"FaceGlasses",debug_mode)
+
+FaceGlasses::FaceGlasses(char *kmodel_file, FrameCHWSize image_size, int debug_mode) : AIBase(kmodel_file,"FaceGlasses", debug_mode)
 {
     model_name_ = "FaceGlasses";
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-FaceGlasses::FaceGlasses(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : AIBase(kmodel_file,"FaceGlasses", debug_mode)
-{
-    model_name_ = "FaceGlasses";
-
-    // input->isp（Fixed size）
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-#if 0
-    int in_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, in_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
+    image_size_ = image_size;
+    input_size_={input_shapes_[0][1],input_shapes_[0][2],input_shapes_[0][3]};
     ai2d_out_tensor_ = get_input_tensor(0);
 }
 
@@ -53,41 +38,13 @@ FaceGlasses::~FaceGlasses()
 {
 }
 
-// ai2d for image
-void FaceGlasses::pre_process(cv::Mat ori_img, float* sparse_points)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    get_affine_matrix(sparse_points);
-
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);
-
-    Utils::affine({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, matrix_dst_, ai2d_out_tensor_);
-    
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("FaceGlasses_input_gray.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
+void FaceGlasses::pre_process(runtime_tensor& input_tensor, float* sparse_points){
+	ScopedTiming st(model_name_ + " pre_process", debug_mode_);
+	get_affine_matrix(sparse_points);
+	Utils::affine_set(image_size_, input_size_,ai2d_builder_, matrix_dst_);
+	ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
-// ai2d for video
-void FaceGlasses::pre_process(float* sparse_points)
-{
-    ScopedTiming st(model_name_ + " pre_process_video", debug_mode_);
-    get_affine_matrix(sparse_points);
-
-#if 1
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-    // run ai2d
-#endif
-    Utils::affine(matrix_dst_, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("FaceGlasses_input.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
-}
 
 void FaceGlasses::inference()
 {
@@ -133,15 +90,15 @@ void FaceGlasses::draw_result(cv::Mat& src_img,Bbox& bbox,FaceGlassesInfo& resul
     }
     else
     {
-	    int x = bbox.x / isp_shape_.width * src_w;
-        int y = bbox.y / isp_shape_.height * src_h;
-        int w = bbox.w / isp_shape_.width * src_w;
-        int h = bbox.h / isp_shape_.height  * src_h;
+	    int x = bbox.x / image_size_.width * src_w;
+        int y = bbox.y / image_size_.height * src_h;
+        int w = bbox.w / image_size_.width * src_w;
+        int h = bbox.h / image_size_.height  * src_h;
         cv::rectangle(src_img, cv::Rect(x, y , w, h), cv::Scalar(255,255, 255, 255), 2, 2, 0);
         if(result.label == "no glasses")
 			cv::putText(src_img,text,cv::Point(x,std::max(int(y-10),0)),cv::FONT_HERSHEY_COMPLEX,2,cv::Scalar(255,255, 0, 255), 2, 8, 0);
 		else
-			cv::putText(src_img,text,cv::Point(x,std::max(int(y-10),0)),cv::FONT_HERSHEY_COMPLEX,2,cv::Scalar(255,255, 255, 0), 2, 8, 0);
+			cv::putText(src_img,text,cv::Point(x,std::max(int(y-10),0)),cv::FONT_HERSHEY_COMPLEX,2,cv::Scalar(255,0, 255, 255), 2, 8, 0);
     }  
 }
 

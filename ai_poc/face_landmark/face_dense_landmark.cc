@@ -50,37 +50,24 @@ cv::Scalar color_list_for_kp[] = {
     cv::Scalar(255, 30, 30)};
 
 cv::Scalar color_list_for_osd_kp[] = {
-    cv::Scalar(255, 0, 255, 0),
-    cv::Scalar(255, 0, 255, 0),
-    cv::Scalar(255, 255, 0, 255),
-    cv::Scalar(255, 255, 0, 255),
-    cv::Scalar(255, 255, 0, 0),
-    cv::Scalar(255, 255, 170, 0),
-    cv::Scalar(255, 255, 255, 0),
+    cv::Scalar(0, 255, 0, 255),
+    cv::Scalar(0, 255, 0, 255),
     cv::Scalar(255, 0, 255, 255),
-    cv::Scalar(255, 255, 220, 50),
-    cv::Scalar(255, 30, 30, 255)};
+    cv::Scalar(255, 0, 255, 255),
+    cv::Scalar(0, 0, 255, 255),
+    cv::Scalar(0, 170, 255, 255),
+    cv::Scalar(0, 255, 255, 255),
+    cv::Scalar(255, 255, 0, 255),
+    cv::Scalar(50, 220, 255, 255),
+    cv::Scalar(255, 30, 30, 255)
+};
 
-FaceDenseLandmark::FaceDenseLandmark(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"FaceDenseLandmark",debug_mode)
+
+FaceDenseLandmark::FaceDenseLandmark(char *kmodel_file, FrameCHWSize image_size, int debug_mode) : AIBase(kmodel_file,"FaceDenseLandmark", debug_mode)
 {
     model_name_ = "FaceDenseLandmark";
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-FaceDenseLandmark::FaceDenseLandmark(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : AIBase(kmodel_file,"FaceDenseLandmark", debug_mode)
-{
-    model_name_ = "FaceDenseLandmark";
-    // input->isp（Fixed size）
-    vaddr_ = vaddr;
-    isp_shape_ = isp_shape;
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-#if 0
-    int in_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, in_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
+    image_size_=image_size;
+    input_size_={input_shapes_[0][1],input_shapes_[0][2],input_shapes_[0][3]};
     ai2d_out_tensor_ = get_input_tensor(0);
 }
 
@@ -88,41 +75,11 @@ FaceDenseLandmark::~FaceDenseLandmark()
 {
 }
 
-// ai2d for image
-void FaceDenseLandmark::pre_process(cv::Mat ori_img, Bbox &bbox)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-    get_affine_matrix(bbox);
-
-    std::vector<uint8_t> chw_vec;
-    Utils::bgr2rgb_and_hwc2chw(ori_img, chw_vec);
-
-    float *matrix_dst_ptr = matrix_dst_.ptr<float>();
-    Utils::affine({ori_img.channels(), ori_img.rows, ori_img.cols}, chw_vec, matrix_dst_ptr, ai2d_out_tensor_);
-    
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_color_image("FaceDenseLandmark_input_color.png", {input_shapes_[0][3],input_shapes_[0][2]},output);
-}
-
-// ai2d for video
-void FaceDenseLandmark::pre_process(Bbox &bbox)
-{
-    ScopedTiming st(model_name_ + " pre_process_video", debug_mode_);
+void FaceDenseLandmark::pre_process(runtime_tensor& input_tensor, Bbox &bbox){
     get_affine_matrix(bbox);
     float *matrix_dst_ptr = matrix_dst_.ptr<float>();
-#if 1
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-#endif
-    Utils::affine(matrix_dst_ptr, ai2d_builder_, ai2d_in_tensor_, ai2d_out_tensor_);
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // Utils::dump_gray_image("FaceDenseLandmark_input.png",{input_shapes_[0][3],input_shapes_[0][2]},output);
-   
+    Utils::affine_set(image_size_, input_size_,ai2d_builder_, matrix_dst_ptr);
+	ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void FaceDenseLandmark::inference()
@@ -175,8 +132,8 @@ void FaceDenseLandmark::draw_contour(cv::Mat src_img, bool pic_mode)
             }
             else
             {
-                x = pred[real_kp_index * 2] / isp_shape_.width*src_width;
-                y = pred[real_kp_index * 2 + 1] / isp_shape_.height*src_height;
+                x = pred[real_kp_index * 2] / image_size_.width*src_width;
+                y = pred[real_kp_index * 2 + 1] / image_size_.height*src_height;
             }
             face_sub_part_point_set.push_back({int(x), int(y)});
         }

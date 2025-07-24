@@ -26,11 +26,10 @@
 #ifndef _OCR_RECO_H
 #define _OCR_RECO_H
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
-#define DICT "dict_ocr_16.txt"
-#define DICT_STRING "dict_ocr.txt"
+#define DICT "dict_ocr.txt"
 
 /**
  * @brief ocr识别
@@ -42,23 +41,10 @@ class OCRReco : public AIBase
         /**
         * @brief OCRReco构造函数，加载kmodel,并初始化kmodel输入、输出和ocr识别字典大小
         * @param kmodel_file kmodel文件路径
-        * @param dict_size   ocr识别字典大小
         * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
         * @return None
         */
-        OCRReco(const char *kmodel_file, int dict_size, const int debug_mode = 1);
-
-        /**
-        * @brief OCRReco构造函数，加载kmodel,并初始化kmodel输入、输出和ocr识别字典大小
-        * @param kmodel_file kmodel文件路径
-        * @param dict_size   ocr识别字典大小
-        * @param isp_shape   isp输入大小（chw）
-        * @param vaddr       isp对应虚拟地址
-        * @param paddr       isp对应物理地址
-        * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-        * @return None
-        */
-        OCRReco(const char *kmodel_file, int dict_size, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+        OCRReco(char *kmodel_file, int debug_mode);
         
         /**
         * @brief OCRReco析构函数
@@ -90,21 +76,16 @@ class OCRReco : public AIBase
         * @param results 后处理之后的字符的十六进制集合
         * @return None
         */
-        void post_process(vector<unsigned char> &results);
-
-
+        void post_process(std::string &results);
 
     private:
         std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
         runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
         runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-        uintptr_t vaddr_;                            // isp的虚拟地址
-        FrameCHWSize isp_shape_;                     // isp对应的地址大小
-        int input_width;        //ocr识别model输入高
-        int input_height;       //ocr识别model输入宽
-        int dict_size;          //ocr识别字典大小
-        std::vector<unsigned char> vec16_dict;   //16进制字典
-        std::vector<string> txt_string;   //字母汉字字典
-        float *output;          //ocr后处理的输入
+        FrameCHWSize image_size_;
+        FrameCHWSize input_size_;
+
+        int dict_size=0;          //ocr识别字典大小
+        std::vector<string> dict_;   //字母汉字字典
 };
 #endif

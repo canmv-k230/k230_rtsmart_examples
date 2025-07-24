@@ -12,30 +12,23 @@
 
 ### 2.1 使用帮助
 
-```shell
-Usage: ./self_learning.elf <kmodel> <crop_w> <crop_h> <thres> <topk> <debug_mode>
+```bash
+Usage: ./self_learning.elf <kmodel> <thres> <topk> <debug_mode>
 Options:
     1> kmodel         kmodel文件路径
-    2> crop_w         剪切范围w
-    3> crop_h         剪切范围h
-    4> thres          判别阈值
-    5> topk           识别范围
-    6> debug_mode     是否需要调试，0、1、2分别表示不调试、简单调试、详细调试
+    2> thres          判别阈值
+    3> topk           识别范围
+    4> debug_mode     是否需要调试，0、1、2分别表示不调试、简单调试、详细调试
+./self_learning.elf recognition.kmodel 0.5 3 0
 ```
+
+| 功能           | 支持情况 |命令|
+| -------------- | -------- |---|
+| 打印帮助说明       | ✔        |h/help|
+| dump注册帧       | ✔        |i|
+| 特征注册        | ✔        |输入物体名称|
+| 退出程序         | ✔        |q|
 
 ### 2.2 操作步骤
 
-视频流推理：self_learning.sh  
-./self_learning.elf recognition.kmodel 400 400 0.5 3 0
-
-操作说明：  
-1.启动程序  
-2.将需要自学习的物体置于camera前，物体需要在显示器所画的框内  
-3.键盘按 i 进入：增加新特征 or 删除已有特征 阶段  
-&emsp;a.输入n 新建特征， 为特征取名字 format : {category}_{index}.bin  eg: apple_0.bin  
-&emsp;b.输入d 删除特征， 删除对应特征的索引， 输入前会有提示：Already have : | 0 -> apple_0.bin | 1-> banana_0.bin  
-4.如果不需要删除已有特征或者增加新的特征，跳过第3步即可识别物体类别  
-
-### 2.2 效果展示
-
-![自学习效果](https://kendryte-download.canaan-creative.com/k230/downloads/doc_images/ai_demo/self_learning/self_learning.gif)
+启动程序后，输入`i`进入注册，然后输入待注册物体的名称。比如输入`i`回车，然后输入`apple`回车，就完成了一个apple特征的注册。

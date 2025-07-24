@@ -28,9 +28,9 @@ ifeq ($(CONFIG_RTT_ENABLE_BUILD_FACE_RECOGNITION),y)
 		echo "No build output found in $(BUILD_OUT), skipping copy."; \
 	fi
 endif
-	@echo "Make kpu run samples done."
+	@echo "Make face recognition samples done."
 
 clean:
 	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_FACE_RECOGNITION)/*
 	@rm -rf $(BUILD_OUT)
-	@echo "Clean kpu run samples done."
+	@echo "Clean face recognition samples done."

@@ -24,8 +24,7 @@
  */
 #include <iostream>
 #include <thread>
-#include "utils.h"
-#include "vi_vo.h"
+#include "ai_utils.h"
 #include "face_detection.h"
 #include "face_verification.h"
 
@@ -58,10 +57,7 @@ int main(int argc, char *argv[])
     }
 
     int debug_mode = atoi(argv[8]);
-    FaceDetection face_det(argv[1], atof(argv[2]), atof(argv[3]), debug_mode);
     float recg_thres = atof(argv[5]);
-    FaceVerification face_verify(argv[4], debug_mode);
-
     vector<float> feat_a;
     float score;
     for (int i = 0; i < 2; ++i)
@@ -76,12 +72,31 @@ int main(int argc, char *argv[])
                 ori_img = cv::imread(argv[7]);
         }
 
+        FrameCHWSize image_size={ori_img.channels(),ori_img.rows,ori_img.cols};
+        // 创建一个空的向量，用于存储chw图像数据,将读入的hwc数据转换成chw数据
+        std::vector<uint8_t> chw_vec;
+        std::vector<cv::Mat> bgrChannels(3);
+        cv::split(ori_img, bgrChannels);
+        for (auto i = 2; i > -1; i--)
+        {
+            std::vector<uint8_t> data = std::vector<uint8_t>(bgrChannels[i].reshape(1, 1));
+            chw_vec.insert(chw_vec.end(), data.begin(), data.end());
+        }
+        // 创建tensor
+        dims_t in_shape { 1, 3, ori_img.rows, ori_img.cols };
+        runtime_tensor input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("cannot create input tensor");
+        auto input_buf = input_tensor.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
+        memcpy(reinterpret_cast<char *>(input_buf.data()), chw_vec.data(), chw_vec.size());
+        hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("write back input failed");
+
+        FaceDetection face_det(argv[1], atof(argv[2]), atof(argv[3]),image_size, debug_mode);
+        FaceVerification face_verify(argv[4],image_size, debug_mode);
         // for face det
-        face_det.pre_process(ori_img);
+        face_det.pre_process(input_tensor);
         face_det.inference();
 
         vector<FaceDetectionInfo> det_results;
-        face_det.post_process({ori_img.cols, ori_img.rows}, det_results);
+        face_det.post_process(image_size, det_results);
 
         // find max face
         float max_area = 0;
@@ -97,7 +112,7 @@ int main(int argc, char *argv[])
         }
 
         // for face verification
-        face_verify.pre_process(ori_img, det_results[max_id].sparse_kps.points);
+        face_verify.pre_process(input_tensor, det_results[max_id].sparse_kps.points);
         face_verify.inference();
 
         if (i == 0)

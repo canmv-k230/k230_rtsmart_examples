@@ -25,32 +25,12 @@
 #include "face_gender.h"
 #include <vector>
 
-FaceGender::FaceGender(const char *kmodel_file, const int debug_mode) : AIBase(kmodel_file,"FaceGender",debug_mode)
+FaceGender::FaceGender(char *kmodel_file, FrameCHWSize image_size, int debug_mode) : AIBase(kmodel_file,"FaceGender", debug_mode)
 {
     model_name_ = "FaceGender";
 	margin_ = 0.4;
-    ai2d_out_tensor_ = get_input_tensor(0);
-}
-
-FaceGender::FaceGender(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode) : AIBase(kmodel_file,"FaceGender", debug_mode)
-{
-    model_name_ = "FaceGender";
-	margin_ = 0.4;
-
-    // input->isp（Fixed size）
-    vaddr_ = vaddr;
-	// paddr_ = paddr;
-    isp_shape_ = isp_shape;
-    
-    dims_t in_shape{1, isp_shape.channel, isp_shape.height, isp_shape.width};
-#if 0
-    int isp_size = isp_shape.channel * isp_shape.height * isp_shape.width;
-    ai2d_in_tensor_ = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)vaddr, isp_size },
-        true, hrt::pool_shared).expect("cannot create input tensor");
-#else
-    ai2d_in_tensor_ = hrt::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("create ai2d input tensor failed");
-#endif
-
+    image_size_=image_size;
+    input_size_={input_shapes_[0][3],input_shapes_[0][1],input_shapes_[0][2]};
     ai2d_out_tensor_ = get_input_tensor(0);
 }
 
@@ -58,53 +38,16 @@ FaceGender::~FaceGender()
 {
 }
 
-// ai2d for image
-void FaceGender::pre_process(cv::Mat ori_img,Bbox& rect)
-{
-    ScopedTiming st(model_name_ + " pre_process image", debug_mode_);
-	
-	int ori_w = ori_img.cols;
-    int ori_h = ori_img.rows;
-    float x1 = rect.x, y1 = rect.y;
-    float x2 = rect.x + rect.w, y2 = rect.y + rect.h;
-    int xw1 = std::max(int(x1 - margin_ * rect.w), int(0));
-    int yw1 = std::max(int(y1 - margin_ * rect.h), int(0));
-    int xw2 = std::min(int(x2 + margin_ * rect.w), int(ori_w - 1));
-    int yw2 = std::min(int(y2 + margin_ * rect.h), int(ori_h - 1));
-    std::vector<uint8_t> hwc_vec = std::vector<uint8_t>(ori_img.reshape(1, 1));
-    Bbox crop_info = {xw1,yw1,xw2-xw1,yw2-yw1};
-    Utils::crop_resize_hwc({ori_img.channels(), ori_img.rows, ori_img.cols}, hwc_vec,crop_info, ai2d_out_tensor_);
-    
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // cv::Mat image=cv::Mat(input_shapes_[0][1],input_shapes_[0][2],CV_8UC3,output);
-    // cv::imwrite("FaceGender_input_image.png",image);
-}
-
-// ai2d for video
-void FaceGender::pre_process(Bbox& rect)
-{
-#if 0
-    ai2d_builder_->invoke().expect("error occurred in ai2d running");
-#else
-    size_t isp_size = isp_shape_.channel * isp_shape_.height * isp_shape_.width;
-    auto buf = ai2d_in_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_write).unwrap().buffer();
-    memcpy(reinterpret_cast<char *>(buf.data()), (void *)vaddr_, isp_size);
-    hrt::sync(ai2d_in_tensor_, sync_op_t::sync_write_back, true).expect("sync write_back failed");
-#endif
-    float x1 = rect.x, y1 = rect.y;
-    float x2 = rect.x + rect.w, y2 = rect.y + rect.h;
-    int xw1 = std::max(int(x1 - margin_ * rect.w), int(0));
-    int yw1 = std::max(int(y1 - margin_ * rect.h), int(0));
-    int xw2 = std::min(int(x2 + margin_ * rect.w), int(isp_shape_.width - 1));
-    int yw2 = std::min(int(y2 + margin_ * rect.h), int(isp_shape_.height - 1));
+void FaceGender::pre_process(runtime_tensor& input_tensor, Bbox& bbox){
+    float x1 = bbox.x, y1 = bbox.y;
+    float x2 = bbox.x + bbox.w, y2 = bbox.y + bbox.h;
+    int xw1 = std::max(int(x1 - margin_ * bbox.w), int(0));
+    int yw1 = std::max(int(y1 - margin_ * bbox.h), int(0));
+    int xw2 = std::min(int(x2 + margin_ * bbox.w), int(image_size_.width - 1));
+    int yw2 = std::min(int(y2 + margin_ * bbox.h), int(image_size_.height - 1));
 	Bbox crop_info = {xw1,yw1,xw2-xw1,yw2-yw1};
-    Utils::crop_resize_hwc(crop_info,ai2d_builder_,ai2d_in_tensor_, ai2d_out_tensor_);
-
-    // auto vaddr_out_buf = ai2d_out_tensor_.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
-    // unsigned char *output = reinterpret_cast<unsigned char *>(vaddr_out_buf.data());
-    // cv::Mat image=cv::Mat(input_shapes_[0][1],input_shapes_[0][2],CV_8UC3,output);
-    // cv::imwrite("FaceGender_input_video.png",image);
+    Utils::crop_resize_out2RGBP_out2HWC_set(image_size_,input_size_,crop_info.x,crop_info.y,crop_info.w,crop_info.h,ai2d_builder_);
+    ai2d_builder_->invoke(input_tensor,ai2d_out_tensor_).expect("error occurred in ai2d running");
 }
 
 void FaceGender::inference()
@@ -135,14 +78,14 @@ void FaceGender::draw_result(cv::Mat& src_img,Bbox& bbox,FaceGenderInfo& result,
     }
     else
     {
-		int x = bbox.x / isp_shape_.width * src_w;
-        int y = bbox.y / isp_shape_.height * src_h;
-        int w = bbox.w / isp_shape_.width * src_w;
-        int h = bbox.h / isp_shape_.height * src_h;
+		int x = bbox.x / image_size_.width * src_w;
+        int y = bbox.y / image_size_.height * src_h;
+        int w = bbox.w / image_size_.width * src_w;
+        int h = bbox.h / image_size_.height * src_h;
         cv::rectangle(src_img, cv::Rect(x, y , w, h), cv::Scalar(255,255, 255, 255), 2, 2, 0);
         if(result.gender == "F")
 			cv::putText(src_img,text,cv::Point(x,std::max(int(y-10),0)),cv::FONT_HERSHEY_COMPLEX,2,cv::Scalar(255,255, 0, 255), 2, 8, 0);
 		else
-			cv::putText(src_img,text,cv::Point(x,std::max(int(y-10),0)),cv::FONT_HERSHEY_COMPLEX,2,cv::Scalar(255,255, 255, 0), 2, 8, 0);
+			cv::putText(src_img,text,cv::Point(x,std::max(int(y-10),0)),cv::FONT_HERSHEY_COMPLEX,2,cv::Scalar(255,0, 255, 255), 2, 8, 0);
     }  
 }

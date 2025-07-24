@@ -26,9 +26,17 @@
 #ifndef _HEAD_DETECTION_H
 #define _HEAD_DETECTION_H
 
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
 
+/**
+ * @brief 多目标检测后处理后集合
+ */
+typedef struct {
+	cv::Rect box;
+	float confidence;
+	int index;
+}HeadDetBox;
 
 /**
  * @brief 人头检测
@@ -37,29 +45,16 @@
 class HeadDetection: public AIBase
 {
     public:
-
-    /**
-        * @brief HeadDetection构造函数，加载kmodel,并初始化kmodel输入、输出和人头检测阈值
-        * @param kmodel_file kmodel文件路径
-        * @param score_thres 人头检测阈值
-        * @param nms_thres   人头检测nms阈值
-        * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-        * @return None
-        */
-    HeadDetection(const char *kmodel_file, float score_thres, float nms_thres, const int debug_mode = 1);
-
     /**
     * @brief HeadDetection构造函数，加载kmodel,并初始化kmodel输入、输出和人头检测阈值
     * @param kmodel_file kmodel文件路径
     * @param score_thres 人头检测阈值
     * @param nms_thres   人头检测nms阈值
-    * @param isp_shape   isp输入大小（chw）
-    * @param vaddr       isp对应虚拟地址
-    * @param paddr       isp对应物理地址
+    * @param image_size  图像分辨率
     * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
     * @return None
     */    
-    HeadDetection(const char *kmodel_file, float score_thres, float nms_thres, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr,const int debug_mode);
+    HeadDetection(char *kmodel_file, float score_thres, float nms_thres, FrameCHWSize image_size, int debug_mode);
     
     /**
     * @brief HeadDetection析构函数
@@ -67,18 +62,7 @@ class HeadDetection: public AIBase
     */
     ~HeadDetection();
 
-    /**
-    * @brief 图片预处理
-    * @param ori_img 原始图片
-    * @return None
-    */
-    void pre_process(cv::Mat ori_img);
-
-    /**
-    * @brief 视频流预处理（ai2d for isp）
-    * @return None
-    */
-    void pre_process();
+    void pre_process(runtime_tensor &input_tensor);
 
     /**
     * @brief kmodel推理
@@ -93,7 +77,7 @@ class HeadDetection: public AIBase
     * @param pic_mode    ture(原图片)，false(osd)
     * @return None
     */
-    void post_process(FrameSize frame_size, vector<Detection> &detections,bool pic_mode = true);
+    void post_process(vector<HeadDetBox> &results);
 
     /**
      * @brief 将处理好的人头检测结果显示到原图或osd上
@@ -102,49 +86,29 @@ class HeadDetection: public AIBase
      * @param pic_mode    ture(原图片)，false(osd)
      * @return None
      */
-    void draw_result(cv::Mat& src_img,vector<Detection> &results, bool pic_mode);
+    void draw_result(cv::Mat& img,vector<HeadDetBox> &results);
     
     private:
 
-    /**
-    * @brief nms 非极大值抑制
-    * @param boxes  模型初始预测的检测框
-    * @param confidences 模型初始预测检测框对应的置信度
-    * @param confThreshold 置信度阈值
-    * @param nmsThreshold 非极大值抑制阈值
-    * @param indices 非极大值抑制后的检测框索引
-    * @return None
-    */
-    void nms_boxes(vector<Rect> &boxes, vector<float> &confidences, float confThreshold, float nmsThreshold, vector<int> &indices);
+    void nms(std::vector<HeadDetBox> &bboxes,  float confThreshold, float nmsThreshold, std::vector<int> &indices);
     
-    /**
-    * @brief 计算 iou 
-    * @param rect1  检测框1
-    * @param rect2  检测框2
-    * @return float iou值
-    */
-    float get_iou_value(Rect rect1, Rect rect2);
+    float iou_calculate(cv::Rect &rect1, cv::Rect &rect2);
 
     std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
     runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
-    uintptr_t vaddr_;                            // isp的虚拟地址
-    FrameCHWSize isp_shape_;                     // isp对应的地址大小
+    FrameCHWSize image_size_;
+    FrameCHWSize input_size_;
 
     // 人头检测类别名字
-    std::vector<std::string> classes{"0", "1"};
+    std::vector<std::string> classes{"head", "person"};
+    int label_num_ = 2;
 
     // 人头检测分数阈值
-    float score_thres;
+    float conf_thresh_;
 
     // 人头检测nms阈值
-    float nms_thres;
-
-    // 检测条目的总数
-    int rows_det;
-
-    // 检测单个条目的维度
-    int dimensions_det;
+    float nms_thresh_;
 
     // kmodel的输出初步处理结果
     float *output_det;

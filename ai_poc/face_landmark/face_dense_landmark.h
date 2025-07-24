@@ -26,8 +26,9 @@
 #define _FACE_DENSE_LANDMARK_H
 
 #include <vector>
-#include "utils.h"
+#include "ai_utils.h"
 #include "ai_base.h"
+#include "face_detection.h"
 
 using std::vector;
 
@@ -39,23 +40,13 @@ class FaceDenseLandmark : public AIBase
 {
 public:
     /**
-     * @brief FaceDenseLandmark构造函数，加载kmodel,并初始化kmodel输入、输出(for image)
-     * @param kmodel_file kmodel文件路径
-     * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
-     * @return None
-     */
-    FaceDenseLandmark(const char *kmodel_file, const int debug_mode = 1);
-
-    /**
      * @brief FaceDenseLandmark构造函数，加载kmodel,并初始化kmodel输入、输出和人脸检测阈值(for isp)
      * @param kmodel_file kmodel文件路径
-     * @param isp_shape   isp输入大小（chw）
-     * @param vaddr       isp对应虚拟地址
-     * @param paddr       isp对应物理地址
+     * @param image_size  输入大小
      * @param debug_mode  0（不调试）、 1（只显示时间）、2（显示所有打印信息）
      * @return None
      */
-    FaceDenseLandmark(const char *kmodel_file, FrameCHWSize isp_shape, uintptr_t vaddr, uintptr_t paddr, const int debug_mode);
+    FaceDenseLandmark(char *kmodel_file, FrameCHWSize image_size,int debug_mode);
 
     /**
      * @brief FaceDenseLandmark析构函数
@@ -63,20 +54,7 @@ public:
      */
     ~FaceDenseLandmark();
 
-    /**
-     * @brief 图片预处理（ai2d for image）
-     * @param ori_img 原始图片
-     * @param bbox    原始人脸检测框位置
-     * @return None
-     */
-    void pre_process(cv::Mat ori_img, Bbox &bbox);
-
-    /**
-     * @brief 视频流预处理（ai2d for video）
-     * @param ori 原始视频流帧数据（或许定义为uint8_t*更加合适）
-     * @return None
-     */
-    void pre_process(Bbox &bbox);
+    void pre_process(runtime_tensor &input_tensor, Bbox &bbox);
 
     /**
      * @brief kmodel推理
@@ -108,11 +86,10 @@ private:
     void get_affine_matrix(Bbox &bbox);
 
     std::unique_ptr<ai2d_builder> ai2d_builder_; // ai2d构建器
-    runtime_tensor ai2d_in_tensor_;              // ai2d输入tensor
     runtime_tensor ai2d_out_tensor_;             // ai2d输出tensor
     
-    uintptr_t vaddr_;                            // isp的虚拟地址
-    FrameCHWSize isp_shape_;                     // isp对应的地址大小
+    FrameCHWSize image_size_;
+    FrameCHWSize input_size_;
     cv::Mat matrix_dst_;                         // affine的变换矩阵
 };
 #endif
