@@ -69,8 +69,12 @@ class Yolov8 : public AIBase
     private:
 
     void yolov8_nms(std::vector<YOLOBbox> &bboxes,  float confThreshold, float nmsThreshold, std::vector<int> &indices);
+
+    void yolov8_rotate_nms(std::vector<YOLOBbox> &bboxes, float confThreshold, float nmsThreshold,std::vector<int> &indices);
     
     float yolov8_iou_calculate(cv::Rect &rect1, cv::Rect &rect2);
+
+    std::vector<std::pair<int, int>> yolov8_calculate_obb_corners(float x_center, float y_center, float width, float height, float angle);
 
     float fast_exp(float x);
 

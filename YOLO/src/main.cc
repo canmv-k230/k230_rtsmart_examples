@@ -65,16 +65,8 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
             yolo11.post_process(yolo_results);
             // 将绘制的帧设置为黑色
             draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
-            if(general_config.DISPLAY_MODE==1){
-                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-                // 在绘制的帧上绘制检测结果
-                yolo11.draw_results(draw_frame,yolo_results);
-                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_CLOCKWISE);
-            }else{
-                // 在绘制的帧上绘制检测结果
-                yolo11.draw_results(draw_frame,yolo_results);
-            }
-            
+            // 在绘制的帧上绘制检测结果
+            yolo11.draw_results(draw_frame,yolo_results);
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
@@ -103,15 +95,8 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
             yolov8.post_process(yolo_results);
             // 将绘制的帧设置为黑色
             draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
-            if(general_config.DISPLAY_MODE==1){
-                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-                // 在绘制的帧上绘制检测结果
-                yolov8.draw_results(draw_frame,yolo_results);
-                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_CLOCKWISE);
-            }else{
-                // 在绘制的帧上绘制检测结果
-                yolov8.draw_results(draw_frame,yolo_results);
-            }
+            // 在绘制的帧上绘制检测结果
+            yolov8.draw_results(draw_frame,yolo_results);
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
@@ -140,15 +125,8 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
             yolov5.post_process(yolo_results);
             // 将绘制的帧设置为黑色
             draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
-            if(general_config.DISPLAY_MODE==1){
-                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_COUNTERCLOCKWISE);
-                // 在绘制的帧上绘制检测结果
-                yolov5.draw_results(draw_frame,yolo_results);
-                cv::rotate(draw_frame, draw_frame, cv::ROTATE_90_CLOCKWISE);
-            }else{
-                // 在绘制的帧上绘制检测结果
-                yolov5.draw_results(draw_frame,yolo_results);
-            }
+            // 在绘制的帧上绘制检测结果
+            yolov5.draw_results(draw_frame,yolo_results);
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
@@ -246,7 +224,7 @@ void _help(){
     printf("   mode 1: ST7701\n");
     printf("   mode 2: HX8377\n");
     printf("-model_type: default yolov8, yolov5/yolov8/yolo11\n");
-    printf("-task_type: default detect, classify/detect/segment\n");
+    printf("-task_type: default detect, yolov5 support classify/detect/segment, yolov8 and yolo11 support classify/detect/segment/obb task\n");
     printf("-task_mode: default video, image/video\n");
     printf("-image_path: default test.jpg, image path\n");
     printf("-kmodel_path: default yolov8n.kmodel, kmodel path\n");
@@ -300,16 +278,8 @@ int main(int argc, char *argv[])
                 general_config.DISPLAY_WIDTH = 800;
                 general_config.DISPLAY_HEIGHT = 480;
                 general_config.DISPLAY_ROTATE = 1;
-                general_config.OSD_WIDTH = 480;
-                general_config.OSD_HEIGHT = 800;
-            }
-            else if(general_config.DISPLAY_MODE == 2){
-                // 设置显示分辨率和旋转角度
-                general_config.DISPLAY_WIDTH = 1080;
-                general_config.DISPLAY_HEIGHT = 1920;
-                general_config.DISPLAY_ROTATE = 0;
-                general_config.OSD_WIDTH = 1080;
-                general_config.OSD_HEIGHT = 1920;
+                general_config.OSD_WIDTH = 800;
+                general_config.OSD_HEIGHT = 480;
             }
             else{
                 // 打印错误信息并退出
