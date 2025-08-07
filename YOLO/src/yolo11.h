@@ -69,8 +69,12 @@ class Yolo11 : public AIBase
     private:
 
     void yolo11_nms(std::vector<YOLOBbox> &bboxes,  float confThreshold, float nmsThreshold, std::vector<int> &indices);
+
+    void yolo11_rotate_nms(std::vector<YOLOBbox> &bboxes, float confThreshold, float nmsThreshold,std::vector<int> &indices);
     
     float yolo11_iou_calculate(cv::Rect &rect1, cv::Rect &rect2);
+
+    std::vector<std::pair<int, int>> yolo11_calculate_obb_corners(float x_center, float y_center, float width, float height, float angle);
 
     float fast_exp(float x);
 

@@ -1,5 +1,7 @@
 #include "pipeline.h"
 
+#define ALIGN_UP_16(x)  (((x) + 15) & ~15)
+
 PipeLine::PipeLine(GeneralConfig &general_config,int debug_mode)
 {
     general_config_ = general_config;
@@ -51,19 +53,25 @@ int PipeLine::Create()
     memset(&config, 0, sizeof(k_vb_config));
     config.max_pool_cnt = 64;
     //VB for YUV420SP format, to Display；创建buffer, YUV420SP格式大小，直接绑定到Display显示
-    config.comm_pool[0].blk_cnt = 3;
+    config.comm_pool[0].blk_cnt = 4;
     config.comm_pool[0].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[0].blk_size = VICAP_ALIGN_UP((general_config_.DISPLAY_WIDTH * general_config_.DISPLAY_HEIGHT * 3 / 2), VICAP_ALIGN_1K);
     //VB for RGBP888 format, to AI；创建buffer,RGBP888格式大小，用于送给AI通道进行预处理
-    config.comm_pool[1].blk_cnt = 3;
+    config.comm_pool[1].blk_cnt = 4;
     config.comm_pool[1].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[1].blk_size = VICAP_ALIGN_UP((general_config_.AI_FRAME_WIDTH * general_config_.AI_FRAME_HEIGHT * 3 ), VICAP_ALIGN_1K);
     //VB for ARGB8888 format, to OSD；创建buffer,ARGB88808格式大小，用于创建一个空图，绘制AI推理的结果
     if(general_config_.USE_OSD == 1){
-        config.comm_pool[2].blk_cnt = 3;
+        config.comm_pool[2].blk_cnt = 4;
         config.comm_pool[2].mode = VB_REMAP_MODE_NOCACHE;
         config.comm_pool[2].blk_size = VICAP_ALIGN_UP((general_config_.OSD_WIDTH * general_config_.OSD_HEIGHT * general_config_.OSD_CHANNEL), VICAP_ALIGN_1K);
         osd_pool_id=2;
+        if(general_config_.DISPLAY_ROTATE==1){
+            config.comm_pool[3].blk_cnt = 4;
+            config.comm_pool[3].mode = VB_REMAP_MODE_NOCACHE;
+            config.comm_pool[3].blk_size = VICAP_ALIGN_UP((general_config_.OSD_WIDTH * general_config_.OSD_HEIGHT * general_config_.OSD_CHANNEL), VICAP_ALIGN_1K);
+            gdma_pool_id=3;
+        }
     }
     // 设置vb配置
     ret = kd_mpi_vb_set_config(&config);
@@ -130,12 +138,6 @@ int PipeLine::Create()
     else if(general_config_.DISPLAY_ROTATE==1){
         vo_attr.func = K_ROTATION_90;
     }
-    else if(general_config_.DISPLAY_ROTATE==2){
-        vo_attr.func = K_ROTATION_180;
-    }
-    else if(general_config_.DISPLAY_ROTATE==3){
-        vo_attr.func = K_ROTATION_270;
-    }
     else{
         vo_attr.func = K_ROTATION_0;
     }
@@ -153,86 +155,223 @@ int PipeLine::Create()
 
     //-----------------------------------配置OSD---------------------------------------------------------
     if(general_config_.USE_OSD == 1){
-        //初始化OSD配置
-        osd_info osd;
-        osd.act_size.width = general_config_.OSD_WIDTH ;
-        osd.act_size.height = general_config_.OSD_HEIGHT;
-        osd.offset.x = 0;
-        osd.offset.y = 0;
-        osd.global_alptha = 0xff;
-        osd.format = PIXEL_FORMAT_ARGB_8888;
-        //配置OSD通道属性
-        k_vo_video_osd_attr osd_attr;
-        memset(&osd_attr, 0, sizeof(k_vo_video_osd_attr));
-        osd_attr.global_alptha = 0xff;
-        osd_attr.pixel_format = PIXEL_FORMAT_ARGB_8888;
-        osd_attr.display_rect = {0,0};
-        osd_attr.img_size = {(unsigned int)general_config_.OSD_WIDTH,(unsigned int)general_config_.OSD_HEIGHT};
-        if (osd_attr.pixel_format == PIXEL_FORMAT_ABGR_8888 || osd_attr.pixel_format == PIXEL_FORMAT_ARGB_8888)
-        {
-            osd_attr.stride  = general_config_.OSD_WIDTH * 4 / 8;
+        if(general_config_.DISPLAY_ROTATE==1){
+            //初始化OSD配置
+            osd_info osd;
+            osd.act_size.width = general_config_.OSD_HEIGHT ;
+            osd.act_size.height = general_config_.OSD_WIDTH;
+            osd.offset.x = 0;
+            osd.offset.y = 0;
+            osd.global_alptha = 0xff;
+            osd.format = PIXEL_FORMAT_BGRA_8888;
+            //配置OSD通道属性
+            k_vo_video_osd_attr osd_attr;
+            memset(&osd_attr, 0, sizeof(k_vo_video_osd_attr));
+            osd_attr.global_alptha = 0xff;
+            osd_attr.pixel_format = PIXEL_FORMAT_BGRA_8888;
+            osd_attr.display_rect = {0,0};
+            osd_attr.img_size = {(unsigned int)general_config_.OSD_HEIGHT,(unsigned int)general_config_.OSD_WIDTH};
+            if (osd_attr.pixel_format == PIXEL_FORMAT_ABGR_8888 || osd_attr.pixel_format == PIXEL_FORMAT_ARGB_8888 || osd_attr.pixel_format == PIXEL_FORMAT_BGRA_8888)
+            {
+                osd_attr.stride  = general_config_.OSD_HEIGHT * 4 / 8;
+            }
+            else if (osd_attr.pixel_format == PIXEL_FORMAT_RGB_565 || osd_attr.pixel_format == PIXEL_FORMAT_BGR_565)
+            {
+                osd_attr.stride  = general_config_.OSD_HEIGHT * 2 / 8;
+            }
+            else if (osd_attr.pixel_format == PIXEL_FORMAT_RGB_888 || osd_attr.pixel_format == PIXEL_FORMAT_BGR_888)
+            {
+                osd_attr.stride  = general_config_.OSD_HEIGHT * 3 / 8;
+            }
+            else if(osd_attr.pixel_format == PIXEL_FORMAT_ARGB_4444 || osd_attr.pixel_format == PIXEL_FORMAT_ABGR_4444)
+            {
+                osd_attr.stride  = general_config_.OSD_HEIGHT * 2 / 8;
+            }
+            else if(osd_attr.pixel_format == PIXEL_FORMAT_ARGB_1555 || osd_attr.pixel_format == PIXEL_FORMAT_ABGR_1555)
+            {
+                osd_attr.stride  = general_config_.OSD_HEIGHT * 2 / 8;
+            }
+            else
+            {
+                printf("set osd pixel format failed  \n");
+                return -1;
+            }
+            kd_mpi_vo_set_video_osd_attr(osd_chn_id, &osd_attr);
+            kd_mpi_vo_osd_enable(osd_chn_id);
         }
-        else if (osd_attr.pixel_format == PIXEL_FORMAT_RGB_565 || osd_attr.pixel_format == PIXEL_FORMAT_BGR_565)
-        {
-            osd_attr.stride  = general_config_.OSD_WIDTH * 2 / 8;
+        else{
+            //初始化OSD配置
+            osd_info osd;
+            osd.act_size.width = general_config_.OSD_WIDTH ;
+            osd.act_size.height = general_config_.OSD_HEIGHT;
+            osd.offset.x = 0;
+            osd.offset.y = 0;
+            osd.global_alptha = 0xff;
+            osd.format = PIXEL_FORMAT_BGRA_8888;
+            //配置OSD通道属性
+            k_vo_video_osd_attr osd_attr;
+            memset(&osd_attr, 0, sizeof(k_vo_video_osd_attr));
+            osd_attr.global_alptha = 0xff;
+            osd_attr.pixel_format = PIXEL_FORMAT_BGRA_8888;
+            osd_attr.display_rect = {0,0};
+            osd_attr.img_size = {(unsigned int)general_config_.OSD_WIDTH,(unsigned int)general_config_.OSD_HEIGHT};
+            if (osd_attr.pixel_format == PIXEL_FORMAT_ABGR_8888 || osd_attr.pixel_format == PIXEL_FORMAT_ARGB_8888 || osd_attr.pixel_format == PIXEL_FORMAT_BGRA_8888)
+            {
+                osd_attr.stride  = general_config_.OSD_WIDTH * 4 / 8;
+            }
+            else if (osd_attr.pixel_format == PIXEL_FORMAT_RGB_565 || osd_attr.pixel_format == PIXEL_FORMAT_BGR_565)
+            {
+                osd_attr.stride  = general_config_.OSD_WIDTH * 2 / 8;
+            }
+            else if (osd_attr.pixel_format == PIXEL_FORMAT_RGB_888 || osd_attr.pixel_format == PIXEL_FORMAT_BGR_888)
+            {
+                osd_attr.stride  = general_config_.OSD_WIDTH * 3 / 8;
+            }
+            else if(osd_attr.pixel_format == PIXEL_FORMAT_ARGB_4444 || osd_attr.pixel_format == PIXEL_FORMAT_ABGR_4444)
+            {
+                osd_attr.stride  = general_config_.OSD_WIDTH * 2 / 8;
+            }
+            else if(osd_attr.pixel_format == PIXEL_FORMAT_ARGB_1555 || osd_attr.pixel_format == PIXEL_FORMAT_ABGR_1555)
+            {
+                osd_attr.stride  = general_config_.OSD_WIDTH * 2 / 8;
+            }
+            else
+            {
+                printf("set osd pixel format failed  \n");
+                return -1;
+            }
+            kd_mpi_vo_set_video_osd_attr(osd_chn_id, &osd_attr);
+            kd_mpi_vo_osd_enable(osd_chn_id);
         }
-        else if (osd_attr.pixel_format == PIXEL_FORMAT_RGB_888 || osd_attr.pixel_format == PIXEL_FORMAT_BGR_888)
+        //从osd的缓冲池获取该帧的缓存块，并初始化一个OSD帧数据，并绑定指针pic_vaddr用于拷贝OSD结果数据
+        k_s32 size = VICAP_ALIGN_UP(general_config_.OSD_HEIGHT * general_config_.OSD_WIDTH * general_config_.OSD_CHANNEL, VICAP_ALIGN_1K);
+        //用户态获取一个缓存块，传入参数，缓存池id和缓存块大小，osd_pool_id在内存分配时确定
+        handle = kd_mpi_vb_get_block(osd_pool_id, size, NULL);
+        if (handle == VB_INVALID_HANDLE)
         {
-            osd_attr.stride  = general_config_.OSD_WIDTH * 3 / 8;
-        }
-        else if(osd_attr.pixel_format == PIXEL_FORMAT_ARGB_4444 || osd_attr.pixel_format == PIXEL_FORMAT_ABGR_4444)
-        {
-            osd_attr.stride  = general_config_.OSD_WIDTH * 2 / 8;
-        }
-        else if(osd_attr.pixel_format == PIXEL_FORMAT_ARGB_1555 || osd_attr.pixel_format == PIXEL_FORMAT_ABGR_1555)
-        {
-            osd_attr.stride  = general_config_.OSD_WIDTH * 2 / 8;
-        }
-        else
-        {
-            printf("set osd pixel format failed  \n");
+            printf("%s get vb block error\n", __func__);
             return -1;
         }
-        kd_mpi_vo_set_video_osd_attr(osd_chn_id, &osd_attr);
-        kd_mpi_vo_osd_enable(osd_chn_id);
+        //用户态获取该缓存块的物理地址
+        k_u64 phys_addr = kd_mpi_vb_handle_to_phyaddr(handle);
+        if (phys_addr == 0)
+        {
+            printf("%s get phys addr error\n", __func__);
+            return -1;
+        }
+        //映射为虚拟地址
+        k_u32* virt_addr = (k_u32 *)kd_mpi_sys_mmap(phys_addr, size);
+        //带cache的虚拟地址
+        // virt_addr = (k_u32 *)kd_mpi_sys_mmap_cached(phys_addr, size);
+        if (virt_addr == NULL)
+        {
+            printf("%s mmap error\n", __func__);
+            return -1;
+        }
+        //创建OSD数据帧，并初始化帧信息，并将该帧的虚拟地址绑定到insert_osd_vaddr上
+        memset(&osd_frame_info, 0, sizeof(osd_frame_info));
+        osd_frame_info.v_frame.width = general_config_.OSD_HEIGHT;
+        osd_frame_info.v_frame.height = general_config_.OSD_WIDTH;
+        osd_frame_info.v_frame.stride[0] = general_config_.OSD_HEIGHT;
+        osd_frame_info.v_frame.pixel_format = PIXEL_FORMAT_BGRA_8888;
+        osd_frame_info.mod_id = K_ID_VO;
+        osd_frame_info.pool_id = osd_pool_id;
+        osd_frame_info.v_frame.phys_addr[0] = phys_addr;
+        insert_osd_vaddr = virt_addr;
+        printf("phys_addr is %lx g_pool_id is %d \n", phys_addr, osd_pool_id);
     }
-    //从osd的缓冲池获取该帧的缓存块，并初始化一个OSD帧数据，并绑定指针pic_vaddr用于拷贝OSD结果数据
-    k_s32 size = VICAP_ALIGN_UP(general_config_.OSD_HEIGHT * general_config_.OSD_WIDTH * general_config_.OSD_CHANNEL, VICAP_ALIGN_1K);
-    //用户态获取一个缓存块，传入参数，缓存池id和缓存块大小，osd_pool_id在内存分配时确定
-    handle = kd_mpi_vb_get_block(osd_pool_id, size, NULL);
-    if (handle == VB_INVALID_HANDLE)
-    {
-        printf("%s get vb block error\n", __func__);
-        return -1;
-    }
-    //用户态获取该缓存块的物理地址
-    k_u64 phys_addr = kd_mpi_vb_handle_to_phyaddr(handle);
-    if (phys_addr == 0)
-    {
-        printf("%s get phys addr error\n", __func__);
-        return -1;
-    }
-    //映射为虚拟地址
-    k_u32* virt_addr = (k_u32 *)kd_mpi_sys_mmap(phys_addr, size);
-    //带cache的虚拟地址
-    // virt_addr = (k_u32 *)kd_mpi_sys_mmap_cached(phys_addr, size);
-    if (virt_addr == NULL)
-    {
-        printf("%s mmap error\n", __func__);
-        return -1;
-    }
-    //创建OSD数据帧，并初始化帧信息，并将该帧的虚拟地址绑定到insert_osd_vaddr上
-    memset(&osd_frame_info, 0, sizeof(osd_frame_info));
-    osd_frame_info.v_frame.width = general_config_.OSD_WIDTH;
-    osd_frame_info.v_frame.height = general_config_.OSD_HEIGHT;
-    osd_frame_info.v_frame.stride[0] = general_config_.OSD_WIDTH;
-    osd_frame_info.v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
-    osd_frame_info.mod_id = K_ID_VO;
-    osd_frame_info.pool_id = osd_pool_id;
-    osd_frame_info.v_frame.phys_addr[0] = phys_addr;
-    insert_osd_vaddr = virt_addr;
-    printf("phys_addr is %lx g_pool_id is %d \n", phys_addr, osd_pool_id);
     //---------------------------------------------------------------------------------------------
+
+    //-------------------------------配置GDMA旋转--------------------------------------------------
+    if(general_config_.DISPLAY_ROTATE==1){
+        gdma_dev_attr.burst_len = 0;
+        gdma_dev_attr.ckg_bypass = (k_bool)0xff;
+        gdma_dev_attr.outstanding = 7;
+
+        memset(&dma_attr, 0, sizeof(k_dma_chn_attr_u));
+        dma_attr.gdma_attr.buffer_num = 3;
+        dma_attr.gdma_attr.rotation = DEGREE_90;
+        dma_attr.gdma_attr.x_mirror = K_FALSE;
+        dma_attr.gdma_attr.y_mirror = K_FALSE;
+        dma_attr.gdma_attr.width = general_config_.OSD_WIDTH;
+        dma_attr.gdma_attr.height = general_config_.OSD_HEIGHT;
+        dma_attr.gdma_attr.src_stride[0] = general_config_.OSD_WIDTH * 4;
+        dma_attr.gdma_attr.dst_stride[0] = general_config_.OSD_HEIGHT * 4;
+        dma_attr.gdma_attr.work_mode = DMA_UNBIND;
+        dma_attr.gdma_attr.pixel_format = DMA_PIXEL_FORMAT_ABGR_8888;
+
+        //从dma的缓冲池获取该帧的缓存块，并初始化一帧数据，并绑定指针pic_vaddr用于拷贝结果数据
+        k_s32 size = VICAP_ALIGN_UP(general_config_.OSD_HEIGHT * general_config_.OSD_WIDTH * general_config_.OSD_CHANNEL, VICAP_ALIGN_1K);
+        //用户态获取一个缓存块，传入参数，缓存池id和缓存块大小，osd_pool_id在内存分配时确定
+        gdma_handle = kd_mpi_vb_get_block(gdma_pool_id, size, NULL);
+        if (gdma_handle == VB_INVALID_HANDLE)
+        {
+            printf("%s get vb block error\n", __func__);
+            return -1;
+        }
+        //用户态获取该缓存块的物理地址  
+        k_u64 phys_addr = kd_mpi_vb_handle_to_phyaddr(gdma_handle);
+        if (phys_addr == 0)
+        {
+            printf("%s get phys addr error\n", __func__);
+            return -1;
+        }
+        //映射为虚拟地址
+        k_u8* virt_addr = (k_u8 *)kd_mpi_sys_mmap(phys_addr, size);
+        //带cache的虚拟地址
+        // virt_addr = (k_u32 *)kd_mpi_sys_mmap_cached(phys_addr, size);
+        if (virt_addr == NULL)
+        {
+            printf("%s mmap error\n", __func__);
+            return -1;
+        }
+        //创建GDMA数据帧，并初始化帧信息，并将该帧的虚拟地址绑定到insert_gdma_vaddr上
+        memset(&gdma_frame_info, 0, sizeof(gdma_frame_info));
+        gdma_frame_info.v_frame.width = general_config_.OSD_WIDTH;
+        gdma_frame_info.v_frame.height = general_config_.OSD_HEIGHT;
+        gdma_frame_info.v_frame.stride[0] = general_config_.OSD_WIDTH;
+        gdma_frame_info.v_frame.pixel_format = PIXEL_FORMAT_BGRA_8888;
+        gdma_frame_info.mod_id = K_ID_DMA;
+        gdma_frame_info.pool_id = gdma_pool_id;
+        gdma_frame_info.v_frame.phys_addr[0] = phys_addr;
+        gdma_frame_info.v_frame.virt_addr[0] = (k_u64)(intptr_t)virt_addr;
+        insert_gdma_vaddr = (void*)virt_addr;
+        printf("dma phys_addr is %lx  dma g_pool_id is %d \n", phys_addr, gdma_pool_id);
+
+        ret=kd_mpi_dma_set_dev_attr(&gdma_dev_attr);
+        if(ret){
+            printf("gdma dma dev set failed!\n");
+            return ret;
+        }
+
+        ret = kd_mpi_dma_request_chn(GDMA_TYPE);
+        if(ret){
+            printf("gdma dma chn request failed!\n");
+            return ret;
+        }
+
+        ret = kd_mpi_dma_set_chn_attr(0, &dma_attr);
+        if (ret)
+        {
+            printf("set dma chn attr failed\r\n");
+            return ret;
+        }
+
+        ret = kd_mpi_dma_start_dev();
+        if (ret)
+        {
+            printf("start dma dev failed.\r\n");
+            return ret;
+        }
+        ret = kd_mpi_dma_start_chn(0);
+        if (ret)
+        {
+            printf("start dma chn failed.\r\n");
+            return ret;
+        }
+    }
+    //--------------------------------------------------------------------------------------------
+
 
     //------------------------------- 配置Sensor & vicap-----------------------------------------------------
     //sensor类型自动探测
@@ -377,7 +516,26 @@ int PipeLine::ReleaseFrame(){
 int PipeLine::InsertFrame(void* osd_data){
     ScopedTiming st("PipeLine::InsertFrame", debug_mode_);
     int ret=0;
-    memcpy(insert_osd_vaddr, osd_data, general_config_.OSD_WIDTH * general_config_.OSD_HEIGHT * general_config_.OSD_CHANNEL);
+    if(general_config_.DISPLAY_ROTATE==1){
+        memcpy(insert_gdma_vaddr, osd_data, general_config_.OSD_WIDTH * general_config_.OSD_HEIGHT * general_config_.OSD_CHANNEL);
+        ret = kd_mpi_dma_send_frame(0, &gdma_frame_info, 100);
+        if (ret)
+        {
+            printf("dma send frame failed.\r\n");
+            return ret;
+        }
+        ret = kd_mpi_dma_get_frame(0, &osd_frame_info, -1);
+        if (ret)
+        {
+            printf("dma get frame failed.\r\n");
+            return ret;
+        }
+        kd_mpi_dma_release_frame(0,  &osd_frame_info);
+    }
+    else{
+        memcpy(insert_osd_vaddr, osd_data, general_config_.OSD_WIDTH * general_config_.OSD_HEIGHT * general_config_.OSD_CHANNEL);
+    }
+    // memcpy(insert_osd_vaddr, osd_data, general_config_.OSD_WIDTH * general_config_.OSD_HEIGHT * general_config_.OSD_CHANNEL);
     ret=kd_mpi_vo_chn_insert_frame(osd_chn_id + 3, &osd_frame_info);
     if (ret)
     {
@@ -389,6 +547,27 @@ int PipeLine::InsertFrame(void* osd_data){
 int PipeLine::Destroy()
 {
     ScopedTiming st("PipeLine::Destroy", debug_mode_);
+    int ret=0;
+    if(general_config_.DISPLAY_ROTATE==1){
+        ret=kd_mpi_dma_stop_chn(0);
+        if (ret)
+        {
+            printf("stop dma chn error\r\n");
+            return ret;
+        }
+        ret = kd_mpi_dma_stop_dev();
+        if (ret)
+        {
+            printf("stop dma dev error\r\n");
+            return ret;
+        }
+        ret =  kd_mpi_vb_release_block(gdma_handle);
+        if (ret)
+        {
+            printf("release dma block error\r\n");
+            return ret;
+        }
+    }
     //OSD release
     if(general_config_.USE_OSD == 1)
     {
@@ -398,7 +577,7 @@ int PipeLine::Destroy()
     printf("kd_mpi_vb_release_block\n");
 
     //vicap停止
-    int ret = kd_mpi_vicap_stop_stream(vicap_dev);
+    ret = kd_mpi_vicap_stop_stream(vicap_dev);
     if (ret) {
         printf("kd_mpi_vicap_stop_stream failed.\n");
         return ret;

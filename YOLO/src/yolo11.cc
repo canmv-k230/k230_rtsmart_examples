@@ -53,6 +53,10 @@ Yolo11::Yolo11(char* task_type, char* task_mode, char *kmodel_file, float conf_t
         box_feature_len_=label_num_+4+32;
         Utils::padding_resize_one_side_set(image_wh_,input_wh_,ai2d_builder_, cv::Scalar(114, 114, 114));
     }
+    else if(strcmp(task_type_,"obb")==0){
+        box_feature_len_=label_num_+5;
+        Utils::padding_resize_one_side_set(image_wh_,input_wh_,ai2d_builder_, cv::Scalar(114, 114, 114));
+    }
     else{
         std::cerr << "不支持该任务类型: " << task_type_ << std::endl;
         exit(EXIT_FAILURE);
@@ -226,6 +230,53 @@ void Yolo11::post_process(std::vector<YOLOBbox> &yolo_results)
         yolo11_nms(yolo_results, conf_thres_, nms_thres_, nms_result);
         delete[] output_det;
     }
+    else if(strcmp(task_type_,"obb")==0){
+        float ratiow = (float)input_wh_.width / image_wh_.width;
+        float ratioh = (float)input_wh_.height / image_wh_.height;
+        float ratio = ratiow < ratioh ? ratiow : ratioh;
+        float *output_det = new float[box_num_ * box_feature_len_];
+        // 模型推理结束后，进行后处理
+        float* output0= p_outputs_[0];
+        // 将输出数据排布从[label_num_+5,(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32)]调整为[(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32),label_num_+5],方便后续处理
+        for(int r = 0; r < box_num_; r++)
+        {
+            for(int c = 0; c < box_feature_len_; c++)
+            {
+                output_det[r*box_feature_len_ + c] = output0[c*box_num_ + r];
+            }
+        }
+        for(int i=0;i<box_num_;i++){
+            float* vec=output_det+i*box_feature_len_;
+            float box[4]={vec[0],vec[1],vec[2],vec[3]};
+            float* class_scores=vec+4;
+            float* max_class_score_ptr=std::max_element(class_scores,class_scores+label_num_);
+            float score=*max_class_score_ptr;
+            int max_class_index = max_class_score_ptr - class_scores; // 计算索引
+            float angle=vec[4+label_num_];
+            if(score>conf_thres_){
+                YOLOBbox bbox;
+                float x_=box[0]/ratio*1.0;
+                float y_=box[1]/ratio*1.0;
+                float w_=box[2]/ratio*1.0;
+                float h_=box[3]/ratio*1.0;
+                int x=int(MAX(x_,0));
+                int y=int(MAX(y_,0));
+                int w=int(w_);
+                int h=int(h_);
+                if (w <= 0 || h <= 0) { continue; }
+                bbox.box=cv::Rect(x,y,w,h);
+                bbox.confidence=score;
+                bbox.angle=angle;
+                bbox.index=max_class_index;
+                yolo_results.push_back(bbox);
+            }
+
+        }
+        //执行非最大抑制以消除具有较低置信度的冗余重叠框（NMS）
+        std::vector<int> nms_result;
+        yolo11_rotate_nms(yolo_results, conf_thres_, nms_thres_, nms_result);
+        delete[] output_det;
+    }
 }
 
 void Yolo11::draw_results(cv::Mat &draw_frame,std::vector<YOLOBbox> &yolo_results)
@@ -299,6 +350,32 @@ void Yolo11::draw_results(cv::Mat &draw_frame,std::vector<YOLOBbox> &yolo_result
             draw_frame(new_box).setTo(colors[idx],mask_d);
         }
     }
+    else if(strcmp(task_type_,"obb")==0){
+        int w_=draw_frame.cols;
+        int h_=draw_frame.rows;
+        int res_size=MIN(yolo_results.size(),max_box_num_);
+        for(int i=0;i<res_size;i++){
+            YOLOBbox box_=yolo_results[i];
+            cv::Rect box=box_.box;
+            int idx=box_.index;
+            float score=box_.confidence;
+            float angle=box_.angle;
+            std::vector<std::pair<int, int>> corners=yolo11_calculate_obb_corners(box.x, box.y,box.width, box.height, angle);
+            int x_0=int(corners[0].first*float(w_)/image_wh_.width);
+            int y_0=int(corners[0].second*float(h_)/image_wh_.height);
+            int x_1=int(corners[1].first*float(w_)/image_wh_.width);
+            int y_1=int(corners[1].second*float(h_)/image_wh_.height);
+            int x_2=int(corners[2].first*float(w_)/image_wh_.width);
+            int y_2=int(corners[2].second*float(h_)/image_wh_.height);
+            int x_3=int(corners[3].first*float(w_)/image_wh_.width);
+            int y_3=int(corners[3].second*float(h_)/image_wh_.height);
+            cv::line(draw_frame, cv::Point(x_0, y_0), cv::Point(x_1, y_1), colors[idx], 2);
+            cv::line(draw_frame, cv::Point(x_1, y_1), cv::Point(x_2, y_2), colors[idx], 2);
+            cv::line(draw_frame, cv::Point(x_2, y_2), cv::Point(x_3, y_3), colors[idx], 2);
+            cv::line(draw_frame, cv::Point(x_3, y_3), cv::Point(x_0, y_0), colors[idx], 2);
+            cv::putText(draw_frame, std::to_string(idx), cv::Point(x_0 , y_0 - 10), cv::FONT_HERSHEY_DUPLEX, 1, colors[idx], 2, 0);
+        }
+    }
 }
 
 void Yolo11::yolo11_nms(std::vector<YOLOBbox> &bboxes,  float confThreshold, float nmsThreshold, std::vector<int> &indices)
@@ -357,4 +434,97 @@ float Yolo11::fast_exp(float x)
 float Yolo11::sigmoid(float x)
 {
     return 1.0f / (1.0f + fast_exp(-x));
+}
+
+template<typename T>
+T clamp(T value, T low, T high) {
+    return (value < low) ? low : (value > high) ? high : value;
+}
+
+
+// obb = {x_center, y_center, width, height, angle}
+std::array<float, 3> yolo11_get_covariance_matrix(YOLOBbox& obb) {
+    float width = obb.box.width / 2.0f;
+    float height = obb.box.height / 2.0f;
+    float angle = obb.angle;
+
+    float cos_angle = std::cos(angle);
+    float sin_angle = std::sin(angle);
+
+    float a = std::pow(width * cos_angle, 2) + std::pow(height * sin_angle, 2);
+    float b = std::pow(width * sin_angle, 2) + std::pow(height * cos_angle, 2);
+    float c = width * cos_angle * height * sin_angle;
+
+    return {a, b, c};
+}
+
+float yolo11_cal_rotate_iou(YOLOBbox& obb1,YOLOBbox& obb2,float eps = 1e-7f) {
+    float x1 = obb1.box.x, y1 = obb1.box.y;
+    float x2 = obb2.box.x, y2 = obb2.box.y;
+
+    auto [a1, b1, c1] = yolo11_get_covariance_matrix(obb1);
+    auto [a2, b2, c2] = yolo11_get_covariance_matrix(obb2);
+
+    float denom = (a1 + a2) * (b1 + b2) - std::pow(c1 + c2, 2) + eps;
+
+    float t1 = ((a1 + a2) * std::pow(y1 - y2, 2) + (b1 + b2) * std::pow(x1 - x2, 2)) / denom * 0.25f;
+    float t2 = ((c1 + c2) * (x2 - x1) * (y1 - y2)) / denom * 0.5f;
+
+    float numer = (a1 + a2) * (b1 + b2) - std::pow(c1 + c2, 2);
+    float denom_log = 4.0f * std::sqrt((a1 * b1 - c1 * c1) * (a2 * b2 - c2 * c2)) + eps;
+
+    float t3 = 0.5f * std::log(numer / denom_log + eps);
+
+    float bd = clamp(t1 + t2 + t3, eps, 100.0f);
+    float hd = std::sqrt(1.0f - std::exp(-bd) + eps);
+
+    return 1.0f - hd;
+}
+
+
+std::vector<std::pair<int, int>> Yolo11::yolo11_calculate_obb_corners(float x_center, float y_center, float width, float height, float angle) {
+    float cos_angle = std::cos(angle);  // 计算余弦
+    float sin_angle = std::sin(angle);  // 计算正弦
+    float dx = width / 2.0f;
+    float dy = height / 2.0f;
+
+    std::vector<std::pair<int, int>> corners = {
+        { static_cast<int>(x_center + cos_angle * dx - sin_angle * dy),
+          static_cast<int>(y_center + sin_angle * dx + cos_angle * dy) },
+
+        { static_cast<int>(x_center - cos_angle * dx - sin_angle * dy),
+          static_cast<int>(y_center - sin_angle * dx + cos_angle * dy) },
+
+        { static_cast<int>(x_center - cos_angle * dx + sin_angle * dy),
+          static_cast<int>(y_center - sin_angle * dx - cos_angle * dy) },
+
+        { static_cast<int>(x_center + cos_angle * dx + sin_angle * dy),
+          static_cast<int>(y_center + sin_angle * dx - cos_angle * dy) }
+    };
+
+    return corners;
+}
+
+// NMS 非极大值抑制
+void Yolo11::yolo11_rotate_nms(std::vector<YOLOBbox> &bboxes, float confThreshold, float nmsThreshold,std::vector<int> &indices)
+{
+    // 先排序，按照置信度降序排列
+    std::sort(bboxes.begin(), bboxes.end(), [](const YOLOBbox &a, const YOLOBbox &b) { return a.confidence > b.confidence; });
+
+    int updated_size = bboxes.size();
+    for (int i = 0; i < updated_size; i++) {
+        if (bboxes[i].confidence < confThreshold)
+            continue;
+        indices.push_back(i);
+        // 这里使用移除冗余框，而不是 erase 操作，减少内存移动的开销
+        for (int j = i + 1; j < updated_size;) {
+            float iou = yolo11_cal_rotate_iou(bboxes[i], bboxes[j]);
+            if (iou > nmsThreshold) {
+                bboxes[j].confidence = -1;  // 设置为负值，后续不会再计算其IOU
+            }
+            j++;
+        }
+    }
+    // 移除那些置信度小于0的框
+    bboxes.erase(std::remove_if(bboxes.begin(), bboxes.end(), [](const YOLOBbox &b) { return b.confidence < 0; }), bboxes.end());
 }

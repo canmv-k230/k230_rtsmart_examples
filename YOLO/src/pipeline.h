@@ -17,6 +17,8 @@
 #include "k_vb_comm.h"
 #include "k_video_comm.h"
 #include "k_sys_comm.h"
+#include "k_dma_comm.h"
+#include "k_vicap_comm.h"
 #include "mpi_vb_api.h"
 #include "mpi_vicap_api.h"
 #include "mpi_isp_api.h"
@@ -28,6 +30,7 @@
 #include "mpi_connector_api.h"
 #include "k_autoconf_comm.h"
 #include "mpi_sensor_api.h"
+#include "mpi_dma_api.h"
 #include "scoped_timing.hpp"
 
 typedef struct DumpRes
@@ -116,6 +119,14 @@ private:
     k_mpp_chn vicap_mpp_chn;
     k_mpp_chn vo_mpp_chn;
     int debug_mode_=0;
+
+    // gdma相关
+    k_dma_dev_attr_t gdma_dev_attr;
+    k_dma_chn_attr_u dma_attr;
+    k_u32 gdma_pool_id;
+    k_vb_blk_handle gdma_handle;
+    k_video_frame_info gdma_frame_info;
+    void *insert_gdma_vaddr;
 };
 
 #endif
