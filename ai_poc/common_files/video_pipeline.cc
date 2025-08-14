@@ -502,14 +502,14 @@ void PipeLine::GetFrame(DumpRes &dump_res){
     {
         printf("kd_mpi_vicap_dump_frame failed.\n");
     }
-    auto vbvaddr = kd_mpi_sys_mmap(dump_info.v_frame.phys_addr[0], AI_FRAME_CHANNEL*AI_FRAME_HEIGHT*AI_FRAME_WIDTH);
-    dump_res.virt_addr=reinterpret_cast<uintptr_t>(vbvaddr);
+    dump_res.virt_addr=reinterpret_cast<uintptr_t>(kd_mpi_sys_mmap(dump_info.v_frame.phys_addr[0], AI_FRAME_CHANNEL*AI_FRAME_HEIGHT*AI_FRAME_WIDTH));
     dump_res.phy_addr=reinterpret_cast<uintptr_t>(dump_info.v_frame.phys_addr[0]);
 }
 
-int PipeLine::ReleaseFrame(){
+int PipeLine::ReleaseFrame(DumpRes &dump_res){
     ScopedTiming st("PipeLine::ReleaseFrame", debug_mode_);
     int ret=0;
+    kd_mpi_sys_munmap(reinterpret_cast<void*>(dump_res.virt_addr), AI_FRAME_CHANNEL*AI_FRAME_HEIGHT*AI_FRAME_WIDTH);
     ret = kd_mpi_vicap_dump_release(vicap_dev, VICAP_CHN_ID_1, &dump_info);
     if (ret)
     {

@@ -110,11 +110,11 @@ void Yolov8::post_process(std::vector<YOLOBbox> &yolo_results)
             float pred = sigmoid(output0[0]);
             if (pred > conf_thres_)
             {
-                res.index = 1;
+                res.index = 0;
                 res.confidence = pred;
             }
             else{
-                res.index = 0;
+                res.index = 1;
                 res.confidence = 1-pred;
             }
             yolo_results.push_back(res);

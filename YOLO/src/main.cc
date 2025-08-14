@@ -70,7 +70,7 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
-            pl.ReleaseFrame();
+            pl.ReleaseFrame(dump_res);
         }
     }
     // 如果模型类型为yolov8，则执行yolov8的推理流程
@@ -100,7 +100,7 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
-            pl.ReleaseFrame();
+            pl.ReleaseFrame(dump_res);
         }
     }
     // 如果模型类型为yolov5，则执行yolov5的推理流程
@@ -130,7 +130,7 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
-            pl.ReleaseFrame();
+            pl.ReleaseFrame(dump_res);
         }
     }
     // 如果模型类型不是yolov5、yolov8或yolo11，则打印错误信息并返回-1

@@ -1,5 +1,9 @@
 #include "k_autoconf_comm.h"
 
+#if !defined(CONFIG_RTT_AI_EXAMPLES_MODE_ST7701) && !defined(CONFIG_RTT_AI_EXAMPLES_MODE_LT9611)
+    #define CONFIG_RTT_AI_EXAMPLES_MODE_ST7701
+#endif
+
 #if defined(CONFIG_RTT_AI_EXAMPLES_MODE_ST7701)
     #define ISP_WIDTH 1920
     #define ISP_HEIGHT 1080
@@ -28,4 +32,4 @@
     #define OSD_WIDTH 1920
     #define OSD_HEIGHT 1080
     #define OSD_CHANNEL 4
- #endif
+#endif

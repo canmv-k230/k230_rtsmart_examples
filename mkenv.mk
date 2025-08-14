@@ -21,6 +21,7 @@ export RTT_EXAMPLES_ELF_INSTALL_PATH_YOLO := $(SDK_RTSMART_SRC_DIR)/examples/elf
 export RTT_EXAMPLES_ELF_INSTALL_PATH_OPENCV_EXAMPLES := $(SDK_RTSMART_SRC_DIR)/examples/elf/opencv_examples/
 export RTT_EXAMPLES_ELF_INSTALL_PATH_OPENBLAS_EXAMPLES := $(SDK_RTSMART_SRC_DIR)/examples/elf/openblas_examples/
 export RTT_EXAMPLES_ELF_INSTALL_PATH_PERIPHERAL_EXAMPLES := $(SDK_RTSMART_SRC_DIR)/examples/elf/peripheral/
+export RTT_EXAMPLES_ELF_INSTALL_PATH_UVC_FACE_DETECTION := $(SDK_RTSMART_SRC_DIR)/examples/elf/uvc_face_detection/
 
 include $(SDK_TOOLS_DIR)/toolchain_rtsmart.mk
 export PATH:="$(CROSS_COMPILE_DIR):$(PATH)"

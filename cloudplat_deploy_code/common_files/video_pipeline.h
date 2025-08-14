@@ -53,7 +53,7 @@ public:
 
     void GetFrame(DumpRes &dump_res);
 
-    int ReleaseFrame();
+    int ReleaseFrame(DumpRes &dump_res);
 
     int InsertFrame(void* osd_data);
     

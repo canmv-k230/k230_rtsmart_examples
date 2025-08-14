@@ -93,7 +93,7 @@ void video_proc(char *argv[])
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
-            pl.ReleaseFrame();
+            pl.ReleaseFrame(dump_res);
         }
     }
     else if (args.model_type == "GFLDet")
@@ -116,7 +116,7 @@ void video_proc(char *argv[])
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
-            pl.ReleaseFrame();
+            pl.ReleaseFrame(dump_res);
         }
     }
     else if (args.model_type == "FreeDet" || args.model_type == "AnchorFreeDet")
@@ -139,7 +139,7 @@ void video_proc(char *argv[])
             // 将绘制的帧插入到PipeLine中
             pl.InsertFrame(draw_frame.data);
             // 释放帧数据
-            pl.ReleaseFrame();
+            pl.ReleaseFrame(dump_res);
         }
     }
     pl.Destroy();

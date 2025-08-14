@@ -14,25 +14,27 @@ std::vector<cv::Scalar> getColorsForClasses(int num_classes) {
     return colors;
 }
 
-std::vector<std::string> readLabelsFromTxt(std::string labels_txt_path){
+std::vector<std::string> readLabelsFromTxt(std::string labels_txt_path) {
     std::vector<std::string> labels;
-    // 打开文件
     std::ifstream file(labels_txt_path);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file " << labels_txt_path << std::endl;
+        return labels;
     }
-    // 从文件中逐行读取数据
+
     std::string line;
     while (std::getline(file, line)) {
-        // 跳过空行（可选）
         if (!line.empty()) {
+            // 去掉末尾的 '\r'（Windows CRLF 兼容）
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
             labels.push_back(line);
         }
     }
-    // 关闭文件
-    file.close();
     return labels;
 }
+
 
 auto cache = cv::Mat::zeros(1, 1, CV_32FC1);
 void Utils::dump_binary_file(const char *file_name, char *data, const size_t size)

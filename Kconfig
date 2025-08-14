@@ -290,6 +290,10 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
         menuconfig RTT_ENABLE_BUILD_FACE_RECOGNITION
             bool "Enable build face recognition examples"
             default n
+            
+        menuconfig RTT_ENABLE_BUILD_UVC_FACE_DETECTION
+            bool "Enable build uvc face detection examples"
+            default n
 
         menuconfig RTT_ENABLE_BUILD_YOLO
             bool "Enable build YOLO examples"
