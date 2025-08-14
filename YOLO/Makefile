@@ -28,9 +28,9 @@ ifeq ($(CONFIG_RTT_ENABLE_BUILD_YOLO),y)
 		echo "No build output found in $(BUILD_OUT), skipping copy."; \
 	fi
 endif
-	@echo "Make kpu run samples done."
+	@echo "Make yolo samples done."
 
 clean:
 	@rm -rf $(RTT_EXAMPLES_ELF_INSTALL_PATH_YOLO)/*
 	@rm -rf $(BUILD_OUT)
-	@echo "Clean kpu run samples done."
+	@echo "Clean yolo samples done."
