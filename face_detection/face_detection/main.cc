@@ -72,6 +72,7 @@ void video_proc(char *argv[])
         input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)dump_res.virt_addr, compute_size(in_shape) },false, hrt::pool_shared, dump_res.phy_addr).expect("cannot create input tensor");
         hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("sync write_back failed");
         //前处理，推理，后处理
+        results.clear();
         fd.pre_process(input_tensor);
         fd.inference();
         fd.post_process(image_size,results);
@@ -80,7 +81,7 @@ void video_proc(char *argv[])
         // 将绘制的帧插入到PipeLine中
         pl.InsertFrame(draw_frame.data);
         // 释放帧数据
-        pl.ReleaseFrame();
+        pl.ReleaseFrame(dump_res);
     }
     pl.Destroy();
 }

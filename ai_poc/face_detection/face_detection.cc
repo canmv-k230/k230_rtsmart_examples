@@ -112,6 +112,7 @@ void FaceDetection::post_process(FrameCHWSize frame_size, vector<FaceDetectionIn
 
 void FaceDetection::draw_result(cv::Mat& src_img,vector<FaceDetectionInfo>& results, bool pic_mode)
 {   
+    ScopedTiming st(model_name_ + " draw_result", debug_mode_);
     int src_w = src_img.cols;
     int src_h = src_img.rows;
     int max_src_size = std::max(src_w,src_h);

@@ -71,6 +71,7 @@ void video_proc(char *argv[])
         pl.GetFrame(dump_res);
         input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)dump_res.virt_addr, compute_size(in_shape) },false, hrt::pool_shared, dump_res.phy_addr).expect("cannot create input tensor");
         hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("sync write_back failed");
+        results.clear();
         //前处理，推理，后处理
         fd.pre_process(input_tensor);
         fd.inference();
