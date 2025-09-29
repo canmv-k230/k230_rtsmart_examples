@@ -416,7 +416,7 @@ static k_s32 kd_sample_sensor_auto_detect(k_vicap_sensor_type* sensor_type)
     k_vicap_probe_config probe_cfg;
     k_vicap_sensor_info sensor_info;
 
-    probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI + 1;
+    probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
     probe_cfg.width = ISP_INPUT_WIDTH;
     probe_cfg.height = ISP_INPUT_HEIGHT;
     probe_cfg.fps = 30;
