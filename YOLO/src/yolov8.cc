@@ -211,15 +211,7 @@ void Yolov8::post_process(std::vector<YOLOBbox> &yolo_results)
                 bbox.box=cv::Rect(x,y,w,h);
                 bbox.confidence=score;
                 bbox.index=max_class_index;
-                cv::Mat mask_(1,32,CV_32F,vec+label_num_+4);
-                cv::Mat mask_box=(mask_*protos);
-                cv::Mat mask_box_(mask_h,mask_w,CV_32FC1,mask_box.data);
-                cv::Rect roi(0,0,int(mask_w-int(pad_w*((mask_w*1.0)/input_wh_.width))),int(mask_h-int(pad_h*((mask_h*1.0)/input_wh_.height))));
-                cv::Mat dest,mask_res;
-                cv::exp(-mask_box_,dest);
-                dest=1.0/(1.0+dest);
-                dest=dest(roi);
-                bbox.mask=dest;
+                bbox.mask=cv::Mat(1, 32, CV_32F, vec + label_num_ + 4);
                 yolo_results.push_back(bbox);
             }
 
@@ -227,6 +219,19 @@ void Yolov8::post_process(std::vector<YOLOBbox> &yolo_results)
         //执行非最大抑制以消除具有较低置信度的冗余重叠框（NMS）
         std::vector<int> nms_result;
         yolov8_nms(yolo_results, conf_thres_, nms_thres_, nms_result);
+        for (int i = 0; i < yolo_results.size(); i++)
+        {
+            cv::Mat mask_box = yolo_results[i].mask * protos;
+            cv::Mat mask_box_(mask_h, mask_w, CV_32FC1, mask_box.data);
+            cv::Rect roi(0, 0, mask_w - int(pad_w * (mask_w / float(input_wh_.width))),
+                         mask_h - int(pad_h * (mask_h / float(input_wh_.height))));
+
+            cv::Mat dest;
+            cv::exp(-mask_box_, dest);
+            dest = 1.0 / (1.0 + dest);
+            dest = dest(roi);
+            yolo_results[i].mask = dest;
+        }
         delete[] output_det;
     }
     else if(strcmp(task_type_,"obb")==0){
