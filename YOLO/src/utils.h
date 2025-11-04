@@ -30,6 +30,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include "riscv_vector.h"
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -155,6 +156,10 @@ typedef struct YOLOBbox{
 std::vector<cv::Scalar> getColorsForClasses(int num_classes);
 
 std::vector<std::string> readLabelsFromTxt(std::string labels_txt_path);
+
+void transpose_block_rvv(const float* input0, float* output_det,int box_num, int box_feature_len);
+
+void transpose_block_fast(const float* input0, float* output_det,int box_num, int box_feature_len);
 
 /**
  * @brief 工具类

@@ -128,14 +128,15 @@ void Yolo11::post_process(std::vector<YOLOBbox> &yolo_results)
         float *output_det = new float[box_num_ * box_feature_len_];
         // 模型推理结束后，进行后处理
         float* output0= p_outputs_[0];
-        // 将输出数据排布从[label_num_+4,(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32)]调整为[(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32),label_num_+4],方便后续处理
-        for(int r = 0; r < box_num_; r++)
-        {
-            for(int c = 0; c < box_feature_len_; c++)
-            {
-                output_det[r*box_feature_len_ + c] = output0[c*box_num_ + r];
-            }
-        }
+        // // 将输出数据排布从[label_num_+4,(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32)]调整为[(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32),label_num_+4],方便后续处理
+        // for(int r = 0; r < box_num_; r++)
+        // {
+        //     for(int c = 0; c < box_feature_len_; c++)
+        //     {
+        //         output_det[r*box_feature_len_ + c] = output0[c*box_num_ + r];
+        //     }
+        // }
+        transpose_block_fast(p_outputs_[0], output_det, box_num_, box_feature_len_);
         for(int i=0;i<box_num_;i++){
             float* vec=output_det+i*box_feature_len_;
             float box[4]={vec[0],vec[1],vec[2],vec[3]};
@@ -178,15 +179,15 @@ void Yolo11::post_process(std::vector<YOLOBbox> &yolo_results)
         float *output_det = new float[box_num_ * box_feature_len_];
         // 模型推理结束后，进行后处理
         float* output0= p_outputs_[0];
-        // 将输出数据排布从[label_num_+4+32,(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32)]调整为[(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32),label_num_+4+32],方便后续处理
-        for(int r = 0; r < box_num_; r++)
-        {
-            for(int c = 0; c < box_feature_len_; c++)
-            {
-                output_det[r*box_feature_len_ + c] = output0[c*box_num_ + r];
-            }
-        }
-
+        // // 将输出数据排布从[label_num_+4+32,(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32)]调整为[(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32),label_num_+4+32],方便后续处理
+        // for(int r = 0; r < box_num_; r++)
+        // {
+        //     for(int c = 0; c < box_feature_len_; c++)
+        //     {
+        //         output_det[r*box_feature_len_ + c] = output0[c*box_num_ + r];
+        //     }
+        // }
+        transpose_block_fast(p_outputs_[0], output_det, box_num_, box_feature_len_);
         float* output1=p_outputs_[1];
         int mask_w=input_wh_.width/4;
         int mask_h=input_wh_.height/4;
@@ -242,14 +243,15 @@ void Yolo11::post_process(std::vector<YOLOBbox> &yolo_results)
         float *output_det = new float[box_num_ * box_feature_len_];
         // 模型推理结束后，进行后处理
         float* output0= p_outputs_[0];
-        // 将输出数据排布从[label_num_+5,(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32)]调整为[(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32),label_num_+5],方便后续处理
-        for(int r = 0; r < box_num_; r++)
-        {
-            for(int c = 0; c < box_feature_len_; c++)
-            {
-                output_det[r*box_feature_len_ + c] = output0[c*box_num_ + r];
-            }
-        }
+        // // 将输出数据排布从[label_num_+5,(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32)]调整为[(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32),label_num_+5],方便后续处理
+        // for(int r = 0; r < box_num_; r++)
+        // {
+        //     for(int c = 0; c < box_feature_len_; c++)
+        //     {
+        //         output_det[r*box_feature_len_ + c] = output0[c*box_num_ + r];
+        //     }
+        // }
+        transpose_block_fast(p_outputs_[0], output_det, box_num_, box_feature_len_);
         for(int i=0;i<box_num_;i++){
             float* vec=output_det+i*box_feature_len_;
             float box[4]={vec[0],vec[1],vec[2],vec[3]};
