@@ -1585,7 +1585,7 @@ void *KdMedia::venc_stream_thread(void *arg)
         if (status.cur_packs > 0)
             output.pack_cnt = status.cur_packs;
         else
-            output.pack_cnt = 1;
+            break;
 
         output.pack = (k_venc_pack *)malloc(sizeof(k_venc_pack) * output.pack_cnt);
         ret = kd_mpi_venc_get_stream(venc_chn, &output, 1000);
