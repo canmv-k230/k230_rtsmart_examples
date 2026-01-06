@@ -1,0 +1,1 @@
+./bytetrack_track.elf yolov8n_320.kmodel 0.5 0.6 0.4 0.5 0.7 30 300 0

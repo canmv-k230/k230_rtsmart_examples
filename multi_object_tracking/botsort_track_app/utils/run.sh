@@ -1,0 +1,1 @@
+./botsort_track.elf yolov8n_320.kmodel 0.4 0.6 feature.kmodel 0.6 0.2 0.75 600 0.9 0.3 0.2 0.99 0

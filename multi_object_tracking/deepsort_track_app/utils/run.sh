@@ -1,0 +1,1 @@
+./deepsort_track.elf yolov8n_320.kmodel 0.5 0.6 feature.kmodel 0.3 300 0.7 30 3 0
