@@ -13,22 +13,21 @@ dir-$(CONFIG_RTT_ENABLE_BUILD_YOLO) += YOLO
 dir-$(CONFIG_RTT_ENABLE_BUILD_OPENCV_EXAMPLES) += opencv_examples
 dir-$(CONFIG_RTT_ENABLE_BUILD_OPENBLAS_EXAMPLES) += openblas_examples
 
-
-# Add directories to the build system
-dirs := $(sort $(dir-y))
-
-.PHONY: all clean
+.PHONY: all clean distclean
 
 all:
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_EXAMPLES),y)
 	@rm -rf elf
-	@$(foreach dir,$(dirs),make -C $(dir) all || exit 1;)
+	@$(foreach dir,$(dir-y),make -C $(dir) all || exit 1;)
 endif
 	@echo "Make rtsmart samples done."
 
 clean:
 	@rm -rf elf
 ifeq ($(CONFIG_RTT_ENABLE_BUILD_EXAMPLES),y)
-	@$(foreach dir,$(dirs),make -C $(dir) clean;)
+	@$(foreach dir,$(dir-y),make -C $(dir) clean;)
 endif
 	@echo "Clean rtsmart samples done."
+
+distclean: clean
+	@echo "Distclean rtsmart samples done."
