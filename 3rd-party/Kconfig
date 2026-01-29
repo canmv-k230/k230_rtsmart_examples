@@ -1,0 +1,36 @@
+if RTT_ENABLE_3RD_PARTY_EXAMPLES
+
+    config RTSMART_3RD_PARTY_ENABLE_FREETYPE_SAMPLES
+        bool "Enable Build FreeType Sample Programs"
+        default n
+        depends on RTSMART_3RD_PARTY_ENABLE_FREETYPE
+
+    config RTSMART_3RD_PARTY_ENABLE_LVGL_SAMPLES
+        bool "Enable Build Lvgl Sample Programs"
+        default n
+        depends on RTSMART_3RD_PARTY_ENABLE_LVGL
+
+    config RTSMART_3RD_PARTY_ENABLE_MBEDTLS_TESTS
+        bool "Enable Build MbedTLS Test Programs"
+        default n
+        depends on RTSMART_3RD_PARTY_ENABLE_MBEDTLS
+
+    config RTSMART_LIBS_MQTTCLIENT_ENABLE_TESTS
+        bool "Enable Build RtSmart MQTT Client Tests"
+        default n
+        depends on RTSMART_3RD_PARTY_ENABLE_MQTTCLIENT
+
+    config RTSMART_LIBS_MINIHTTP_ENABLE_SAMPLES
+        bool "Enable Build RtSmart minihttp Client Samples"
+        default n
+        depends on RTSMART_3RD_PARTY_ENABLE_MINIHTTP
+
+    config RTSMART_3RD_PARTY_ENABLE_OPENCV_SAMPLES
+        bool "Enable Build OpenCV Sample Programs"
+        default n
+
+    config RTSMART_3RD_PARTY_ENABLE_OPENBLAS_SAMPLES
+        bool "Enable Build OpenBlas Sample Programs"
+        default n
+
+endif

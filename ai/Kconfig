@@ -1,0 +1,64 @@
+if RTT_ENABLE_AI_EXAMPLES
+
+    config RTSMART_AI_EXAMPLES_ENABLE_AI_DEMO
+        bool "Enable Build AI Demo Programs"
+        default n
+
+        if RTSMART_AI_EXAMPLES_ENABLE_AI_DEMO
+                source "$(SDK_RTSMART_SRC_DIR)/examples/ai/ai_demo/Kconfig"
+            endif
+
+
+    config RTSMART_AI_EXAMPLES_ENABLE_CLOUDPLAT_DEPLOY_CODE
+        bool "Enable Build CloudPlat Deploy Programs"
+        default n
+
+    config RTSMART_AI_EXAMPLES_ENABLE_FACE_DETECTION
+        bool "Enable Build Face Detection Programs"
+        default n
+    
+    config RTSMART_AI_EXAMPLES_ENABLE_FACE_RECOGNITION
+        bool "Enable Build Face Recognition Programs"
+        default n
+
+    config RTSMART_AI_EXAMPLES_ENABLE_MULTI_OBJECT_TRACKING
+        bool "Enable Build MOT(Multi-Object Tracking) Programs"
+        default n
+
+        if RTSMART_AI_EXAMPLES_ENABLE_MULTI_OBJECT_TRACKING
+            config RTSMART_BOTSORT_TRACK_ALGORITHM
+                bool "Botsort tracking algorithm"
+                default n
+
+            config RTSMART_BYTETRACK_TRACK_ALGORITHM
+                bool "Bytetrack tracking algorithm"
+                default n
+
+            config RTSMART_DEEPSORT_TRACK_ALGORITHM
+                bool "Deepsort tracking algorithm"
+                default n
+
+            config RTSMART_OCSORT_TRACK_ALGORITHM
+                bool "Ocsort tracking algorithm"
+                default n
+        endif
+
+
+    config RTSMART_AI_EXAMPLES_ENABLE_USAGE_AI2D
+        bool "Enable Build AI2D Sample Programs"
+        default n
+
+    config RTSMART_AI_EXAMPLES_ENABLE_USAGE_KPU
+        bool "Enable Build KPU Sample Programs"
+        default n
+
+    config RTSMART_AI_EXAMPLES_ENABLE_UVC_FACE_DETECTION
+        bool "Enable Build UVC+AI Programs"
+        default n
+    
+    config RTSMART_AI_EXAMPLES_ENABLE_YOLO
+        bool "Enable Build YOLO Programs"
+        default n
+
+    
+endif

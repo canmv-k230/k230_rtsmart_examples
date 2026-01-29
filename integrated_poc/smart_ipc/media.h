@@ -176,28 +176,28 @@ class KdMedia {
    * @param chn_id Channel ID for the video output layer.
    * @return Status of the initialization operation.
    */
-  int _init_layer(k_vo_layer chn_id);
+  int _init_layer(k_vo_layer_id chn_id);
 
   /**
    * @brief Deinitialize video output layer.
    * @param chn_id Channel ID for the video output layer.
    * @return Status of the initialization operation.
    */
-  int _deinit_layer(k_vo_layer chn_id);
+  int _deinit_layer(k_vo_layer_id chn_id);
 
   /**
    * @brief Initialize On-Screen Display (OSD).
    * @param osd_id OSD ID.
    * @return Status of the initialization operation.
    */
-  int _init_osd(k_vo_osd osd_id);
+  int _init_osd(k_vo_layer_id osd_id);
 
   /**
    * @brief Deinitialize On-Screen Display (OSD).
    * @param osd_id OSD ID.
    * @return Status of the initialization operation.
    */
-  int _deinit_osd(k_vo_osd osd_id);
+  int _deinit_osd(k_vo_layer_id osd_id);
 
   /**
    * @brief Initialize video output layer and OSD.
@@ -331,14 +331,16 @@ class KdMedia {
    */
   static void *start_ai_aenc_thread(void *arg);
 
+  k_u32 _venc_vb_create_pool();
+
   private:
   KdMediaInputConfig input_config_; // Media input configuration
   KdMediaFeatureConfig feature_config_; // Media feature configuration
 
   k_u32 osd_vb_handle_{VB_INVALID_HANDLE}; // OSD video buffer handle
   int osd_pool_id_{-1}; // OSD pool ID
-  k_vo_layer vo_layer_chn_id_{K_VO_LAYER1}; // Video output layer channel ID
-  k_vo_osd osd_id_{K_VO_OSD3}; // OSD ID
+  k_vo_layer_id vo_layer_chn_id_{K_VO_LAYER_VIDEO1}; // Video output layer channel ID
+  k_vo_layer_id osd_id_{K_VO_LAYER_OSD3}; // OSD ID
   k_pixel_format osd_format_{PIXEL_FORMAT_ARGB_8888}; // OSD pixel format
   k_video_frame_info osd_vf_info_; // OSD video frame information
 
@@ -375,6 +377,9 @@ class KdMedia {
   int wbc_width_{0}; // WBC width
   int wbc_height_{0}; // WBC height
   char *connector_name_{nullptr}; // Connector name
+
+  k_u32 venc_attach_pool_id_{VB_INVALID_POOLID};
+  int rotation_90_{0};
 };
 
 #endif // _KD_MEDIA_H

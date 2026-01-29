@@ -1,0 +1,93 @@
+include ../../mkenv.mk
+
+export RTT_AI_EXAMPLES_AI_DEMO_ELF_INSTALL_PATH := \
+    $(SDK_RTSMART_SRC_DIR)/examples/elf/ai/ai_demo
+
+dir-y :=
+
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_ANOMALY_DET) += anomaly_det
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_BYTETRACK) += bytetrack
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_CROSSWALK_DETECT) += crosswalk_detect
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_DISTRACTION_REMINDER) += distraction_reminder
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_DMS_SYSTEM) += dms_system
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_DYNAMIC_GESTURE) += dynamic_gesture
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_EYE_GAZE) += eye_gaze
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_ALIGNMENT) += face_alignment
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_DETECTION) += face_detection
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_EMOTION) += face_emotion
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_GENDER) += face_gender
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_GLASSES) += face_glasses
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_LANDMARK) += face_landmark
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_MASK) += face_mask
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_MESH) += face_mesh
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_PARSE) += face_parse
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_POSE) += face_pose
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FACE_VERIFICATION) += face_verification
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FALLDOWN_DETECT) += falldown_detect
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FINGER_GUESSING) += finger_guessing
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_FITNESS) += fitness
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_HEAD_DETECTION) += head_detection
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_HELMET_DETECT) += helmet_detect
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_KWS) += kws
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_LICENCE_DET) += licence_det
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_LICENCE_DET_REC) += licence_det_rec
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_NANOTRACKER) += nanotracker
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_OBJECT_DETECT_YOLOV8N) += object_detect_yolov8n
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_OCR) += ocr
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_PERSON_ATTR) += person_attr
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_PERSON_DETECT) += person_detect
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_PERSON_DISTANCE) += person_distance
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_POSE_DETECT) += pose_detect
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_PPHUMANSEG) += pphumanseg
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_PUZZLE_GAME) += puzzle_game
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SEGMENT_YOLOV8N) += segment_yolov8n
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SELF_LEARNING) += self_learning
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SMOKE_DETECT) += smoke_detect
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SPACE_RESIZE) += space_resize
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SQ_HAND_DET) += sq_hand_det
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SQ_HANDKP_CLASS) += sq_handkp_class
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SQ_HANDKP_DET) += sq_handkp_det
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SQ_HANDKP_FLOWER) += sq_handkp_flower
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SQ_HANDKP_OCR) += sq_handkp_ocr
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_SQ_HANDRECO) += sq_handreco
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_TRAFFIC_LIGHT_DETECT) += traffic_light_detect
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_TRANSLATE_EN_CH) += translate_en_ch
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_TTS_ZH) += tts_zh
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_VEHICLE_ATTR) += vehicle_attr
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_VIRTUAL_KEYBOARD) += virtual_keyboard
+dir-$(CONFIG_RTSMART_AI_EXAMPLES_YOLOP_LANE_SEG) += yolop_lane_seg
+
+# Add directories to the build system
+dirs := $(sort $(dir-y))
+
+.PHONY: all clean
+
+# Default build arguments
+BUILD_DIR ?= build
+BUILD_OUT ?= k230_bin
+
+# Default target
+all:
+	@rm -rf $(RTT_AI_EXAMPLES_AI_DEMO_ELF_INSTALL_PATH)/*
+
+ifeq ($(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_AI_DEMO),y)
+	@rm -rf $(BUILD_OUT)
+	@mkdir -p $(RTT_AI_EXAMPLES_AI_DEMO_ELF_INSTALL_PATH)
+
+	@$(foreach dir,$(dirs), \
+		echo "Building in directory: $(dir)"; \
+		./build_app.sh $(dir) || exit $?;\
+		if [ -d $(BUILD_OUT) ]; then \
+			echo "Copying $(BUILD_OUT) to $(RTT_AI_EXAMPLES_AI_DEMO_ELF_INSTALL_PATH)"; \
+			cp -r $(BUILD_OUT)/* $(RTT_AI_EXAMPLES_AI_DEMO_ELF_INSTALL_PATH); \
+		else \
+			echo "No build output found in $(dir)/$(BUILD_OUT), skipping copy."; \
+		fi;)
+endif
+	@echo "Make AI Demo samples done."
+
+clean:
+	@rm -rf $(RTT_AI_EXAMPLES_AI_DEMO_ELF_INSTALL_PATH)/*
+	@rm -rf $(BUILD_DIR)
+	@rm -rf $(BUILD_OUT)
+	@echo "Clean AI Demo samples done."

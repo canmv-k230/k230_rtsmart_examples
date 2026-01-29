@@ -5,9 +5,9 @@ include $(MPP_SRC_DIR)/middleware/rt-smart.mk
 
 include ../toolchain.mk
 
-CURRECT_DIR_NAME=$(shell basename `pwd`)
+DIR=$(shell basename `pwd`)
 LOCAL_SRC_DIR = $(shell pwd)
-BIN = $(LOCAL_SRC_DIR)/$(CURRECT_DIR_NAME).elf
+BIN = $(LOCAL_SRC_DIR)/$(DIR).elf
 
 LIBPATH = $(MPP_LIB_PATH)
 LIBPATH += -L$(MPP_SRC_DIR)/middleware/lib

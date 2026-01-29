@@ -101,14 +101,14 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
                 config.vo_height = 1080;
             } else if (n == 1) {
                 config.vo_connect_type = ST7701_V1_MIPI_2LAN_480X800_30FPS;
-                config.osd_width = 480;
-                config.osd_height = 800;
+                config.osd_width = 800;
+                config.osd_height = 480;
                 config.vo_width = 800;
                 config.vo_height = 480;
             } else if(0x02 == n) {
                 config.vo_connect_type = HX8377_V2_MIPI_4LAN_1080X1920_30FPS;
-                config.osd_width = 1080;
-                config.osd_height = 1920;
+                config.osd_width = 1920;
+                config.osd_height = 1080;
                 config.vo_width = 1920;
                 config.vo_height = 1080;
             }else {
@@ -235,6 +235,7 @@ int main(int argc, char *argv[]) {
     MySmartIPC *smartIPC = new MySmartIPC();
     if (!smartIPC || smartIPC->Init(config) < 0) {
         std::cout << "SmartIPC Init failed." << std::endl;
+        smartIPC->DeInit();
         return -1;
     }
 

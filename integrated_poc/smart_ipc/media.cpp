@@ -41,33 +41,6 @@ static void sleep_time(char*pfunc_name,int time)
 #define MEM_ALIGN_UP(addr, size)	(((addr)+((size)-1U))&(~((size)-1U)))
 #define VICAP_CHN_MIN_FRAME_COUNT 3
 
-typedef struct
-{
-    k_u64 layer_phy_addr;
-    k_pixel_format format;
-    k_vo_point offset;
-    k_vo_size act_size;
-    k_u32 size;
-    k_u32 stride;
-    k_u8 global_alptha;
-    //only layer0、layer1
-    k_u32 func;
-    // only layer0
-    k_vo_scaler_attr attr;
-} layer_info;
-
-typedef struct
-{
-    k_u64 osd_phy_addr;
-    void *osd_virt_addr;
-    k_pixel_format format;
-    k_vo_point offset;
-    k_vo_size act_size;
-    k_u32 size;
-    k_u32 stride;
-    k_u8 global_alptha;
-} osd_info;
-
 // ISP input dimensions
 #define ISP_INPUT_WIDTH (1920)
 #define ISP_INPUT_HEIGHT (1080)
@@ -220,6 +193,7 @@ static k_s32 kd_sample_vicap_set_dev_attr(k_vicap_dev_set_info dev_info)
         return K_FAILED;
     }
     dev_attr.dw_enable = dev_info.dw_en;
+    dev_attr.mode = dev_info.mode;
 
     dev_attr.acq_win.h_start = 0;
     dev_attr.acq_win.v_start = 0;
@@ -231,6 +205,7 @@ static k_s32 kd_sample_vicap_set_dev_attr(k_vicap_dev_set_info dev_info)
         dev_attr.mode = dev_info.mode;
         dev_attr.buffer_num = dev_info.buffer_num;
         dev_attr.buffer_size = dev_info.buffer_size;
+        dev_attr.buffer_pool_id = VB_INVALID_POOLID;
     }
 
     dev_attr.pipe_ctrl.data = dev_info.pipe_ctrl.data;
@@ -318,6 +293,7 @@ static k_s32 kd_sample_vicap_set_chn_attr(k_vicap_chn_set_info chn_info)
     chn_attr.chn_enable = chn_info.chn_en;
     chn_attr.pix_format = chn_info.pixel_format;
     chn_attr.buffer_num = chn_info.buffer_num;
+    chn_attr.buffer_pool_id = VB_INVALID_POOLID;
     chn_attr.buffer_size = chn_info.buf_size;
     chn_attr.alignment = chn_info.alignment;
     chn_attr.fps = chn_info.fps;
@@ -437,6 +413,15 @@ int KdMedia::configure_media_features(const KdMediaInputConfig &input_config, co
 {
     input_config_ = input_config;
     feature_config_ = feature_config;
+
+    if (input_config_.vo_connect_type == ST7701_V1_MIPI_2LAN_480X800_30FPS || input_config_.vo_connect_type == HX8377_V2_MIPI_4LAN_1080X1920_30FPS)
+    {
+        rotation_90_ = 1;
+    }
+    else
+    {
+        rotation_90_ = 0;
+    }
 
     if (input_config.sensor_type == SENSOR_TYPE_MAX)
     {
@@ -560,85 +545,6 @@ int KdMedia::_init_vb_pool()
     memset(&vb_config, 0, sizeof(vb_config));
     vb_config.max_pool_cnt = 64;
 
-    // vb for vicap
-    {
-        //vb for venc input
-        if (feature_config_.enable_video_encoder)
-        {
-            pool_index ++;
-            //VB vicap for YUV420SP input to venc
-            vb_config.comm_pool[pool_index].blk_cnt = VICAP_CHN_MIN_FRAME_COUNT;
-            vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
-            vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.venc_width*input_config_.venc_height * 3 / 2, MEM_ALIGN_4K);//must align 4k
-        }
-
-        //vb for vo
-        if (feature_config_.enable_render)
-        {
-            pool_index ++;
-            //VB vicap for YUV420SP output to vo
-            vb_config.comm_pool[pool_index].blk_cnt = VICAP_CHN_MIN_FRAME_COUNT;
-            vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
-            vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.vo_width * input_config_.vo_height * 3 / 2, MEM_ALIGN_1K);
-
-            if( input_config_.venc_data_source_type == DATA_SOURCE_VO_WBC)
-            {
-                pool_index ++;
-                vb_config.comm_pool[pool_index].blk_cnt = 4;
-                vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
-                vb_config.comm_pool[pool_index].blk_size = input_config_.vo_width * input_config_.vo_height * 2;
-
-                input_config_.venc_width = input_config_.vo_width;
-                input_config_.venc_height = input_config_.vo_height;
-            }
-
-        }
-
-        //vb for ai anysis
-        if (feature_config_.enable_ai_analysis)
-        {
-            pool_index ++;
-            //VB vicap for RGB888 output to ai
-            vb_config.comm_pool[pool_index].blk_cnt = VICAP_CHN_MIN_FRAME_COUNT;
-            vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
-            vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.ai_width * input_config_.ai_height * 3 , MEM_ALIGN_1K);
-        }
-
-        //vb for mcm
-        // {
-        //     pool_index ++;
-        //     vb_config.comm_pool[pool_index].blk_cnt = VICAP_CHN_MIN_FRAME_COUNT;
-        //     vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
-        //     vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP((ISP_INPUT_WIDTH * ISP_INPUT_HEIGHT * 2 ), MEM_ALIGN_1K);
-        // }
-
-    }
-
-    //vb for audio ai and aenc
-    if (feature_config_.enable_audio_encoder)
-    {
-        pool_index ++;
-        vb_config.comm_pool[pool_index].blk_cnt = audio_frame_divisor_ * 2;
-        vb_config.comm_pool[pool_index].blk_size = input_config_.audio_samplerate * 2 * 4 / audio_frame_divisor_;
-        vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
-    }
-
-    // vb for venc
-    if (feature_config_.enable_video_encoder)
-    {
-        //venc input hold 2 vb
-        pool_index ++;
-        vb_config.comm_pool[pool_index].blk_cnt = 2;
-        vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
-        vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.venc_width*input_config_.venc_height * 3 / 2, MEM_ALIGN_4K);//must align 4k
-
-        // vb for venc output
-        pool_index ++;
-        vb_config.comm_pool[pool_index].blk_cnt = 2;
-        vb_config.comm_pool[pool_index].blk_size = MEM_ALIGN_UP(input_config_.venc_width*input_config_.venc_height/2,MEM_ALIGN_4K);
-        vb_config.comm_pool[pool_index].mode = VB_REMAP_MODE_NOCACHE;
-    }
-
     // set vb config
     ret = kd_mpi_vb_set_config(&vb_config);
     if (ret) {
@@ -669,6 +575,15 @@ int KdMedia::_init_vb_pool()
 
 int KdMedia::_deinit_vb_pool()
 {
+    if (osd_vb_handle_ != VB_INVALID_HANDLE)
+    {
+        kd_mpi_vb_release_block(osd_vb_handle_);
+        osd_vb_handle_ = VB_INVALID_HANDLE;
+    }
+    if (osd_pool_id_ != VB_INVALID_POOLID){
+        kd_mpi_vb_destory_pool(osd_pool_id_);
+        osd_pool_id_ = VB_INVALID_POOLID;
+    }
     kd_mpi_vb_exit();
     return 0;
 }
@@ -687,6 +602,7 @@ int KdMedia::_init_vi_cap()
     vcap_dev_info_.pipe_ctrl.data = 0xFFFFFFFF;
     vcap_dev_info_.sensor_type = input_config_.sensor_type;
     vcap_dev_info_.vicap_dev = vi_dev_id_;
+    vcap_dev_info_.mode = VICAP_WORK_ONLINE_MODE;
 
     kd_sample_vicap_set_dev_attr(vcap_dev_info_);
 
@@ -797,7 +713,7 @@ int KdMedia::_init_vi_cap()
         vi_chn_attr_info.alignment = 12;//must align 4k
         vi_chn_attr_info.vicap_chn = vi_chn_venc_id_;
         if (!vcap_dev_info_.dw_en)
-            vi_chn_attr_info.buf_size = MEM_ALIGN_UP(input_config_.venc_width * input_config_.venc_height * 3 / 2, MEM_ALIGN_1K);
+            vi_chn_attr_info.buf_size = MEM_ALIGN_UP(input_config_.venc_width * input_config_.venc_height * 3 / 2, MEM_ALIGN_4K);
         else
             vi_chn_attr_info.buf_size = MEM_ALIGN_UP(input_config_.venc_width * input_config_.venc_height * 3 / 2, MEM_ALIGN_4K);
 
@@ -869,138 +785,113 @@ int KdMedia::_deinit_connector()
     return 0;
 }
 
-int KdMedia::_init_layer(k_vo_layer chn_id)
+typedef struct {
+    k_connector_type type;
+    k_vo_layer_id layer_id;
+    int width;
+    int height;
+    int ratation_90;
+} sample_vo_info;
+
+static k_s32 init_layer_ex(sample_vo_info* vo_info)
 {
-    layer_info info;
-    k_vo_video_layer_attr attr;
+    k_vo_pub_attr attr;
+    k_u32 ret = 0;
 
-    memset(&info, 0, sizeof(info));
-    if (input_config_.vo_connect_type == LT9611_MIPI_4LAN_1920X1080_30FPS)
-    {
-        info.act_size.width = input_config_.vo_width;
-        info.act_size.height = input_config_.vo_height;
-        info.format = vi_chn_render_pixel_format_;
-        info.func = K_ROTATION_0;
-    }
-    else if (input_config_.vo_connect_type == ST7701_V1_MIPI_2LAN_480X800_30FPS)
-    {
-        info.act_size.width = input_config_.vo_height;
-        info.act_size.height = input_config_.vo_width;
-        info.format = vi_chn_render_pixel_format_;
-        info.func = K_ROTATION_90;
-    }
-    else if (input_config_.vo_connect_type == HX8377_V2_MIPI_4LAN_1080X1920_30FPS)
-    {
-        info.act_size.width = input_config_.vo_height;
-        info.act_size.height = input_config_.vo_width;
-        info.format = vi_chn_render_pixel_format_;
-        info.func = K_ROTATION_90;
-    }
+    kd_mpi_vo_disable_layer(vo_info->layer_id);
 
-    info.global_alptha = 0xff;
-    info.offset.x = 0;//(1080-w)/2,
-    info.offset.y = 0;//(1920-h)/2;
+    k_vo_layer_attr vo_layer_attr;
+    memset(&vo_layer_attr, 0, sizeof(vo_layer_attr));
+    vo_layer_attr.layer_id           = vo_info->layer_id;
+    vo_layer_attr.position.x         = 0;
+    vo_layer_attr.position.y         = 0;
+    vo_layer_attr.img_size.width     = vo_info->width;
+    vo_layer_attr.img_size.height    = vo_info->height;
+    vo_layer_attr.pixel_format       = PIXEL_FORMAT_YUV_SEMIPLANAR_420; /* NV12 / YUV420SP */
+    vo_layer_attr.func               = (vo_info->ratation_90 == 1) ? GDMA_ROTATE_DEGREE_90 :GDMA_ROTATE_DEGREE_0;
+    vo_layer_attr.rot_buf_nr         = (vo_info->ratation_90 == 1) ? 2:0; /* 旋转时使用少量 GSDMA buffer */
+    vo_layer_attr.global_alpha       = 0xff;
 
-    memset(&attr, 0, sizeof(attr));
-    // set offset
-    attr.display_rect = info.offset;
-    // set act
-    attr.img_size = info.act_size;
-    // sget size
-    info.size = info.act_size.height * info.act_size.width * 3 / 2;
-    //set pixel format
-    attr.pixel_format = info.format;
-    if (info.format != PIXEL_FORMAT_YUV_SEMIPLANAR_420)
-    {
-        printf("input pix format failed \n");
-        return -1;
+    printf("sample_vo_init: layer_id %d, width %d, height %d, pixel_format %d, func %d,buf_nr:%d\n",
+           vo_layer_attr.layer_id, vo_layer_attr.img_size.width, vo_layer_attr.img_size.height,
+           vo_layer_attr.pixel_format, vo_layer_attr.func,vo_layer_attr.rot_buf_nr);
+
+    ret = kd_mpi_vo_set_layer_attr(vo_info->layer_id,&vo_layer_attr);
+    if (ret != K_SUCCESS) {
+        printf("ERROR: kd_mpi_vo_set_layer_attr failed, ret=%d\n", ret);
+        return ret;
     }
 
-     // set stride
-    attr.stride = (info.act_size.width / 8 - 1) + ((info.act_size.height - 1) << 16);
-    // set function
-    attr.func = info.func;
-    // set scaler attr
-    attr.scaler_attr = info.attr;
+    ret = kd_mpi_vo_enable_layer(vo_info->layer_id);
+    if (ret != K_SUCCESS) {
+        printf("ERROR: kd_mpi_vo_enable_layer failed, ret=%d\n", ret);
+        return ret;
+    }
+    //exit ;
+    return 0;
+}
 
-    // set video layer atrr
-    kd_mpi_vo_set_video_layer_attr(chn_id, &attr);
-
-    // enable layer
-    kd_mpi_vo_enable_video_layer(chn_id);
+int KdMedia::_init_layer(k_vo_layer_id chn_id)
+{
+    sample_vo_info vo_info;
+    vo_info.type = input_config_.vo_connect_type;
+    vo_info.layer_id = chn_id;
+    vo_info.width = input_config_.vo_width;
+    vo_info.height = input_config_.vo_height;
+    vo_info.ratation_90 = rotation_90_;
+    printf("vo layer init: type %d, layer_id %d, width %d, height %d, ratation_90 %d\n",
+           vo_info.type, vo_info.layer_id, vo_info.width, vo_info.height, vo_info.ratation_90);
+    init_layer_ex(&vo_info);
 
     return 0;
 }
 
-int KdMedia::_deinit_layer(k_vo_layer chn_id)
+int KdMedia::_deinit_layer(k_vo_layer_id chn_id)
 {
-    return kd_mpi_vo_disable_video_layer(vo_layer_chn_id_);
+    return kd_mpi_vo_disable_layer(vo_layer_chn_id_);
 }
 
-int KdMedia::_init_osd(k_vo_osd osd_id)
+int KdMedia::_init_osd(k_vo_layer_id osd_id)
 {
-    osd_info osd;
-    osd_info *info = &osd;
+    k_s32 ret = 0;
 
-    osd.act_size.width = input_config_.osd_width ;
-    osd.act_size.height = input_config_.osd_height;
-    osd.offset.x = 0;
-    osd.offset.y = 0;
-    osd.global_alptha = 0xff;
-    // osd.global_alptha = 0x32;
-    osd.format = osd_format_;
+    kd_mpi_vo_disable_layer(osd_id);
 
-    k_vo_video_osd_attr attr;
+    k_vo_layer_attr osd_vo_attr;
+    memset(&osd_vo_attr, 0, sizeof(osd_vo_attr));
+    osd_vo_attr.layer_id           = osd_id;
+    osd_vo_attr.position.x         = 0;
+    osd_vo_attr.position.y         = 0;
+    osd_vo_attr.img_size.width     = input_config_.osd_width;
+    osd_vo_attr.img_size.height    = input_config_.osd_height;
+    osd_vo_attr.pixel_format       = PIXEL_FORMAT_BGRA_8888;
+    osd_vo_attr.global_alpha      = 0xFF;
+    osd_vo_attr.func               = rotation_90_ ? GDMA_ROTATE_DEGREE_90 : GDMA_ROTATE_DEGREE_0;
+    osd_vo_attr.rot_buf_nr         = rotation_90_ ? 2 : 0;
 
-    // set attr
-    attr.global_alptha = info->global_alptha;
-
-    if (info->format == PIXEL_FORMAT_ABGR_8888 || info->format == PIXEL_FORMAT_ARGB_8888)
-    {
-        info->size = info->act_size.width  * info->act_size.height * 4;
-        info->stride  = info->act_size.width * 4 / 8;
-    }
-    else if (info->format == PIXEL_FORMAT_RGB_565 || info->format == PIXEL_FORMAT_BGR_565)
-    {
-        info->size = info->act_size.width  * info->act_size.height * 2;
-        info->stride  = info->act_size.width * 2 / 8;
-    }
-    else if (info->format == PIXEL_FORMAT_RGB_888 || info->format == PIXEL_FORMAT_BGR_888)
-    {
-        info->size = info->act_size.width  * info->act_size.height * 3;
-        info->stride  = info->act_size.width * 3 / 8;
-    }
-    else if(info->format == PIXEL_FORMAT_ARGB_4444 || info->format == PIXEL_FORMAT_ABGR_4444)
-    {
-        info->size = info->act_size.width  * info->act_size.height * 2;
-        info->stride  = info->act_size.width * 2 / 8;
-    }
-    else if(info->format == PIXEL_FORMAT_ARGB_1555 || info->format == PIXEL_FORMAT_ABGR_1555)
-    {
-        info->size = info->act_size.width  * info->act_size.height * 2;
-        info->stride  = info->act_size.width * 2 / 8;
-    }
-    else
-    {
-        printf("set osd pixel format failed  \n");
+    printf("sample_osd_init: layer_id %d, width %d, height %d, pixel_format %d, func %d, buf_nr:%d\n",
+           osd_vo_attr.layer_id, osd_vo_attr.img_size.width, osd_vo_attr.img_size.height,
+           osd_vo_attr.pixel_format, osd_vo_attr.func,osd_vo_attr.rot_buf_nr);
+    ret = kd_mpi_vo_set_layer_attr(osd_id,&osd_vo_attr);
+    if (ret != K_SUCCESS) {
+        printf("ERROR: kd_mpi_vo_set_layer_attr failed, ret=%d\n", ret);
+        return ret;
     }
 
-    attr.stride = info->stride;
-    attr.pixel_format = info->format;
-    attr.display_rect = info->offset;
-    attr.img_size = info->act_size;
-    kd_mpi_vo_set_video_osd_attr(osd_id, &attr);
-
-    kd_mpi_vo_osd_enable(osd_id);
+    ret = kd_mpi_vo_enable_layer(osd_id);
+    if (ret != K_SUCCESS) {
+        printf("ERROR: kd_mpi_vo_enable_layer failed, ret=%d\n", ret);
+        return ret;
+    }
 
     return 0;
 }
 
-int KdMedia::_deinit_osd(k_vo_osd osd_id)
+int KdMedia::_deinit_osd(k_vo_layer_id osd_id)
 {
     if (osd_vb_handle_ != VB_INVALID_HANDLE)
     {
-        kd_mpi_vo_osd_disable(osd_id_);
+        kd_mpi_vo_disable_layer(osd_id);
         kd_mpi_vb_release_block(osd_vb_handle_);
         osd_vb_handle_ = VB_INVALID_HANDLE;
     }
@@ -1084,18 +975,16 @@ int KdMedia::_deinit_vo_layer_osd()
         _deinit_wbc();
     }
 
-    kd_display_reset();
+    //kd_display_reset();
 
     return 0;
 }
 
 int KdMedia::_init_wbc()
 {
-    k_vo_wbc_attr wb_attr;
-    wb_attr.pixel_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
-    wb_attr.target_size.width = wbc_width_;
-    wb_attr.target_size.height = wbc_height_;
-    wb_attr.stride = wb_attr.target_size.width;
+    k_vo_wbc_attr wb_attr = {
+        .blk_cnt   = 3,
+    };
 
     kd_mpi_vo_set_wbc_attr(&wb_attr);
     kd_mpi_vo_enable_wbc();
@@ -1128,23 +1017,43 @@ int KdMedia::_deinit_wbc()
     return 0;
 }
 
+k_u32 KdMedia::_venc_vb_create_pool()
+{
+    k_u32 private_pool_id;
+    k_vb_pool_config pool_config;
+    memset(&pool_config, 0, sizeof(pool_config));
+    k_u64 stream_size = input_config_.venc_width * input_config_.venc_height / 2;
+    pool_config.blk_cnt = 2;
+    pool_config.blk_size =  ((stream_size + 0xfff) & ~0xfff);
+    pool_config.mode = VB_REMAP_MODE_NOCACHE;
+    private_pool_id = kd_mpi_vb_create_pool(&pool_config);
+    printf("%s poolid %d\n", __func__,private_pool_id);
+
+    return private_pool_id;
+}
+
 int KdMedia::_init_venc()
 {
+    k_s32 ret;
+    k_venc_chn_attr chn_attr;
+    k_u32 venc_chn_id = venc_chn_id_;
+
     if (!feature_config_.enable_video_encoder)
     {
         return 0;
     }
 
-    k_s32 ret;
-    k_venc_chn_attr chn_attr;
-    k_u32 venc_chn_id = venc_chn_id_;
+    venc_attach_pool_id_ = _venc_vb_create_pool();
+    if (venc_attach_pool_id_ == VB_INVALID_POOLID){
+        printf("%s _venc_vb_create_pool failed\n",__func__);
+        return -1;
+    }
+    kd_mpi_venc_attach_vb_pool(venc_chn_id_,venc_attach_pool_id_);
 
     memset(&chn_attr, 0, sizeof(chn_attr));
     k_u64 stream_size = input_config_.venc_width * input_config_.venc_height / 2;
     chn_attr.venc_attr.pic_width = input_config_.venc_width;
     chn_attr.venc_attr.pic_height = input_config_.venc_height;
-    chn_attr.venc_attr.stream_buf_size = ((stream_size + 0xfff) & ~0xfff);
-    chn_attr.venc_attr.stream_buf_cnt = 2;
     chn_attr.rc_attr.rc_mode = K_VENC_RC_MODE_CBR;
     chn_attr.rc_attr.cbr.src_frame_rate = 30;
     chn_attr.rc_attr.cbr.dst_frame_rate = 30;
@@ -1185,17 +1094,32 @@ int KdMedia::_init_venc()
         }
     }
 
+    k_rotation rotaion = rotation_90_ ? K_VPU_ROTATION_90 : K_VPU_ROTATION_0;
+    ret = kd_mpi_venc_set_rotation(venc_chn_id, rotaion);
+    if (ret != K_SUCCESS)
+    {
+        printf("kd_mpi_venc_set_rotation failed:0x%x\n", ret);
+        return -1;
+    }
+
     return 0;
 }
 
 int KdMedia::_deinit_venc()
 {
+    k_s32 ret = -1;
     if (!feature_config_.enable_video_encoder)
     {
         return 0;
     }
 
-    k_s32 ret = kd_mpi_venc_destroy_chn(venc_chn_id_);
+    ret = kd_mpi_venc_detach_vb_pool(venc_chn_id_);
+    if (ret != K_SUCCESS)
+    {
+        printf("kd_mpi_venc_detach_vb_pool failed:0x%x\n", ret);
+    }
+
+    ret = kd_mpi_venc_destroy_chn(venc_chn_id_);
     if (ret != K_SUCCESS)
     {
         printf("kd_mpi_venc_destroy_chn failed:0x%x\n", ret);
@@ -1716,7 +1640,7 @@ int KdMedia::osd_alloc_frame(void **osd_vaddr)
     memset(&osd_vf_info_, 0, sizeof(osd_vf_info_));
     osd_vf_info_.v_frame.width = input_config_.osd_width;
     osd_vf_info_.v_frame.height = input_config_.osd_height;
-    osd_vf_info_.v_frame.stride[0] = input_config_.osd_width;
+    osd_vf_info_.v_frame.stride[0] = input_config_.osd_width*4;
     osd_vf_info_.v_frame.pixel_format = osd_format_;
 
     if (osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_ABGR_8888 || osd_vf_info_.v_frame.pixel_format == PIXEL_FORMAT_ARGB_8888)
@@ -1733,7 +1657,6 @@ int KdMedia::osd_alloc_frame(void **osd_vaddr)
         size = osd_vf_info_.v_frame.height * osd_vf_info_.v_frame.width * 3 / 2;
 
     size = MEM_ALIGN_UP(size, MEM_ALIGN_4K);
-    printf("vb block size is %x \n", size);
 
     handle = kd_mpi_vb_get_block(osd_pool_id_, size, NULL);
     if (handle == VB_INVALID_HANDLE)
@@ -1778,7 +1701,7 @@ int KdMedia::osd_draw_frame()
         return 0;
     }
 
-    return kd_mpi_vo_chn_insert_frame(osd_id_+3, &osd_vf_info_);
+    return kd_mpi_vo_insert_frame(osd_id_, &osd_vf_info_);
 }
 
 int KdMedia::osd_send_venc_frame()

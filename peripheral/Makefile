@@ -20,14 +20,29 @@ subdirs-y := \
 
 .PHONY: all clean distclean
 
-all:
-	@$(foreach dir,$(subdirs-y),$(MAKE) -C $(dir) all || exit $?;)
-	@echo "Make RT-Smart Peripheral Examples done."
+all: $(subdirs-y)
+	@$(ECHO) [BUILD] examples peripheral done.
+
+ifneq ($(strip $(subdirs-y)),)
+.PHONY: $(subdirs-y)
+
+$(subdirs-y):
+	@echo "[BUILD] examples peripheral $@"
+	@$(MAKE) -C $@ all || exit $?;
+endif
 
 clean:
-	@$(foreach dir,$(subdirs-y),$(MAKE) -C $(dir) clean || exit $?;)
-	@echo "Make RT-Smart Peripheral Examples clean done."
+	@if [ -n "$(subdirs-y)" ]; then \
+		for dir in $(subdirs-y); do \
+			echo "[CLEAN] examples peripheral $$dir"; \
+			$(MAKE) -C $$dir clean || exit $?; \
+		done; \
+	fi
 
 distclean:
-	@$(foreach dir,$(subdirs-y),$(MAKE) -C $(dir) distclean || exit $?;)
-	@echo "Make RT-Smart Peripheral Examples distclean done."
+	@if [ -n "$(subdirs-y)" ]; then \
+		for dir in $(subdirs-y); do \
+			echo "[DISTCLEAN] examples peripheral $$dir"; \
+			$(MAKE) -C $$dir distclean || exit $?; \
+		done; \
+	fi

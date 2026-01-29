@@ -3,9 +3,9 @@ include ../../mkenv.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/toolchain_riscv64_musl.mk
 
 # Build configuration
-CURRECT_DIR_NAME := $(shell basename `pwd`)
-BUILD := $(SDK_RTSMART_BUILD_DIR)/examples/peripheral/$(CURRECT_DIR_NAME)
-BIN := $(RTT_EXAMPLES_ELF_INSTALL_PATH_PERIPHERAL_EXAMPLES)/$(CURRECT_DIR_NAME).elf
+DIR := $(shell basename `pwd`)
+BUILD := $(SDK_RTSMART_BUILD_DIR)/examples/peripheral/$(DIR)
+BIN := $(RTT_PERIPHERAL_EXAMPLES_ELF_INSTALL_PATH)/$(DIR).elf
 
 # Source files handling
 C_SRCS    := $(wildcard *.c)
@@ -25,12 +25,12 @@ OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/librtsmart_hal.mk
 
 # Compiler flags
-CFLAGS := -std=gnu99 -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany
-CFLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
-CFLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
+C_CXX_FLAGS := -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os
+C_CXX_FLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
+C_CXX_FLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
 
-CXX_FLAGS := -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
-CXX_FLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
+CFLAGS 		:= $(C_CXX_FLAGS) -std=gnu99
+CXX_FLAGS 	:= $(C_CXX_FLAGS) -std=c++20 
 
 # Linker flags
 LDFLAGS := -T $(SDK_RTSMART_SRC_DIR)/libs/mk/link.lds --static -Wl,--gc-sections
@@ -40,12 +40,13 @@ LDFLAGS += $(LIB_LDFLAGS)
 .PHONY: all clean distclean
 
 all: $(BIN)
-	@echo "[SUCCESS] Built RTSmart HAL sample $(CURRECT_DIR_NAME)"
+	@$(ECHO) [BUILD] examples peripheral $(DIR) done.
 
 # Rule to link the final ELF - Order-only dependency on directory
 $(BIN): $(OBJS) | $(OBJ_DIRS)
 	@echo "[LD] $@"
-	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) -o $@
+	$(Q)$(CXX) $(CFLAGS) $^ $(LDFLAGS) -o $@
+	$(Q)$(STRIP) $@
 
 # Rule for C objects - Order-only dependency on directory
 $(BUILD)/%.o: %.c | $(OBJ_DIRS)
@@ -62,11 +63,9 @@ $(OBJ_DIRS):
 	$(Q)mkdir -p $@
 
 clean:
-	@echo "Cleaning RTSmart HAL sample $(CURRECT_DIR_NAME) build artifacts..."
-	@rm -rf $(BUILD)
+	@rm -rf $(BIN)
 
 distclean: clean
-	@echo "Cleaning RTSmart HAL sample $(CURRECT_DIR_NAME) installed binaries..."
-	@rm -f $(BIN)
+	@rm -rf $(BUILD)
 
 -include $(DEPS)
