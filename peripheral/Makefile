@@ -16,6 +16,7 @@ subdirs-y := \
 	touch \
 	tsensor \
 	uart \
+	usb_hid_kbd \
 	wdt \
 
 .PHONY: all clean distclean
