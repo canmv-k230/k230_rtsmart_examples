@@ -7,10 +7,16 @@ subdirs-$(CONFIG_RTT_ENABLE_PERIPHERAL_EXAMPLES) += peripheral
 subdirs-$(CONFIG_RTT_ENABLE_MPP_EXAMPLES) += mpp
 subdirs-$(CONFIG_RTT_ENABLE_AI_EXAMPLES) += ai
 
+ELF_INSTALL_DIR := $(SDK_RTSMART_SRC_DIR)/examples/elf/
+
 .PHONY: all clean distclean
 
-all: $(subdirs-y)
+all: $(subdirs-y) | $(ELF_INSTALL_DIR)
 	@$(ECHO) [BUILD] examples done.
+
+$(ELF_INSTALL_DIR):
+	@mkdir -p $@
+	@echo "[INFO] Created ELF install directory: $@"
 
 ifneq ($(strip $(subdirs-y)),)
 .PHONY: $(subdirs-y)
