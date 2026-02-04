@@ -38,152 +38,193 @@ using namespace nncase::runtime::k230;
 using namespace nncase::F::k230;
 using namespace nncase::runtime::detail;
 
-
-AIBase::AIBase(const char *kmodel_file,const string model_name, const int debug_mode) : debug_mode_(debug_mode),model_name_(model_name)
+/**
+ * @brief AI 推理基类
+ * 作用：
+ *  - 加载 kmodel
+ *  - 初始化输入输出 tensor
+ *  - 执行推理
+ *  - 获取输出数据
+ *
+ * 这是所有检测 / 分类 / 人脸识别模型的公共父类
+ */
+AIBase::AIBase(const char *kmodel_file,const string model_name, const int debug_mode)
+    : debug_mode_(debug_mode),model_name_(model_name)
 {
+    // 打印模型路径（调试等级 >1）
     if (debug_mode > 1)
         cout << "kmodel_file:" << kmodel_file << endl;
+
+    // 以二进制方式打开 kmodel 文件
     std::ifstream ifs(kmodel_file, std::ios::binary);
+
+    // 加载 kmodel 到解释器（nncase runtime）
     kmodel_interp_.load_model(ifs).expect("Invalid kmodel");
+
+    // 初始化输入 tensor
     set_input_init();
+
+    // 初始化输出信息
     set_output_init();
 }
 
 AIBase::~AIBase()
 {
+    // 当前没有资源需要手动释放
 }
 
+////////////////////////////////////////////////////////////
+/// 输入初始化
+////////////////////////////////////////////////////////////
 void AIBase::set_input_init()
 {
+    // 性能计时（可选）
     ScopedTiming st(model_name_ + " set_input init", debug_mode_);
+
     int input_total_size = 0;
-    each_input_size_by_byte_.push_back(0); // 先补0,为之后做准备
+
+    // 遍历模型所有输入
     for (int i = 0; i < kmodel_interp_.inputs_size(); ++i)
     {
+        // 获取输入描述信息（数据类型）
         auto desc = kmodel_interp_.input_desc(i);
+
+        // 获取输入 shape
         auto shape = kmodel_interp_.input_shape(i);
-        auto tensor = host_runtime_tensor::create(desc.datatype, shape, hrt::pool_shared).expect("cannot create input tensor");
+
+        // 在 host 侧创建 tensor（共享内存池）
+        auto tensor = host_runtime_tensor::create(
+            desc.datatype, shape, hrt::pool_shared
+        ).expect("cannot create input tensor");
+
+        // 将 tensor 绑定到解释器输入
         kmodel_interp_.input_tensor(i, tensor).expect("cannot set input tensor");
+
         vector<int> in_shape;
+
         if (debug_mode_ > 1)
             cout<<"input "<< std::to_string(i) <<" : "<<to_string(desc.datatype)<<",";
+
         int dsize = 1;
+
+        // 记录 shape 维度
         for (int j = 0; j < shape.size(); ++j)
         {
             in_shape.push_back(shape[j]);
-            dsize *= shape[j];
+            dsize *= shape[j];   // 计算元素数量
+
             if (debug_mode_ > 1)
                 cout << shape[j] << ",";
         }
+
         if (debug_mode_ > 1)
             cout << endl;
-        input_shapes_.push_back(in_shape);
-        // DEFINE_TYPECODE(uint8,      u8,     0x06)
-        // DEFINE_TYPECODE(float32,    f32,    0x0B)
-        // if (desc.datatype == dt_int8 || desc.datatype == dt_uint8)
-        // {
-        //     input_total_size += dsize;
-        // }
-        // else if (desc.datatype == dt_int16 || desc.datatype == dt_uint16 || desc.datatype == dt_float16 || desc.datatype == dt_bfloat16)
-        // {
-        //     input_total_size += (dsize * 2);
-        // }
-        // else if (desc.datatype == dt_int32 || desc.datatype == dt_uint32 || desc.datatype == dt_float32)
-        // {
-        //     input_total_size += (dsize * 4);
-        // }
-        // else if(desc.datatype == dt_int64 || desc.datatype == dt_uint64 || desc.datatype == dt_float64)
-        // {
-        //     input_total_size += (dsize * 8);
-        // }
-        // else
-        // {
-        //     printf("input data type:%d",desc.datatype);
-        //     assert(("unsupported kmodel output data type", 0));
-        // }
-        // each_input_size_by_byte_.push_back(input_total_size);
 
+        // 保存输入 shape
+        input_shapes_.push_back(in_shape);
     }
-    // each_input_size_by_byte_.push_back(input_total_size); // 最后一个保存总大小
 }
 
+////////////////////////////////////////////////////////////
+/// 获取输入 tensor（给外部写数据用）
+////////////////////////////////////////////////////////////
 runtime_tensor AIBase::get_input_tensor(size_t idx)
 {
     return kmodel_interp_.input_tensor(idx).expect("cannot get input tensor");
 }
 
+////////////////////////////////////////////////////////////
+/// 手动设置输入 tensor（外部创建好后替换）
+////////////////////////////////////////////////////////////
+void AIBase::set_input_tensor(size_t idx,runtime_tensor &input_tensor){
+    kmodel_interp_.input_tensor(idx, input_tensor).expect("cannot set input tensor");
+}
+
+////////////////////////////////////////////////////////////
+/// 输出初始化（只记录 shape，不分配内存）
+////////////////////////////////////////////////////////////
 void AIBase::set_output_init()
 {
     ScopedTiming st(model_name_ + " set_output_init", debug_mode_);
-    each_output_size_by_byte_.clear();
     int output_total_size = 0;
-    each_output_size_by_byte_.push_back(0);
+
+    // 遍历所有输出
     for (size_t i = 0; i < kmodel_interp_.outputs_size(); i++)
     {
         auto desc = kmodel_interp_.output_desc(i);
         auto shape = kmodel_interp_.output_shape(i);
+
         vector<int> out_shape;
+
         if (debug_mode_ > 1)
             cout<<"output "<<std::to_string(i)<<" : "<<to_string(desc.datatype)<<",";
+
         int dsize = 1;
+
         for (int j = 0; j < shape.size(); ++j)
         {
             out_shape.push_back(shape[j]);
             dsize *= shape[j];
+
             if (debug_mode_ > 1)
                 cout << shape[j] << ",";
         }
+
         if (debug_mode_ > 1)
             cout << endl;
+
+        // 保存输出 shape
         output_shapes_.push_back(out_shape);
-        // if (desc.datatype == dt_int8 || desc.datatype == dt_uint8)
-        // {
-        //     output_total_size += dsize;
-        // }
-        // else if (desc.datatype == dt_int16 || desc.datatype == dt_uint16 || desc.datatype == dt_float16 || desc.datatype == dt_bfloat16)
-        // {
-        //     output_total_size += (dsize * 2);
-        // }
-        // else if (desc.datatype == dt_int32 || desc.datatype == dt_uint32 || desc.datatype == dt_float32)
-        // {
-        //     output_total_size += (dsize * 4);
-        // }
-        // else if(desc.datatype == dt_int64 || desc.datatype == dt_uint64 || desc.datatype == dt_float64)
-        // {
-        //     output_total_size += (dsize * 8);
-        // }
-        // else
-        // {
-        //     printf("output data type:%d",desc.datatype);
-        //     assert(("unsupported kmodel output data type", 0));
-        // }
-        // each_output_size_by_byte_.push_back(output_total_size);
-        // auto tensor = host_runtime_tensor::create(desc.datatype, shape, hrt::pool_shared).expect("cannot create output tensor");
-        // kmodel_interp_.output_tensor(i, tensor).expect("cannot set output tensor");
     }
 }
 
+////////////////////////////////////////////////////////////
+/// 执行推理
+////////////////////////////////////////////////////////////
 void AIBase::run()
 {
     ScopedTiming st(model_name_ + " run", debug_mode_);
+
+    // 调用 nncase 执行模型
     kmodel_interp_.run().expect("error occurred in running model");
 }
 
+////////////////////////////////////////////////////////////
+/// 读取输出数据（映射到 host 内存）
+////////////////////////////////////////////////////////////
 void AIBase::get_output()
 {
     ScopedTiming st(model_name_ + " get_output", debug_mode_);
+
+    // 清空旧指针
     p_outputs_.clear();
+
     for (int i = 0; i < kmodel_interp_.outputs_size(); i++)
     {
+        // 获取输出 tensor
         auto out = kmodel_interp_.output_tensor(i).expect("cannot get output tensor");
-        // auto mapped_buf = std::move(hrt::map(out, map_access_::map_read).unwrap());
-        // float *p_out = reinterpret_cast<float *>(mapped_buf.buffer().data());
-        auto buf = out.impl()->to_host().unwrap()->buffer().as_host().unwrap().map(map_access_::map_read).unwrap().buffer();
+
+        /**
+         * 这里是关键：
+         * device tensor → host tensor → map → 得到 CPU 可访问指针
+         */
+        auto buf = out.impl()
+                        ->to_host().unwrap()
+                        ->buffer().as_host().unwrap()
+                        .map(map_access_::map_read).unwrap()
+                        .buffer();
+
+        // 默认按 float 解析
         float *p_out = reinterpret_cast<float *>(buf.data());
+
+        // 保存输出指针（生命周期由 tensor 控制）
         p_outputs_.push_back(p_out);
     }
 }
 
+////////////////////////////////////////////////////////////
+/// 获取某个输出 tensor（高级接口）
+////////////////////////////////////////////////////////////
 runtime_tensor AIBase::get_output_tensor(int idx){
     return kmodel_interp_.output_tensor(idx).expect("cannot get current output tensor");
 }

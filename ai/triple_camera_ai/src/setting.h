@@ -1,5 +1,5 @@
 
-#define DISPLAY_TYPE 'lt9611'
+#define DISPLAY_TYPE 'st7701'
 
 #if DISPLAY_TYPE == 'st7701'
     #define ISP_WIDTH 1920

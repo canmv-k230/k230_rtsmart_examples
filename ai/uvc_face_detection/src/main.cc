@@ -47,8 +47,6 @@ void video_proc(char *argv[])
 {
     int debug_mode = atoi(argv[4]);
     FrameCHWSize image_size={AI_FRAME_CHANNEL,AI_FRAME_HEIGHT, AI_FRAME_WIDTH};
-    // 创建一个空的Mat对象，用于存储绘制的帧
-    cv::Mat draw_frame(OSD_HEIGHT, OSD_WIDTH, CV_8UC4, cv::Scalar(0, 0, 0, 0));
     // 创建一个空的runtime_tensor对象，用于存储输入数据
     dims_t in_shape { 1, AI_FRAME_CHANNEL, AI_FRAME_HEIGHT, AI_FRAME_WIDTH };
     runtime_tensor input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, hrt::pool_shared).expect("cannot create input tensor");

@@ -90,8 +90,6 @@ protected:
     vector<float *> p_outputs_;            // kmodel输出对应的指针列表
     vector<vector<int>> input_shapes_;     //{{N,C,H,W},{N,C,H,W}...}
     vector<vector<int>> output_shapes_;    //{{N,C,H,W},{N,C,H,W}...}} 或 {{N,C},{N,C}...}}等
-    vector<int> each_input_size_by_byte_;  //{0,layer1_length,layer1_length+layer2_length,...}
-    vector<int> each_output_size_by_byte_; //{0,layer1_length,layer1_length+layer2_length,...}
 private:
     /**
      * @brief 首次初始化kmodel输入，并获取输入shape

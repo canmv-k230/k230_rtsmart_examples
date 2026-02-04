@@ -11,10 +11,6 @@
     #define AI_FRAME_WIDTH 640
     #define AI_FRAME_HEIGHT 480
     #define AI_FRAME_CHANNEL 3
-    #define USE_OSD 1
-    #define OSD_WIDTH 800
-    #define OSD_HEIGHT 480
-    #define OSD_CHANNEL 4
 #elif DISPLAY_TYPE == 'lt9611'
     #define UVC_WIDTH 1920
     #define UVC_HEIGHT 1080
@@ -25,8 +21,4 @@
     #define AI_FRAME_WIDTH 1920
     #define AI_FRAME_HEIGHT 1080
     #define AI_FRAME_CHANNEL 3
-    #define USE_OSD 1
-    #define OSD_WIDTH 1920
-    #define OSD_HEIGHT 1080
-    #define OSD_CHANNEL 4
  #endif
