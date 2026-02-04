@@ -39,11 +39,7 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
             default n
 
             if RTT_ENABLE_BUILD_INTEGRATED_EXAMPLES
-
-                config RTT_INTEGRATED_EXAMPLES_SMART_IPC
-                    bool "Smart IPC examples"
-                    default y
-
+                source "$(SDK_RTSMART_SRC_DIR)/examples/integrated_poc/Kconfig"
             endif
 
     endif

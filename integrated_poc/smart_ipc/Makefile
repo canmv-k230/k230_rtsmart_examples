@@ -1,65 +1,85 @@
+# Include base configuration
 include ../../mkenv.mk
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/toolchain_riscv64_musl.mk
 
-include $(MPP_SRC_DIR)/middleware/mpp.mk
-include $(MPP_SRC_DIR)/middleware/rt-smart.mk
+# Build configuration
+DIR 	:= $(shell basename `pwd`)
+BUILD 	:= $(SDK_RTSMART_BUILD_DIR)/examples/integrated_poc/$(DIR)
+INSTALL := $(RTT_EXAMPLES_ELF_INSTALL_PATH_INTERGRATED_POC)/$(DIR)
+BIN 	:= $(INSTALL)/$(DIR).elf
 
-include ../toolchain.mk
+# Source files handling
+C_SRCS    := $(wildcard *.c)
+CXX_SRCS  := \
+	$(wildcard *.cpp) \
+	$(wildcard face_detection/*.cpp)
 
-DIR=$(shell basename `pwd`)
-LOCAL_SRC_DIR = $(shell pwd)
-BIN = $(LOCAL_SRC_DIR)/$(DIR).elf
+# Consistent variable naming
+C_OBJS    := $(patsubst %.c, $(BUILD)/%.o, $(C_SRCS))
+CXX_OBJS  := $(patsubst %.cpp, $(BUILD)/%.o, $(CXX_SRCS))
 
-LIBPATH = $(MPP_LIB_PATH)
-LIBPATH += -L$(MPP_SRC_DIR)/middleware/lib
-LIBPATH += -L$(NNCASE_SRC_DIR)/riscv64/rvvlib -L$(NNCASE_SRC_DIR)/riscv64/nncase/lib
-LIBPATH += -L$(OPENCV_SRC_DIR)/lib -L$(OPENCV_SRC_DIR)/3rdparty/lib -L$(OPENCV_SRC_DIR)/lib/opencv4/3rdparty
+OBJS      := $(C_OBJS) $(CXX_OBJS)
+DEPS      := $(OBJS:.o=.d)
 
-LIVE555_LIBS = -lrtsp_server -lliveMedia -lgroupsock -lBasicUsageEnvironment -lUsageEnvironment
-NNCASE_LIBS = -lrvv -lNncase.Runtime.Native -lnncase.rt_modules.k230 -lfunctional_k230
-OPENCV_LIBS = -lstdc++ -lopencv_core -lopencv_imgcodecs -lopencv_imgproc -lopencv_highgui -lopencv_videoio -lzlib -llibjpeg-turbo -llibopenjp2 -llibpng -llibtiff -llibwebp -lcsi_cv -latomic
-LIBS = $(MPP_LIBS)
-LIBS += $(LIVE555_LIBS)
-LIBS += $(NNCASE_LIBS)
-LIBS += $(OPENCV_LIBS)
+# Assets
+ASSETS_SRC		:= ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/face_detection_320.kmodel
+ASSETS_INSTALL 	:= $(addprefix $(INSTALL)/, $(notdir $(ASSETS_SRC)))
 
-RTSP_SERVER = $(MPP_SRC_DIR)/middleware/src/rtsp_server
-INCPATH = -I$(LOCAL_SRC_DIR) -I$(LOCAL_SRC_DIR)/face_detection -I$(RTSP_SERVER)/include -I$(NNCASE_SRC_DIR)/riscv64/rvvlib/include -I$(NNCASE_SRC_DIR)/riscv64 -I$(NNCASE_SRC_DIR)/riscv64/nncase/include -I$(NNCASE_SRC_DIR)/riscv64/nncase/include/nncase/runtime -I$(OPENCV_SRC_DIR)/include/opencv4
+# Directory creation logic - Captured and sorted
+OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN) $(ASSETS_INSTALL)))
 
-CC_CFLAGS_EX=-mcmodel=medany -march=rv64imafdcv -mabi=lp64d -Wall -O0 -g -gdwarf-2 -n --static $(KCFLAGS)
-LIVE555_COMPILE_OPTS = -DSOCKLEN_T=socklen_t -DNO_SSTREAM=1 -D_LARGEFILE_SOURCE=1 -D_FILE_OFFSET_BITS=64 -DNO_OPENSSL=1
-WERROR_FLAGS = -Wno-register -Wno-multichar -Wno-pessimizing-move -Wno-deprecated-declarations -Wno-unused-result -Wno-unused-variable -Wno-format -Wno-return-type -Wno-sign-compare -Wno-unused-label
-CXX_FLAGS = $(WERROR_FLAGS) \
-			$(LIVE555_COMPILE_OPTS) \
+# Library configuration
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/libmpp.mk
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/libopencv.mk
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/libnncase.mk
 
-LINKFLAG = -T ../link.lds
+# Compiler flags
+C_CXX_FLAGS := -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os
+C_CXX_FLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
+C_CXX_FLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
+C_CXX_FLAGS += -I./face_detection
 
-SRCS = $(wildcard $(LOCAL_SRC_DIR)/*.c) $(wildcard $(LOCAL_SRC_DIR)/face_detection/*.c)
-OBJS = $(patsubst %.c,%.o,$(SRCS))
-CPP_SRCS = $(wildcard $(LOCAL_SRC_DIR)/*.cpp) $(wildcard $(LOCAL_SRC_DIR)/face_detection/*.cpp)
-CPP_OBJS = $(patsubst %.cpp,%.o,$(CPP_SRCS))
+CFLAGS 		:= $(C_CXX_FLAGS) -std=gnu99
+CXX_FLAGS 	:= $(C_CXX_FLAGS) -std=c++20 
 
-BIN_DIR = ../k230_bin
-all:$(BIN)
-	@echo "${PWD}/Makefile all"
-	@mkdir -p $(BIN_DIR)
-	@cp $(BIN) $(BIN_DIR)
-	@cp -a ${SDK_RTSMART_SRC_DIR}/libs/kmodel/ai_poc/kmodel/face_detection_320.kmodel $(BIN_DIR)
-	@rm -rf $(BIN) $(OBJS) $(CPP_OBJS)
+# Linker flags
+LDFLAGS := -T $(SDK_RTSMART_SRC_DIR)/libs/mk/link.lds --static -Wl,--gc-sections
+LDFLAGS += $(LIB_LDFLAGS)
 
-$(OBJS): %.o : %.c
-	@echo CC $@
-	@$(CC) $(CC_CFLAGS_EX) $(INCPATH) $(BSP_CFLGAS) $(RTSMART_CFLAGS) $(MPP_USER_CFLGAS) -c $< -o $@
+# Phony targets
+.PHONY: all clean distclean
 
-$(CPP_OBJS): %.o : %.cpp
-	@echo CXX $@
-	@$(CXX) $(CC_CFLAGS_EX) $(CXX_FLAGS) $(INCPATH) $(BSP_CFLGAS) $(RTSMART_CFLAGS) $(MPP_USER_CFLGAS) -c $< -o $@
+all: $(BIN) $(ASSETS_INSTALL)
+	@$(ECHO) [BUILD] examples integrated_poc $(DIR) done.
 
-$(BIN): $(OBJS) $(CPP_OBJS)
-	@echo LD $@
-	$(CXX) -o $(BIN) $(LINKFLAG) -n --static $^ -L$(LIBPATH) -Wl,--start-group $(LIBS) -Wl,--end-group
+# Rule to link the final ELF - Order-only dependency on directory
+$(BIN): $(OBJS) | $(OBJ_DIRS)
+	@echo "[LD] $@"
+	$(Q)$(CXX) $(CFLAGS) $^ $(LDFLAGS) -o $@
+	$(Q)$(STRIP) $@
+
+$(ASSETS_INSTALL): | $(OBJ_DIRS)
+	@echo "[INSTALL] $@"
+	$(Q)cp -a $(filter %/$(notdir $@), $(ASSETS_SRC)) $@
+
+# Rule for C objects - Order-only dependency on directory
+$(BUILD)/%.o: %.c | $(OBJ_DIRS)
+	@echo "[CC] $@"
+	$(Q)$(CC) $(CFLAGS) -MD -MP -MF $(@:.o=.d) -c $< -o $@
+
+# Rule for C++ objects - Order-only dependency on directory
+$(BUILD)/%.o: %.cpp | $(OBJ_DIRS)
+	@echo "[CXX] $@"
+	$(Q)$(CXX) $(CXX_FLAGS) -MD -MP -MF $(@:.o=.d) -c $< -o $@
+
+# Actual directory creation rule
+$(OBJ_DIRS):
+	$(Q)mkdir -p $@
 
 clean:
-	echo "${PWD}/Makefile clean"
-	rm -rf $(BIN) $(OBJS) $(CPP_OBJS)
+	@rm -rf $(INSTALL)
 
-.PHONY: all clean
+distclean: clean
+	@rm -rf $(BUILD)
+
+-include $(DEPS)
