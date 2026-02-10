@@ -5,6 +5,7 @@ subdirs-y :=
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_FREETYPE_SAMPLES) += freetype/freetype_basic
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_LVGL_SAMPLES) += lvgl/lvgl_basic
 subdirs-$(CONFIG_RTSMART_LIBS_MINIHTTP_ENABLE_SAMPLES) += minihttp/minihttp_basic minihttp/minihttp_advanced
+subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_TUYALINKSDK_SAMPLES) += tuya/tuya_basic
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_OPENCV_SAMPLES) += opencv
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_OPENBLAS_SAMPLES) += openblas
 
