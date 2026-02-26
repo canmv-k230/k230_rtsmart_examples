@@ -400,7 +400,7 @@ int main(int argc, char* argv[])
     lv_init();
 
     // Create LVGL display on OSD layer (auto detect size)
-    disp = lv_k230_display_create(osd_layer);
+    disp = lv_k230_display_create(osd_layer, 255);
     if (!disp) {
         printf("Failed to create LVGL display\n");
         return -1;
