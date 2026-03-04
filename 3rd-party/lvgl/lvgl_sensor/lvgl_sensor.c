@@ -193,6 +193,52 @@ static void create_hud_ui(void)
     lv_obj_align(label_uptime, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 }
 
+// for 640x480, vector took about 500us, c took about 1000us, 2x faster.
+static void rgb888_to_bgr888_inplace(uint8_t* data, size_t num_pixels)
+{
+#if 0
+    uint8_t *start = data;
+    const uint8_t *end = data + num_pixels * 3;
+    while (start < end) {
+        uint8_t r = *start;
+        uint8_t g = *(start + 1);
+        uint8_t b = *(start + 2);
+
+        // Swap R and B
+        *start = b;
+        *(start + 1) = g; // G stays the same
+        *(start + 2) = r;
+
+        start += 3; // Move to the next pixel
+    }
+#else
+    size_t   vl;
+    uint8_t* ptr = data;
+
+    while (num_pixels > 0) {
+        asm volatile("vsetvli %0, %1, e8, m1, ta, ma" : "=r"(vl) : "r"(num_pixels));
+
+        asm volatile(
+            // Load RGB
+            "vlseg3e8.v v0, (%0)\n\t" // v0=R, v1=G, v2=B
+
+            // Swap R and B
+            "vmv.v.v v3, v0\n\t" // tmp = R
+            "vmv.v.v v0, v2\n\t" // v0 = B
+            "vmv.v.v v2, v3\n\t" // v2 = R
+
+            // Store BGR
+            "vsseg3e8.v v0, (%0)\n\t"
+            :
+            : "r"(ptr)
+            : "v0", "v1", "v2", "v3", "memory");
+
+        ptr += vl * 3;
+        num_pixels -= vl;
+    }
+#endif
+}
+
 // ============================================================================
 // Main Execution
 // ============================================================================
@@ -211,7 +257,7 @@ int main(int argc, char* argv[])
     lv_init();
     g_display = lv_k230_display_create(K_VO_LAYER_OSD0, 255);
     lv_display_set_rotation(g_display, LV_DISPLAY_ROTATION_270);
-    lv_display_set_color_format(g_display, LV_COLOR_FORMAT_RGB888);
+    lv_display_set_color_format(g_display, LV_COLOR_FORMAT_ARGB8888);
 
     create_hud_ui();
 
@@ -224,6 +270,10 @@ int main(int argc, char* argv[])
         if (kd_mpi_vicap_dump_frame(VICAP_DEV_ID_0, VICAP_CHN_ID_0, VICAP_DUMP_YUV, &vf_info, 100) == K_SUCCESS) {
             void* vaddr = kd_mpi_sys_mmap(vf_info.v_frame.phys_addr[0], RGB888_SIZE);
             if (vaddr != (void*)-1) {
+                if (PIXEL_FORMAT_RGB_888 == vf_info.v_frame.pixel_format) {
+                    rgb888_to_bgr888_inplace(vaddr, vf_info.v_frame.width * vf_info.v_frame.height);
+                }
+
                 memcpy(g_frame_buffer, vaddr, RGB888_SIZE);
                 g_frame_count++;
 

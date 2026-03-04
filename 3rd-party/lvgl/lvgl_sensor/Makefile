@@ -39,15 +39,17 @@ LDFLAGS := -T $(SDK_RTSMART_SRC_DIR)/libs/mk/link.lds --static -Wl,--gc-sections
 LDFLAGS += $(LIB_LDFLAGS)
 
 # Phony targets
-.PHONY: all clean distclean
+.PHONY: all clean distclean .FORCE
 
 all: $(BIN)
 	@$(ECHO) [BUILD] examples 3rd-party $(DIR) done.
 
+.FORCE:
+
 # Rule to link the final ELF - Order-only dependency on directory
-$(BIN): $(OBJS) | $(OBJ_DIRS)
+$(BIN): $(OBJS) .FORCE | $(OBJ_DIRS)
 	@echo "[LD] $@"
-	$(Q)$(CXX) $(CFLAGS) $^ $(LDFLAGS) -o $@
+	$(Q)$(CXX) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
 	$(Q)$(STRIP) $@
 
 # Rule for C objects - Order-only dependency on directory

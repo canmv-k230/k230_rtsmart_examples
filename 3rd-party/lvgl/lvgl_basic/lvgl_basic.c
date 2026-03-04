@@ -53,183 +53,151 @@ static void signal_handler(int signum)
     g_signal_received = 1;
 }
 
-static void create_demo_widgets(lv_obj_t* parent)
+/* Screen objects */
+static lv_obj_t *main_screen;
+static lv_obj_t *counter_label;
+static lv_obj_t *color_preview;
+static int touch_counter = 0;
+
+/* Function prototypes */
+static void create_simple_ui(lv_obj_t *parent);
+static void btn_click_cb(lv_event_t *e);
+static void slider_cb(lv_event_t *e);
+static void switch_cb(lv_event_t *e);
+static void touch_cb(lv_event_t *e);
+
+void lv_demo_touch_simple(void)
 {
-    // Get screen resolution for responsive design
-    int32_t screen_width  = lv_display_get_horizontal_resolution(lv_display_get_default());
-    int32_t screen_height = lv_display_get_vertical_resolution(lv_display_get_default());
+    /* Create main screen */
+    main_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(main_screen, lv_color_hex(0x333333), 0);
+    
+    /* Add touch callback to whole screen */
+    lv_obj_add_event_cb(main_screen, touch_cb, LV_EVENT_CLICKED, NULL);
+    
+    /* Create UI */
+    create_simple_ui(main_screen);
+    
+    /* Load screen */
+    lv_screen_load(main_screen);
+}
 
-    // Use the only available font in the configuration
-    const lv_font_t* normal_font = &lv_font_montserrat_14;
+static void create_simple_ui(lv_obj_t *parent)
+{
+    /* Use simple padding that works with rotation */
+    lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(parent, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(parent, 10, 0);
+    lv_obj_set_style_pad_row(parent, 10, 0);
+    
+    /* Title */
+    lv_obj_t *title = lv_label_create(parent);
+    lv_label_set_text(title, "LVGL Touch Demo");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    
+    /* Touch counter */
+    counter_label = lv_label_create(parent);
+    lv_label_set_text_fmt(counter_label, "Touches: %d", touch_counter);
+    lv_obj_set_style_text_color(counter_label, lv_color_hex(0x00FF00), 0);
+    
+    /* Color preview box (shows touch feedback) */
+    color_preview = lv_obj_create(parent);
+    lv_obj_set_size(color_preview, 100, 100);
+    lv_obj_set_style_bg_color(color_preview, lv_color_hex(0x555555), 0);
+    lv_obj_set_style_radius(color_preview, 10, 0);
+    lv_obj_set_style_border_width(color_preview, 2, 0);
+    lv_obj_set_style_border_color(color_preview, lv_color_hex(0xFFFFFF), 0);
+    
+    /* Touch button */
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 150, 50);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2196F3), 0);
+    lv_obj_set_style_radius(btn, 25, 0);
+    lv_obj_add_event_cb(btn, btn_click_cb, LV_EVENT_CLICKED, NULL);
+    
+    lv_obj_t *btn_label = lv_label_create(btn);
+    lv_label_set_text(btn_label, "Touch Me");
+    lv_obj_center(btn_label);
+    
+    /* Slider */
+    lv_obj_t *slider = lv_slider_create(parent);
+    lv_obj_set_width(slider, 200);
+    lv_obj_add_event_cb(slider, slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    
+    /* Switch with label */
+    lv_obj_t *switch_row = lv_obj_create(parent);
+    lv_obj_set_size(switch_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(switch_row, 0, 0);
+    lv_obj_set_style_border_width(switch_row, 0, 0);
+    lv_obj_set_flex_flow(switch_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(switch_row, 10, 0);
+    
+    lv_obj_t *switch_label = lv_label_create(switch_row);
+    lv_label_set_text(switch_label, "Toggle:");
+    lv_obj_set_style_text_color(switch_label, lv_color_hex(0xFFFFFF), 0);
+    
+    lv_obj_t *sw = lv_switch_create(switch_row);
+    lv_obj_add_event_cb(sw, switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+}
 
-    // Main container with responsive padding
-    lv_obj_t* container = lv_obj_create(parent);
-    lv_obj_set_size(container, lv_pct(95), lv_pct(95));
-    lv_obj_center(container);
-    lv_obj_set_flex_flow(container, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+/* Button click callback */
+static void btn_click_cb(lv_event_t *e)
+{
+    touch_counter++;
+    lv_label_set_text_fmt(counter_label, "Touches: %d", touch_counter);
+    
+    /* Flash the color preview */
+    lv_obj_set_style_bg_color(color_preview, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_bg_color(color_preview, lv_color_hex(0x555555), 300);
+}
 
-    // Responsive padding based on screen size
-    int32_t padding = screen_width < 480 ? 5 : (screen_width < 800 ? 10 : 15);
-    lv_obj_set_style_pad_all(container, padding, 0);
-    lv_obj_set_style_bg_color(container, lv_color_hex(0x1a1a1a), 0);
-    lv_obj_set_style_border_width(container, 0, 0);
-    lv_obj_set_style_radius(container, 10, 0);
+/* Slider callback */
+static void slider_cb(lv_event_t *e)
+{
+    lv_obj_t *slider = lv_event_get_target(e);
+    int32_t val = lv_slider_get_value(slider);
+    
+    /* Change preview color based on slider */
+    lv_color_t color = lv_color_hsv_to_rgb(val * 3.6, 100, 100);
+    lv_obj_set_style_bg_color(color_preview, color, 0);
+}
 
-    // Resolution info header
-    lv_obj_t* header = lv_obj_create(container);
-    lv_obj_set_size(header, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(header, 0, 0);
-    lv_obj_set_style_pad_all(header, 5, 0);
-
-    lv_obj_t* resolution_label = lv_label_create(header);
-    lv_label_set_text_fmt(resolution_label, "Screen: %dx%d", screen_width, screen_height);
-    lv_obj_set_style_text_font(resolution_label, normal_font, 0);
-    lv_obj_set_style_text_color(resolution_label, lv_color_hex(0x00ff00), 0);
-
-    // Title section
-    lv_obj_t* title = lv_label_create(container);
-    lv_label_set_text(title, "LVGL Multi-Resolution Demo");
-    lv_obj_set_style_text_font(title, normal_font, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0x00aaff), 0);
-    lv_obj_set_style_pad_bottom(title, 10, 0);
-
-    // Button section with responsive layout
-    lv_obj_t* button_row = lv_obj_create(container);
-    lv_obj_set_size(button_row, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(button_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(button_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_bg_opa(button_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(button_row, 0, 0);
-    lv_obj_set_style_pad_all(button_row, 5, 0);
-
-    // Create responsive buttons
-    const char* button_texts[]  = { "Button 1", "Button 2", "Button 3" };
-    lv_color_t  button_colors[] = { lv_color_hex(0x0066cc), lv_color_hex(0xcc6600), lv_color_hex(0x00cc66) };
-
-    for (int i = 0; i < 3; i++) {
-        lv_obj_t* btn   = lv_button_create(button_row);
-        lv_obj_t* label = lv_label_create(btn);
-        lv_label_set_text(label, button_texts[i]);
-        lv_obj_set_style_text_font(label, normal_font, 0);
-        lv_obj_center(label);
-        lv_obj_set_style_bg_color(btn, button_colors[i], 0);
-
-        // Responsive button size
-        int32_t btn_width  = screen_width < 480 ? 70 : (screen_width < 800 ? 90 : 110);
-        int32_t btn_height = screen_width < 480 ? 25 : (screen_width < 800 ? 35 : 45);
-        lv_obj_set_size(btn, btn_width, btn_height);
+/* Switch callback */
+static void switch_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    
+    if (lv_obj_has_state(sw, LV_STATE_CHECKED)) {
+        lv_obj_set_style_border_color(color_preview, lv_color_hex(0x00FF00), 0);
+    } else {
+        lv_obj_set_style_border_color(color_preview, lv_color_hex(0xFFFFFF), 0);
     }
+}
 
-    // Progress bar section
-    lv_obj_t* progress_container = lv_obj_create(container);
-    lv_obj_set_size(progress_container, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(progress_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(progress_container, 0, 0);
-    lv_obj_set_style_pad_all(progress_container, 10, 0);
-
-    lv_obj_t* progress_label = lv_label_create(progress_container);
-    lv_label_set_text(progress_label, "Progress Bar:");
-    lv_obj_set_style_text_font(progress_label, normal_font, 0);
-    lv_obj_set_style_text_color(progress_label, lv_color_hex(0xffffff), 0);
-
-    lv_obj_t* progress_bar = lv_bar_create(progress_container);
-    lv_obj_set_size(progress_bar, lv_pct(80), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(progress_bar, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_bg_color(progress_bar, lv_color_hex(0x00ff00), LV_PART_INDICATOR);
-    lv_bar_set_value(progress_bar, 70, LV_ANIM_OFF);
-
-    // Slider section
-    lv_obj_t* slider_container = lv_obj_create(container);
-    lv_obj_set_size(slider_container, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(slider_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(slider_container, 0, 0);
-    lv_obj_set_style_pad_all(slider_container, 10, 0);
-
-    lv_obj_t* slider_label = lv_label_create(slider_container);
-    lv_label_set_text(slider_label, "Slider Control:");
-    lv_obj_set_style_text_font(slider_label, normal_font, 0);
-    lv_obj_set_style_text_color(slider_label, lv_color_hex(0xffffff), 0);
-
-    lv_obj_t* slider = lv_slider_create(slider_container);
-    lv_obj_set_width(slider, lv_pct(80));
-    lv_slider_set_value(slider, 50, LV_ANIM_OFF);
-
-    // Checkbox section
-    lv_obj_t* checkbox_container = lv_obj_create(container);
-    lv_obj_set_size(checkbox_container, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(checkbox_container, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(checkbox_container, 0, 0);
-    lv_obj_set_style_pad_all(checkbox_container, 10, 0);
-
-    lv_obj_t* checkbox_label = lv_label_create(checkbox_container);
-    lv_label_set_text(checkbox_label, "Options:");
-    lv_obj_set_style_text_font(checkbox_label, normal_font, 0);
-    lv_obj_set_style_text_color(checkbox_label, lv_color_hex(0xffffff), 0);
-
-    // Create checkboxes in a row
-    lv_obj_t* checkbox_row = lv_obj_create(checkbox_container);
-    lv_obj_set_size(checkbox_row, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(checkbox_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(checkbox_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_bg_opa(checkbox_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(checkbox_row, 0, 0);
-    lv_obj_set_style_pad_all(checkbox_row, 5, 0);
-
-    const char* checkbox_texts[] = { "Option 1", "Option 2", "Option 3" };
-    for (int i = 0; i < 3; i++) {
-        lv_obj_t* cb = lv_checkbox_create(checkbox_row);
-        lv_checkbox_set_text(cb, checkbox_texts[i]);
-        lv_obj_set_style_text_font(cb, normal_font, 0);
-        if (i == 1)
-            lv_obj_add_state(cb, LV_STATE_CHECKED); // Check the middle one by default
-    }
-
-    // LED indicators section (if space allows)
-    if (screen_height > 400) {
-        lv_obj_t* led_container = lv_obj_create(container);
-        lv_obj_set_size(led_container, lv_pct(100), LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_opa(led_container, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(led_container, 0, 0);
-        lv_obj_set_style_pad_all(led_container, 10, 0);
-
-        lv_obj_t* led_label = lv_label_create(led_container);
-        lv_label_set_text(led_label, "Status LEDs:");
-        lv_obj_set_style_text_font(led_label, normal_font, 0);
-        lv_obj_set_style_text_color(led_label, lv_color_hex(0xffffff), 0);
-
-        lv_obj_t* led_row = lv_obj_create(led_container);
-        lv_obj_set_size(led_row, lv_pct(100), LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(led_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(led_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_bg_opa(led_row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(led_row, 0, 0);
-        lv_obj_set_style_pad_all(led_row, 5, 0);
-
-        // Create LED indicators
-        lv_color_t led_colors[] = { lv_color_hex(0xff0000), lv_color_hex(0x00ff00), lv_color_hex(0x0000ff) };
-        for (int i = 0; i < 3; i++) {
-            lv_obj_t* led      = lv_led_create(led_row);
-            int32_t   led_size = screen_width < 480 ? 15 : (screen_width < 800 ? 20 : 25);
-            lv_obj_set_size(led, led_size, led_size);
-            lv_led_set_color(led, led_colors[i]);
-            lv_led_on(led); // Turn on all LEDs
-        }
-    }
-
-    // Status bar at bottom
-    lv_obj_t* status_bar = lv_obj_create(container);
-    lv_obj_set_size(status_bar, lv_pct(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(status_bar, lv_color_hex(0x0a0a0a), 0);
-    lv_obj_set_style_border_width(status_bar, 0, 0);
-    lv_obj_set_style_pad_all(status_bar, 8, 0);
-
-    lv_obj_t* status_label = lv_label_create(status_bar);
-    lv_label_set_text(status_label, "Status: Running | Touch: Enabled | FPS: 60");
-    lv_obj_set_style_text_font(status_label, normal_font, 0);
-    lv_obj_set_style_text_color(status_label, lv_color_hex(0x888888), 0);
-    lv_obj_center(status_label);
+/* Screen touch callback */
+static void touch_cb(lv_event_t *e)
+{
+    touch_counter++;
+    lv_label_set_text_fmt(counter_label, "Touches: %d", touch_counter);
+    
+    /* Get touch coordinates */
+    lv_point_t point;
+    lv_indev_get_point(lv_indev_active(), &point);
+    
+    /* Move preview to touch position (bounded) */
+    lv_obj_t *screen = lv_event_get_target(e);
+    lv_coord_t w = lv_obj_get_width(screen);
+    lv_coord_t h = lv_obj_get_height(screen);
+    
+    lv_coord_t x = point.x - 50;
+    lv_coord_t y = point.y - 50;
+    
+    /* Keep preview on screen */
+    x = LV_CLAMP(0, x, w - 100);
+    y = LV_CLAMP(0, y, h - 100);
+    
+    lv_obj_set_pos(color_preview, x, y);
 }
 
 int vb_init(void)
@@ -283,7 +251,7 @@ void print_usage(const char* progname)
     printf("Options:\n");
     printf("  -c, --connector <type>  Connector type (default: 0)\n");
     printf("  -l, --layer <id>        OSD layer ID (default: 1)\n");
-    printf("  -f, --format <format>   Color format (rgb565, rgb888, argb8888; default: argb8888)\n");
+    printf("  -f, --format <format>   Color format (l8, rgb565, rgb888, argb8888; default: rgb888)\n");
     printf("  -r, --rotate <deg>      Rotation angle (0, 90, 180, 270; default: 0)\n");
     printf("  -H, --help              Show this help message\n");
 }
@@ -291,7 +259,9 @@ void print_usage(const char* progname)
 // Parse color format from argument
 static lv_color_format_t parse_color_format(const char* format)
 {
-    if (strcmp(format, "rgb565") == 0) {
+    if (strcmp(format, "l8") == 0) {
+        return LV_COLOR_FORMAT_L8;
+    } else if (strcmp(format, "rgb565") == 0) {
         return LV_COLOR_FORMAT_RGB565;
     } else if (strcmp(format, "rgb888") == 0) {
         return LV_COLOR_FORMAT_RGB888;
@@ -307,6 +277,8 @@ static lv_color_format_t parse_color_format(const char* format)
 static const char* color_format_to_string(lv_color_format_t format)
 {
     switch (format) {
+    case LV_COLOR_FORMAT_L8:
+        return "L8";
     case LV_COLOR_FORMAT_RGB565:
         return "RGB565";
     case LV_COLOR_FORMAT_RGB888:
@@ -420,7 +392,7 @@ int main(int argc, char* argv[])
     lv_k230_touch_init(0);
 
     // Create demo widgets
-    create_demo_widgets(lv_scr_act());
+    lv_demo_touch_simple();
     printf("Demo widgets created\n");
     printf("Press Ctrl+C to exit...\n");
 
