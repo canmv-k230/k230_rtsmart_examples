@@ -3,6 +3,7 @@ include ../mkenv.mk
 subdirs-y :=
 
 subdirs-$(CONFIG_RTT_INTEGRATED_EXAMPLES_SMART_IPC)	+= smart_ipc
+subdirs-$(CONFIG_RTT_INTEGRATED_EXAMPLES_MULTSOURCE_AI_ANALYZER)	+= multisource_ai_analyzer
 
 .PHONY: all clean distclean
 
