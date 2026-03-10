@@ -310,13 +310,13 @@ int UVC_PipeLine::Create()
     // -----------------------------------------------------------------------------------------------
 
     // ---------------------------- 初始化并启动 UVC 采集 -------------------------------------------
-    ret = uvc_init(&init_format);
+    ret = uvc_host_init(&init_format);
     if (ret) {
-        printf("uvc_init fail\n");
+        printf("uvc_host_init fail\n");
         return -1;
     }
 
-    ret = uvc_start_stream();
+    ret = uvc_host_start_stream();
     if (ret) {
         printf("uvc start stream fail\n");
         return -1;
@@ -341,9 +341,9 @@ int UVC_PipeLine::GetFrame(DumpRes &dump_res) {
     memset(&yuv420sp_frame_info, 0, sizeof(k_video_frame_info));
 
     // 获取一帧 UVC 视频帧（带超时 5000ms）
-    ret = uvc_get_frame(&cur_frame, 5000);
+    ret = uvc_host_get_frame(&cur_frame, 5000);
     if (ret) {
-        printf("uvc_get_frame fail\n");
+        printf("uvc_host_get_frame fail\n");
         return -1;
     }
 
@@ -409,9 +409,9 @@ int UVC_PipeLine::ReleaseFrame(DumpRes &dump_res) {
         printf("kd_mpi_vdec_release_frame failed. %d\n", ret);
     }
     //释放 UVC 帧资源
-    ret = uvc_put_frame(&cur_frame);
+    ret = uvc_host_put_frame(&cur_frame);
     if (ret) {
-        printf("uvc_put_frame fail\n");
+        printf("uvc_host_put_frame fail\n");
         return -1;
     }
     return ret;
@@ -439,7 +439,7 @@ int UVC_PipeLine::Destroy() {
     int ret = 0;
 
     // 停止 UVC 采集
-    uvc_exit();
+    uvc_host_exit();
 
     // 禁用 VO 视频层
     ret = kd_mpi_vo_disable_layer(uvc_vo_id);

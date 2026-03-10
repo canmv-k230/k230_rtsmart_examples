@@ -25,24 +25,29 @@ int UVCDataSource::open(const std::string& url,int fps, const DataSourceCallback
     int origin_w = m_width;
     int origin_h = m_height;
 
-    struct uvc_format format = {m_width, m_height, m_isJpeg, 0};
+    struct uvc_format format = {
+        m_width,
+        m_height,
+        m_isJpeg ? USBH_VIDEO_FOURCC_MJPEG : USBH_VIDEO_FOURCC_YUY2,
+        0
+    };
     //Initial attempt to initialize UVC
-    ret = uvc_init(&format);
+    ret = uvc_host_init(&format);
     if (ret == 0 && (format.width < origin_w || format.height < origin_h)) {
         printf("UVCDataSource: Resolution %dx%d < target %dx%d. Retrying...\n",
                format.width, format.height, origin_w, origin_h);
 
         // Release resources from the failed attempt
-        uvc_exit();
+        uvc_host_exit();
 
         // Force reset to standard 1080P as requested and retry
         format.width = 1920;
         format.height = 1080;
-        ret = uvc_init(&format);
+        ret = uvc_host_init(&format);
     }
 
     if (ret != 0) {
-        printf("UVCDataSource: uvc_init failed\n");
+        printf("UVCDataSource: uvc_host_init failed\n");
         return -1;
     }
 
@@ -64,7 +69,7 @@ int UVCDataSource::open(const std::string& url,int fps, const DataSourceCallback
 void UVCDataSource::close() {
     stop();
     if (m_isOpened) {
-        uvc_exit();
+        uvc_host_exit();
         m_isOpened = false;
     }
 }
@@ -75,7 +80,7 @@ int UVCDataSource::start()
         return -1;
     }
 
-    if (uvc_start_stream() != 0) {
+    if (uvc_host_start_stream() != 0) {
         m_isDelivering.store(false);
         return -1;
     }
@@ -110,14 +115,14 @@ void UVCDataSource::_uvc_pull_loop() {
     while (m_isDelivering.load(std::memory_order_relaxed)) {
         struct uvc_frame frame;
         // 500ms timeout
-        ret = uvc_get_frame(&frame, 500);
+        ret = uvc_host_get_frame(&frame, 500);
         if (ret != 0) {
             continue;
         }
 
         _deliver_frame(frame.v_stream);
 
-        uvc_put_frame(&frame);
+        uvc_host_put_frame(&frame);
     }
 
     // 发送 EOF 标志

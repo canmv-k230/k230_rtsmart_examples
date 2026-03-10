@@ -28,6 +28,9 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdbool.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <sys/mman.h>
 #include <signal.h>
 
@@ -46,31 +49,34 @@
 
 #include "mpi_uvc_api.h"
 
-#define PRIVATE_POLL_SZE                        (1920 * 1080 * 3 / 2) + (4096 * 2)
-#define PRIVATE_POLL_NUM                        (4)
-
 #define ALIGN_UP(x, align) (((x) + ((align) - 1)) & ~((align)-1))
+#define VO_POOL_BLOCK_COUNT 4
 #define OUTPUT_BUF_CNT 6
 
 typedef struct
 {
-    k_u64 layer_phy_addr;
-    k_pixel_format format;
-    k_vo_position offset;
-    k_vo_size act_size;
-    k_u32 size;
-    k_u32 stride;
-    k_u8 global_alptha;
+    int ch;
+    k_vo_layer_id chn_id;
+    bool is_mjpeg;
 
-    /* rotation via VO GSDMA */
-    k_gdma_rotation_e func;
+    bool vb_inited;
+    bool uvc_started;
+    bool vo_layer_enabled;
+    bool vo_pool_created;
+    bool vo_block_created;
+    bool vo_mapped;
+    bool vdec_pool_created;
+    bool vdec_attached;
+    bool vdec_created;
+    bool vdec_started;
+    bool vdec_bound;
 
-} layer_info;
-
-void display_hardware_init(void)
-{
-    /* Legacy VO reset/backlight is now handled by BSP / connector init. */
-}
+    k_s32 vo_poolid;
+    k_s32 vdec_poolid;
+    k_vb_blk_handle vo_block;
+    void *vo_vaddr;
+    k_u32 vo_map_size;
+} sample_uvc_runtime;
 
 int vb_init(void)
 {
@@ -96,20 +102,21 @@ out:
     return ret;
 }
 
-int vb_create_vo_pool(void)
+int vb_create_vo_pool(int width, int height)
 {
     k_s32 pool_id;
     k_vb_pool_config pool_config;
+    k_u32 frame_size = ALIGN_UP(width * height * 3 / 2, 0x1000);
 
     memset(&pool_config, 0, sizeof(pool_config));
-    pool_config.blk_cnt = PRIVATE_POLL_NUM;
-    pool_config.blk_size = PRIVATE_POLL_SZE;
+    pool_config.blk_cnt = VO_POOL_BLOCK_COUNT;
+    pool_config.blk_size = frame_size;
     pool_config.mode = VB_REMAP_MODE_NONE;
-    pool_id = kd_mpi_vb_create_pool(&pool_config);      // osd0 - 3 argb 320 x 240
+    pool_id = kd_mpi_vb_create_pool(&pool_config);
 
     if (VB_INVALID_POOLID == pool_id) {
         printf("create vo pool fail\n");
-        return -1;
+        return VB_INVALID_POOLID;
     }
 
     return pool_id;
@@ -118,7 +125,7 @@ int vb_create_vo_pool(void)
 k_s32 sample_connector_init(k_connector_type type)
 {
     k_u32 ret = 0;
-    k_s32 connector_fd;
+    k_s32 connector_fd = -1;
     k_u32 chip_id = 0x00;
     k_connector_type connector_type = type;
     k_connector_info connector_info;
@@ -155,44 +162,31 @@ k_s32 sample_connector_init(k_connector_type type)
     }
 
 out:
+    if (connector_fd >= 0) {
+        kd_mpi_connector_close(connector_fd);
+    }
     return ret;
 }
 
-/* Configure a VO video layer using the new k_vo_layer_attr / kd_mpi_vo APIs. */
-static int vo_creat_layer(k_vo_layer_id layer_id, layer_info *info)
+static int sample_vo_layer_start(k_vo_layer_id layer_id, int width, int height, bool rotation)
 {
     k_vo_layer_attr attr;
 
-    if (!info) {
-        return -1;
-    }
-
-    /* For this sample we only support video layers 1..3. */
     if (layer_id < K_VO_LAYER_VIDEO1 || layer_id > K_VO_LAYER_VIDEO3) {
         printf("input layer id %d not supported\n", layer_id);
         return -1;
     }
 
     memset(&attr, 0, sizeof(attr));
-
-    attr.layer_id       = layer_id;
-    attr.position.x     = info->offset.x;
-    attr.position.y     = info->offset.y;
-    attr.img_size.width  = info->act_size.width;
-    attr.img_size.height = info->act_size.height;
-
-    /* This sample only uses NV12 (YUV420SP). */
-    if (info->format != PIXEL_FORMAT_YUV_SEMIPLANAR_420) {
-        printf("input pix format failed, expect NV12\n");
-        return -1;
-    }
-    attr.pixel_format   = info->format;
-    attr.func           = info->func;
-    attr.rot_buf_nr     = (attr.func != GDMA_ROTATE_DEGREE_0) ? 2 : 0;
-    attr.global_alpha   = info->global_alptha;
-
-    /* size in bytes of one NV12 frame (used later for munmap). */
-    info->size = info->act_size.height * info->act_size.width * 3 / 2;
+    attr.layer_id = layer_id;
+    attr.position.x = 0;
+    attr.position.y = 0;
+    attr.img_size.width = width;
+    attr.img_size.height = height;
+    attr.pixel_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+    attr.func = rotation ? GDMA_ROTATE_DEGREE_270 : GDMA_ROTATE_DEGREE_0;
+    attr.rot_buf_nr = rotation ? 2 : 0;
+    attr.global_alpha = 0xff;
 
     if (kd_mpi_vo_set_layer_attr(layer_id, &attr) != K_SUCCESS) {
         printf("kd_mpi_vo_set_layer_attr failed\n");
@@ -207,72 +201,57 @@ static int vo_creat_layer(k_vo_layer_id layer_id, layer_info *info)
     return 0;
 }
 
-k_vb_blk_handle vo_insert_frame(k_video_frame_info *vf_info, void **pic_vaddr)
+static int sample_vo_prepare_frame(sample_uvc_runtime *rt, k_video_frame_info *vf_info,
+                                   int width, int height)
 {
     k_u64 phys_addr = 0;
-    k_u32 *virt_addr;
-    k_vb_blk_handle handle;
-    k_s32 size = 0;
+    k_u32 y_size;
+    k_u32 frame_size;
 
-    if (vf_info == NULL)
-        return K_FALSE;
-
-    if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_ABGR_8888 || vf_info->v_frame.pixel_format == PIXEL_FORMAT_ARGB_8888)
-        size = vf_info->v_frame.height * vf_info->v_frame.width * 4;
-    else if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_RGB_565 || vf_info->v_frame.pixel_format == PIXEL_FORMAT_BGR_565)
-        size = vf_info->v_frame.height * vf_info->v_frame.width * 2;
-    else if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_ABGR_4444 || vf_info->v_frame.pixel_format == PIXEL_FORMAT_ARGB_4444)
-        size = vf_info->v_frame.height * vf_info->v_frame.width * 2;
-    else if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_RGB_888 || vf_info->v_frame.pixel_format == PIXEL_FORMAT_BGR_888)
-        size = vf_info->v_frame.height * vf_info->v_frame.width * 3;
-    else if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_ARGB_1555 || vf_info->v_frame.pixel_format == PIXEL_FORMAT_ABGR_1555)
-        size = vf_info->v_frame.height * vf_info->v_frame.width * 2;
-    else if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_YVU_PLANAR_420 ||
-             vf_info->v_frame.pixel_format == PIXEL_FORMAT_YUV_SEMIPLANAR_420 ||
-             vf_info->v_frame.pixel_format == PIXEL_FORMAT_YVU_SEMIPLANAR_420)
-        size = vf_info->v_frame.height * vf_info->v_frame.width * 3 / 2;
-
-    size = size + 4096;         // 强制4K ，后边得删了
-
-    handle = kd_mpi_vb_get_block(vf_info->pool_id, size, NULL);
-    if (handle == VB_INVALID_HANDLE) {
-        printf("%s get vb block error\n", __func__);
-        return K_FAILED;
+    if (!rt || !vf_info) {
+        return -1;
     }
 
-    phys_addr = kd_mpi_vb_handle_to_phyaddr(handle);
+    y_size = width * height;
+    frame_size = ALIGN_UP(y_size * 3 / 2, 0x1000);
+
+    memset(vf_info, 0, sizeof(*vf_info));
+    vf_info->pool_id = rt->vo_poolid;
+    vf_info->mod_id = K_ID_VO;
+    vf_info->v_frame.width = width;
+    vf_info->v_frame.height = height;
+    vf_info->v_frame.stride[0] = width;
+    vf_info->v_frame.stride[1] = width;
+    vf_info->v_frame.pixel_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+
+    rt->vo_block = kd_mpi_vb_get_block(rt->vo_poolid, frame_size, NULL);
+    if (rt->vo_block == VB_INVALID_HANDLE) {
+        printf("%s get vb block error\n", __func__);
+        return -1;
+    }
+
+    phys_addr = kd_mpi_vb_handle_to_phyaddr(rt->vo_block);
     if (phys_addr == 0) {
         printf("%s get phys addr error\n", __func__);
-        return K_FAILED;
+        kd_mpi_vb_release_block(rt->vo_block);
+        rt->vo_block = VB_INVALID_HANDLE;
+        return -1;
     }
 
-    virt_addr = (k_u32 *)kd_mpi_sys_mmap(phys_addr, size);
-    // virt_addr = (k_u32 *)kd_mpi_sys_mmap_cached(phys_addr, size);
-
-    if (virt_addr == NULL) {
+    rt->vo_vaddr = kd_mpi_sys_mmap(phys_addr, frame_size);
+    if (rt->vo_vaddr == NULL) {
         printf("%s mmap error\n", __func__);
-        return K_FAILED;
+        kd_mpi_vb_release_block(rt->vo_block);
+        rt->vo_block = VB_INVALID_HANDLE;
+        return -1;
     }
 
-    vf_info->mod_id = K_ID_VO;
     vf_info->v_frame.phys_addr[0] = phys_addr;
-    if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_YVU_PLANAR_420) {
-        vf_info->v_frame.phys_addr[1] = phys_addr + (vf_info->v_frame.height * vf_info->v_frame.stride[0]);
-        vf_info->v_frame.phys_addr[2] = phys_addr + (vf_info->v_frame.height * vf_info->v_frame.stride[0]) +
-            (vf_info->v_frame.height * vf_info->v_frame.stride[0] / 4);
-    } else if (vf_info->v_frame.pixel_format == PIXEL_FORMAT_YUV_SEMIPLANAR_420 ||
-               vf_info->v_frame.pixel_format == PIXEL_FORMAT_YVU_SEMIPLANAR_420) {
-        vf_info->v_frame.phys_addr[1] = phys_addr + (vf_info->v_frame.height * vf_info->v_frame.stride[0]);
-    }
-
-    *pic_vaddr = virt_addr;
-
-    return handle;
-}
-
-k_s32 vo_release_frame(k_vb_blk_handle handle)
-{
-    return kd_mpi_vb_release_block(handle);
+    vf_info->v_frame.phys_addr[1] = phys_addr + y_size;
+    rt->vo_map_size = frame_size;
+    rt->vo_block_created = true;
+    rt->vo_mapped = true;
+    return 0;
 }
 
 static k_s32 vb_create_vdec_pool(int width, int height)
@@ -313,6 +292,41 @@ void yuyv_to_nv12(const char *yuyv, char *nv12, int width, int height) {
     }
 }
 
+void uyvy_to_nv12(const char *uyvy, char *nv12, int width, int height) {
+    char *y_plane = nv12;
+    char *uv_plane = nv12 + width * height;
+
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i += 2) {
+            int index = j * width * 2 + i * 2;
+
+            y_plane[j * width + i] = uyvy[index + 1];
+            y_plane[j * width + i + 1] = uyvy[index + 3];
+
+            if (j % 2 == 0) {
+                uv_plane[(j / 2) * width + i] = uyvy[index + 0];
+                uv_plane[(j / 2) * width + i + 1] = uyvy[index + 2];
+            }
+        }
+    }
+}
+
+void i420_to_nv12(const char *i420, char *nv12, int width, int height) {
+    int y_size = width * height;
+    int uv_plane_size = y_size / 4;
+    const unsigned char *y = (const unsigned char *)i420;
+    const unsigned char *u = y + y_size;
+    const unsigned char *v = u + uv_plane_size;
+    unsigned char *dst_y = (unsigned char *)nv12;
+    unsigned char *dst_uv = dst_y + y_size;
+
+    memcpy(dst_y, y, y_size);
+    for (int i = 0; i < uv_plane_size; i++) {
+        dst_uv[i * 2] = u[i];
+        dst_uv[i * 2 + 1] = v[i];
+    }
+}
+
 static k_s32 sample_vdec_bind_vo(k_u32 chn_id)
 {
     k_mpp_chn vdec_mpp_chn;
@@ -343,223 +357,390 @@ static k_s32 sample_vdec_unbind_vo(k_u32 chn_id)
     return kd_mpi_sys_unbind(&vdec_mpp_chn, &vvo_mpp_chn);
 }
 
-static bool exit_flag;
+static volatile sig_atomic_t exit_flag;
 
 static void sig_handler(int sig_no) {
+    (void)sig_no;
+    exit_flag = 1;
+}
 
-    exit_flag = true;
+static int parse_fourcc_arg(const char *arg, unsigned int *fourcc)
+{
+    char *endptr = NULL;
+    unsigned long value;
 
-    printf("exit sig = %d\n", sig_no);
+    if (!arg || !fourcc) {
+        return -1;
+    }
+
+    if (!strcmp(arg, "YUY2")) {
+        *fourcc = USBH_VIDEO_FOURCC_YUY2;
+        return 0;
+    }
+    if (!strcmp(arg, "UYVY")) {
+        *fourcc = USBH_VIDEO_FOURCC_UYVY;
+        return 0;
+    }
+    if (!strcmp(arg, "NV12")) {
+        *fourcc = USBH_VIDEO_FOURCC_NV12;
+        return 0;
+    }
+    if (!strcmp(arg, "I420")) {
+        *fourcc = USBH_VIDEO_FOURCC_I420;
+        return 0;
+    }
+    if (!strcmp(arg, "MJPEG") || !strcmp(arg, "MJPG")) {
+        *fourcc = USBH_VIDEO_FOURCC_MJPEG;
+        return 0;
+    }
+
+    value = strtoul(arg, &endptr, 0);
+    if ((endptr != arg) && (*endptr == '\0') && (value <= 0xffffffffUL)) {
+        *fourcc = (unsigned int)value;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int parse_int_arg(const char *arg, int *value)
+{
+    char *endptr = NULL;
+    long tmp;
+
+    if (!arg || !value) {
+        return -1;
+    }
+
+    errno = 0;
+    tmp = strtol(arg, &endptr, 0);
+    if (errno || endptr == arg || *endptr != '\0' || tmp < INT_MIN || tmp > INT_MAX) {
+        return -1;
+    }
+
+    *value = (int)tmp;
+    return 0;
+}
+
+static const char *fourcc_to_str(unsigned int fourcc, char text[5])
+{
+    text[0] = (char)(fourcc & 0xff);
+    text[1] = (char)((fourcc >> 8) & 0xff);
+    text[2] = (char)((fourcc >> 16) & 0xff);
+    text[3] = (char)((fourcc >> 24) & 0xff);
+    text[4] = '\0';
+
+    for (int i = 0; i < 4; i++) {
+        if (!isprint((unsigned char)text[i])) {
+            text[i] = '.';
+        }
+    }
+
+    return text;
+}
+
+static void print_usage(void)
+{
+    printf("Usage: ./sample_uvc [connector_type] [rotation] [fourcc] [width] [height] [total_frame]\n");
+    printf("  [fourcc] supports: YUY2 UYVY NV12 I420 MJPEG (or numeric, e.g. 0x47504a4d)\n");
+}
+
+static int sample_copy_raw_to_nv12(unsigned int fourcc, const struct uvc_frame *frame,
+                                   void *dst, int width, int height)
+{
+    switch (fourcc) {
+    case USBH_VIDEO_FOURCC_YUY2:
+        yuyv_to_nv12(frame->userptr, (char *)dst, width, height);
+        return 0;
+    case USBH_VIDEO_FOURCC_UYVY:
+        uyvy_to_nv12(frame->userptr, (char *)dst, width, height);
+        return 0;
+    case USBH_VIDEO_FOURCC_NV12:
+        memcpy(dst, frame->userptr, width * height * 3 / 2);
+        return 0;
+    case USBH_VIDEO_FOURCC_I420:
+        i420_to_nv12(frame->userptr, (char *)dst, width, height);
+        return 0;
+    default:
+        printf("unsupported uncompressed fourcc: 0x%08x\n", fourcc);
+        return -1;
+    }
+}
+
+static int sample_vdec_start(sample_uvc_runtime *rt, int width, int height)
+{
+    k_vdec_chn_attr attr;
+    int ret;
+
+    rt->vdec_poolid = vb_create_vdec_pool(width, height);
+    if (rt->vdec_poolid == VB_INVALID_POOLID) {
+        printf("fail to create vdec pool\n");
+        return -1;
+    }
+    rt->vdec_pool_created = true;
+
+    ret = kd_mpi_vdec_attach_vb_pool(rt->ch, rt->vdec_poolid);
+    if (ret) {
+        printf("kd_mpi_vdec_attach_vb_pool fail, ret = %d\n", ret);
+        return ret;
+    }
+    rt->vdec_attached = true;
+
+    memset(&attr, 0, sizeof(attr));
+    attr.pic_width = width;
+    attr.pic_height = height;
+    attr.stream_buf_size = ALIGN_UP(width * height, 0x1000);
+    attr.type = K_PT_JPEG;
+
+    ret = kd_mpi_vdec_create_chn(rt->ch, &attr);
+    if (ret) {
+        printf("kd_mpi_vdec_create_chn fail, ret = %d\n", ret);
+        return ret;
+    }
+    rt->vdec_created = true;
+
+    ret = kd_mpi_vdec_start_chn(rt->ch);
+    if (ret) {
+        printf("kd_mpi_vdec_start_chn fail, ret = %d\n", ret);
+        return ret;
+    }
+    rt->vdec_started = true;
+
+    ret = sample_vdec_bind_vo(rt->chn_id);
+    if (ret) {
+        printf("sample_vdec_bind_vo fail, ret = %d\n", ret);
+        return ret;
+    }
+    rt->vdec_bound = true;
+
+    return 0;
+}
+
+static void sample_cleanup(sample_uvc_runtime *rt)
+{
+    if (rt->vdec_bound) {
+        sample_vdec_unbind_vo(rt->chn_id);
+        rt->vdec_bound = false;
+    }
+    if (rt->vdec_started) {
+        kd_mpi_vdec_stop_chn(rt->ch);
+        rt->vdec_started = false;
+    }
+    if (rt->vdec_created) {
+        kd_mpi_vdec_destroy_chn(rt->ch);
+        rt->vdec_created = false;
+    }
+    if (rt->vdec_attached) {
+        kd_mpi_vdec_detach_vb_pool(rt->ch);
+        rt->vdec_attached = false;
+    }
+    if (rt->vdec_pool_created) {
+        vb_destroy_vdec_pool(rt->vdec_poolid);
+        rt->vdec_pool_created = false;
+        rt->vdec_poolid = VB_INVALID_POOLID;
+    }
+
+    if (rt->vo_layer_enabled) {
+        kd_mpi_vo_disable_layer(rt->chn_id);
+        rt->vo_layer_enabled = false;
+    }
+
+    if (rt->uvc_started) {
+        uvc_host_exit();
+        rt->uvc_started = false;
+    }
+
+    if (rt->vo_mapped) {
+        kd_mpi_sys_munmap(rt->vo_vaddr, rt->vo_map_size);
+        rt->vo_mapped = false;
+        rt->vo_vaddr = NULL;
+        rt->vo_map_size = 0;
+    }
+    if (rt->vo_block_created) {
+        kd_mpi_vb_release_block(rt->vo_block);
+        rt->vo_block_created = false;
+        rt->vo_block = VB_INVALID_HANDLE;
+    }
+    if (rt->vo_pool_created) {
+        kd_mpi_vb_destory_pool(rt->vo_poolid);
+        rt->vo_pool_created = false;
+        rt->vo_poolid = VB_INVALID_POOLID;
+    }
+
+    if (rt->vb_inited) {
+        kd_mpi_vb_exit();
+        rt->vb_inited = false;
+    }
 }
 
 int main(int argc, char **argv)
 {
-    int ret, width, height, ch = 0;
+    int ret = 0;
+    int width, height;
     int total_frame;
-    void *pic_vaddr = NULL;
-    k_vo_layer_id chn_id = K_VO_LAYER_VIDEO1;
+    int frame_num = 0;
+    char input_fourcc_text[5];
+    char negotiated_fourcc_text[5];
     k_connector_type type;
-    k_video_frame_info vf_info;
-    layer_info info;
-    k_vb_blk_handle block;
     bool rotation;
-    unsigned char is_jpeg;
-    k_s32 vdec_poolid;
-    k_s32 vo_poolid;
+    struct uvc_format format = { 0 };
+    k_video_frame_info vf_info;
+    sample_uvc_runtime rt = {
+        .ch = 0,
+        .chn_id = K_VO_LAYER_VIDEO1,
+        .vo_poolid = VB_INVALID_POOLID,
+        .vdec_poolid = VB_INVALID_POOLID,
+        .vo_block = VB_INVALID_HANDLE,
+    };
 
     if (argc != 7) {
-        printf("Usage: ./sample_uvc [connector_type] [rotation] [is_jpeg] [width] [height]"
-               "[total_frame]\n");
+        print_usage();
         return -1;
     }
 
-    type = atoi(argv[1]);
-    rotation = atoi(argv[2]);
-    is_jpeg = (unsigned char)atoi(argv[3]);
-    width = atoi(argv[4]);
-    height = atoi(argv[5]);
-    total_frame = atoi(argv[6]);
-    printf("type = %d, rotation = %d, is_jpeg = %d, (%d X %d) = %d frame\n",
-           type, rotation, is_jpeg, width, height, total_frame);
+    {
+        int tmp_type;
+        int tmp_rotation;
 
-    exit_flag = false;
+        if (parse_int_arg(argv[1], &tmp_type) || parse_int_arg(argv[2], &tmp_rotation)) {
+            print_usage();
+            return -1;
+        }
+        type = (k_connector_type)tmp_type;
+        rotation = (tmp_rotation != 0);
+    }
+
+    if (parse_fourcc_arg(argv[3], &format.fourcc)) {
+        printf("invalid fourcc: %s\n", argv[3]);
+        print_usage();
+        return -1;
+    }
+    if (parse_int_arg(argv[4], &width) || parse_int_arg(argv[5], &height) || parse_int_arg(argv[6], &total_frame) ||
+        width <= 0 || height <= 0 || total_frame <= 0) {
+        print_usage();
+        return -1;
+    }
+
+    printf("type = %d, rotation = %d, fourcc = %s (0x%08x), (%d X %d) = %d frame\n",
+           type, rotation, fourcc_to_str(format.fourcc, input_fourcc_text),
+           format.fourcc, width, height, total_frame);
+    rt.is_mjpeg = (format.fourcc == USBH_VIDEO_FOURCC_MJPEG);
+
+    exit_flag = 0;
     signal(SIGINT, sig_handler);
     signal(SIGPIPE, SIG_IGN);
 
     ret = vb_init();
     if (ret) {
-        return -1;
+        goto cleanup;
+    }
+    rt.vb_inited = true;
+
+    format.width = width;
+    format.height = height;
+    ret = uvc_host_init(&format);
+    if (ret) {
+        printf("uvc_host_init fail\n");
+        goto cleanup;
     }
 
-    /* init for uvc part */
-    {
-        struct uvc_format format = {width, height, is_jpeg, 0};
+    ret = uvc_host_start_stream();
+    if (ret) {
+        printf("uvc start stream fail\n");
+        goto cleanup;
+    }
+    rt.uvc_started = true;
 
-        ret = uvc_init(&format);
-        if (ret) {
-            printf("uvc_init fail\n");
-            goto err0;
-        }
+    width = format.width;
+    height = format.height;
+    printf("uvc resolution is (%d X %d), negotiated fourcc=%s (0x%08x)\n",
+           width, height, fourcc_to_str(format.fourcc, negotiated_fourcc_text),
+           format.fourcc);
 
-        ret = uvc_start_stream();
-        if (ret) {
-            printf("uvc start stream fail\n");
-            goto err0;
-        }
-
-        width = format.width;
-        height = format.height;
-        printf("uvc resolution is (%d X %d)\n", width, height);
+    ret = sample_connector_init(type);
+    if (ret) {
+        goto cleanup;
     }
 
-    /* init for vo part */
-    {
-        ret = sample_connector_init(type);
-        if (ret) {
-            goto err1;
-        }
-
-        vo_poolid = vb_create_vo_pool();
-        if (!vo_poolid) {
-            goto err1;
-        }
-
-        info.format        = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
-        info.global_alptha = 0xff;
-        info.offset.x      = 0;
-        info.offset.y      = 0;
-
-        /* act_size 始终使用采集到的帧尺寸，旋转仅通过 func 由 VO 硬件/GSDMA 处理。 */
-        info.act_size.width  = width;
-        info.act_size.height = height;
-        info.func            = rotation ? GDMA_ROTATE_DEGREE_270 : GDMA_ROTATE_DEGREE_0;
-
-        if (vo_creat_layer(chn_id, &info) != 0) {
-            goto err1;
-        }
-        memset(&vf_info, 0, sizeof(vf_info));
-        vf_info.pool_id              = vo_poolid;
-        vf_info.v_frame.width        = info.act_size.width;
-        vf_info.v_frame.height       = info.act_size.height;
-        vf_info.v_frame.stride[0]    = info.act_size.width;
-        vf_info.v_frame.pixel_format = info.format;
-        block = vo_insert_frame(&vf_info, &pic_vaddr);
+    if (sample_vo_layer_start(rt.chn_id, width, height, rotation) != 0) {
+        ret = -1;
+        goto cleanup;
     }
+    rt.vo_layer_enabled = true;
 
-    /* init for vdec part */
-    if (is_jpeg) {
-        k_vdec_chn_attr attr;
-
-        vdec_poolid = vb_create_vdec_pool(width, height);
-        if (vdec_poolid == VB_INVALID_POOLID) {
-            printf("fail to create vdec pool\n");
+    if (rt.is_mjpeg) {
+        ret = sample_vdec_start(&rt, width, height);
+        if (ret) {
+            goto cleanup;
+        }
+    } else {
+        rt.vo_poolid = vb_create_vo_pool(width, height);
+        if (rt.vo_poolid == VB_INVALID_POOLID) {
             ret = -1;
-            goto err2;
+            goto cleanup;
         }
+        rt.vo_pool_created = true;
 
-        ret = kd_mpi_vdec_attach_vb_pool(ch,vdec_poolid);
+        ret = sample_vo_prepare_frame(&rt, &vf_info, width, height);
         if (ret) {
-            printf("kd_mpi_vdec_attach_vb_pool fail, ret = %d\n", ret);
-            goto err3;
-        }
-
-        attr.pic_width = width;
-        attr.pic_height = height;
-        attr.stream_buf_size = ALIGN_UP(width * height, 0x1000);
-        attr.type = K_PT_JPEG;
-
-        ret = kd_mpi_vdec_create_chn(ch, &attr);
-        if (ret) {
-            printf("kd_mpi_vdec_create_chn fail, ret = %d\n", ret);
-            goto err3;
-        }
-
-        ret = kd_mpi_vdec_start_chn(ch);
-        if (ret) {
-            printf("kd_mpi_vdec_start_chn fail, ret = %d\n", ret);
-            goto err4;
-        }
-
-        ret = sample_vdec_bind_vo(chn_id);
-        if (ret) {
-            printf("sample_vdec_bind_vo fail, ret = %d\n", ret);
-            goto err5;
+            ret = -1;
+            goto cleanup;
         }
     }
 
-    {
-        int frame_num = 0;
+    while (!exit_flag) {
+        struct uvc_frame frame;
 
-        while (1) {
-            struct uvc_frame frame;
-
-            ret = uvc_get_frame(&frame, 5000);
-            if (ret) {
-                printf("uvc_get_frame fail\n");
-                break;
-            }
-
-            if (is_jpeg) {
-                ret = kd_mpi_vdec_send_stream(ch, &frame.v_stream, -1);
-                if (ret) {
-                    printf("kd_mpi_vdec_send_stream fail\n");
-                    break;
-                }
+        memset(&frame, 0, sizeof(frame));
+        ret = uvc_host_get_frame(&frame, 5000);
+        if (ret) {
+            if (!exit_flag) {
+                printf("uvc_host_get_frame fail\n");
             } else {
-                yuyv_to_nv12(frame.userptr, (char *)pic_vaddr, width, height);
-                ret = kd_mpi_vo_insert_frame(chn_id, &vf_info);
+                ret = 0;
+            }
+            break;
+        }
+
+        if (rt.is_mjpeg) {
+            ret = kd_mpi_vdec_send_stream(rt.ch, &frame.v_stream, -1);
+            if (ret) {
+                printf("kd_mpi_vdec_send_stream fail\n");
+            }
+        } else {
+            ret = sample_copy_raw_to_nv12(format.fourcc, &frame, rt.vo_vaddr, width, height);
+            if (!ret) {
+                ret = kd_mpi_vo_insert_frame(rt.chn_id, &vf_info);
                 if (ret) {
                     printf("kd_mpi_vo_insert_frame fail\n");
-                    break;
                 }
             }
+        }
 
-            ret = uvc_put_frame(&frame);
-            if (ret) {
-                printf("uvc_put_frame fail\n");
-                break;
-            }
-
-            if (++frame_num >= total_frame || exit_flag) {
-                break;
+        {
+            int put_ret = uvc_host_put_frame(&frame);
+            if (put_ret) {
+                printf("uvc_host_put_frame fail\n");
+                if (!ret) {
+                    ret = put_ret;
+                }
             }
         }
 
-        if (is_jpeg) {
-            sample_vdec_unbind_vo(chn_id);
+        if (ret) {
+            break;
         }
-        kd_mpi_vo_disable_layer(chn_id);
-        uvc_exit();
+
+        if (++frame_num >= total_frame) {
+            break;
+        }
     }
 
-    kd_mpi_sys_munmap(pic_vaddr, info.size + 4096);
-    vo_release_frame(block);
-    kd_mpi_vb_destory_pool(vo_poolid);
+cleanup:
+    sample_cleanup(&rt);
 
-    if (is_jpeg) {
-        kd_mpi_vdec_stop_chn(ch);
-        kd_mpi_vdec_detach_vb_pool(ch);
-        kd_mpi_vdec_destroy_chn(ch);
-        vb_destroy_vdec_pool(vdec_poolid);
+    if (ret) {
+        return ret;
     }
-
-    kd_mpi_vb_exit();
-
     return 0;
-
-err5:
-    kd_mpi_vdec_stop_chn(ch);
-err4:
-    kd_mpi_vdec_detach_vb_pool(ch);
-    kd_mpi_vdec_destroy_chn(ch);
-err3:
-    vb_destroy_vdec_pool(vdec_poolid);
-err2:
-    kd_mpi_vb_destory_pool(vo_poolid);
-err1:
-    uvc_exit();
-err0:
-    kd_mpi_vb_exit();
-
-    return ret;
 }
