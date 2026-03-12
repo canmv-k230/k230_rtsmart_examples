@@ -48,6 +48,7 @@
 #include "mpi_vdec_api.h"
 
 #include "mpi_uvc_api.h"
+#include "hal_utils.h"
 
 #define ALIGN_UP(x, align) (((x) + ((align) - 1)) & ~((align)-1))
 #define VO_POOL_BLOCK_COUNT 4
@@ -271,62 +272,6 @@ static k_s32 vb_destroy_vdec_pool(k_s32 vdec_poolid)
     return kd_mpi_vb_destory_pool(vdec_poolid);
 }
 
-void yuyv_to_nv12(const char *yuyv, char *nv12, int width, int height) {
-    char *y_plane = nv12;               // Y 平面
-    char *uv_plane = nv12 + width * height; // UV 交错平面
-
-    for (int j = 0; j < height; j++) {
-        for (int i = 0; i < width; i += 2) {
-            int index = j * width * 2 + i * 2; // YUYV 格式的索引
-
-            // Y 分量
-            y_plane[j * width + i] = yuyv[index];
-            y_plane[j * width + i + 1] = yuyv[index + 2];
-
-            // UV 分量（仅偶数行）
-            if (j % 2 == 0) {
-                uv_plane[(j / 2) * width + i] = yuyv[index + 1];     // U
-                uv_plane[(j / 2) * width + i + 1] = yuyv[index + 3]; // V
-            }
-        }
-    }
-}
-
-void uyvy_to_nv12(const char *uyvy, char *nv12, int width, int height) {
-    char *y_plane = nv12;
-    char *uv_plane = nv12 + width * height;
-
-    for (int j = 0; j < height; j++) {
-        for (int i = 0; i < width; i += 2) {
-            int index = j * width * 2 + i * 2;
-
-            y_plane[j * width + i] = uyvy[index + 1];
-            y_plane[j * width + i + 1] = uyvy[index + 3];
-
-            if (j % 2 == 0) {
-                uv_plane[(j / 2) * width + i] = uyvy[index + 0];
-                uv_plane[(j / 2) * width + i + 1] = uyvy[index + 2];
-            }
-        }
-    }
-}
-
-void i420_to_nv12(const char *i420, char *nv12, int width, int height) {
-    int y_size = width * height;
-    int uv_plane_size = y_size / 4;
-    const unsigned char *y = (const unsigned char *)i420;
-    const unsigned char *u = y + y_size;
-    const unsigned char *v = u + uv_plane_size;
-    unsigned char *dst_y = (unsigned char *)nv12;
-    unsigned char *dst_uv = dst_y + y_size;
-
-    memcpy(dst_y, y, y_size);
-    for (int i = 0; i < uv_plane_size; i++) {
-        dst_uv[i * 2] = u[i];
-        dst_uv[i * 2 + 1] = v[i];
-    }
-}
-
 static k_s32 sample_vdec_bind_vo(k_u32 chn_id)
 {
     k_mpp_chn vdec_mpp_chn;
@@ -445,28 +390,6 @@ static void print_usage(void)
     printf("  [fourcc] supports: YUY2 UYVY NV12 I420 MJPEG (or numeric, e.g. 0x47504a4d)\n");
 }
 
-static int sample_copy_raw_to_nv12(unsigned int fourcc, const struct uvc_frame *frame,
-                                   void *dst, int width, int height)
-{
-    switch (fourcc) {
-    case USBH_VIDEO_FOURCC_YUY2:
-        yuyv_to_nv12(frame->userptr, (char *)dst, width, height);
-        return 0;
-    case USBH_VIDEO_FOURCC_UYVY:
-        uyvy_to_nv12(frame->userptr, (char *)dst, width, height);
-        return 0;
-    case USBH_VIDEO_FOURCC_NV12:
-        memcpy(dst, frame->userptr, width * height * 3 / 2);
-        return 0;
-    case USBH_VIDEO_FOURCC_I420:
-        i420_to_nv12(frame->userptr, (char *)dst, width, height);
-        return 0;
-    default:
-        printf("unsupported uncompressed fourcc: 0x%08x\n", fourcc);
-        return -1;
-    }
-}
-
 static int sample_vdec_start(sample_uvc_runtime *rt, int width, int height)
 {
     k_vdec_chn_attr attr;
@@ -581,6 +504,8 @@ int main(int argc, char **argv)
     int frame_num = 0;
     char input_fourcc_text[5];
     char negotiated_fourcc_text[5];
+    uint64_t fps_last_ms = 0;
+    int fps_frames = 0;
     k_connector_type type;
     bool rotation;
     struct uvc_format format = { 0 };
@@ -656,6 +581,7 @@ int main(int argc, char **argv)
     printf("uvc resolution is (%d X %d), negotiated fourcc=%s (0x%08x)\n",
            width, height, fourcc_to_str(format.fourcc, negotiated_fourcc_text),
            format.fourcc);
+    fps_last_ms = utils_cpu_ticks_ms();
 
     ret = sample_connector_init(type);
     if (ret) {
@@ -708,7 +634,7 @@ int main(int argc, char **argv)
                 printf("kd_mpi_vdec_send_stream fail\n");
             }
         } else {
-            ret = sample_copy_raw_to_nv12(format.fourcc, &frame, rt.vo_vaddr, width, height);
+            ret = uvc_host_raw_to_nv12(&frame, rt.vo_vaddr, rt.vo_map_size);
             if (!ret) {
                 ret = kd_mpi_vo_insert_frame(rt.chn_id, &vf_info);
                 if (ret) {
@@ -717,18 +643,28 @@ int main(int argc, char **argv)
             }
         }
 
-        {
-            int put_ret = uvc_host_put_frame(&frame);
-            if (put_ret) {
-                printf("uvc_host_put_frame fail\n");
-                if (!ret) {
-                    ret = put_ret;
-                }
+        int put_ret = uvc_host_put_frame(&frame);
+        if (put_ret) {
+            printf("uvc_host_put_frame fail\n");
+            if (!ret) {
+                ret = put_ret;
             }
         }
 
         if (ret) {
             break;
+        }
+
+        fps_frames++;
+        uint64_t now_ms = utils_cpu_ticks_ms();
+        uint64_t elapsed_ms = now_ms - fps_last_ms;
+
+        if (elapsed_ms >= 1000ULL) {
+            double fps = (double)fps_frames * 1000.0 / (double)elapsed_ms;
+            printf("fps: %.2f (%d frames / %llums)\n",
+                   fps, fps_frames, (unsigned long long)elapsed_ms);
+            fps_last_ms = now_ms;
+            fps_frames = 0;
         }
 
         if (++frame_num >= total_frame) {
