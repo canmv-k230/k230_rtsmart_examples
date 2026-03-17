@@ -16,7 +16,7 @@ namespace fs = std::filesystem;
  * @param image_size   Input image size in CHW format
  * @param debug_mode   Debug level
  */
-Feature::Feature(char *kmodel_file,
+Feature::Feature(const char *kmodel_file,
                  FrameCHWSize image_size,
                  int debug_mode)
     : AIBase(kmodel_file, "Feature", debug_mode)

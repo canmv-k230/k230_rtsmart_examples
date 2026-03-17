@@ -23,7 +23,7 @@ public:
      * @param isp_shape   Input image size in CHW format
      * @param debug_mode  Debug mode (0: no log, 1: timing only, 2: full logs)
      */
-    Feature(char *kmodel_file, FrameCHWSize isp_shape, int debug_mode);
+    Feature(const char *kmodel_file, FrameCHWSize isp_shape, int debug_mode);
 
     /**
      * @brief Destructor of Feature

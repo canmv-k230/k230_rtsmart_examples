@@ -99,60 +99,126 @@ cd /sdcard/app/examples/integrated_poc
 
 ### 运行命令格式
 
+仅需提供视频路径，其他参数全部可选!
+
 ```bash
-./multisource_ai_analyzer.elf <yolov8_kmodel> <score_thres> <nms_thres> <feature_kmodel> <track_high_thresh> <track_low_thresh> <new_track_thresh> <frame_buffer> <match_thresh> <proximity_thresh> <appearance_thresh> <lambda> <debug_mode> <video_path>
+./multisource_ai_analyzer.elf [OPTIONS] <video_path>
 ```
 
 ### 参数说明
 
+#### 必需参数
+
 | 参数 | 含义 | 示例值 | 说明 |
 |------|------|--------|------|
-| `yolov8_kmodel` | YOLOv8 检测模型路径 | `yolov8n_320.kmodel` | YOLOv8 目标检测的 kmodel 文件路径 |
-| `score_thres` | 目标检测置信度阈值 | `0.4` | 低于该阈值的检测结果将被过滤 |
-| `nms_thres` | 目标检测 NMS 阈值 | `0.6` | 非极大值抑制阈值，用于去除重复检测框 |
-| `feature_kmodel` | ReID 特征模型路径 | `feature.kmodel` | 外观特征提取的 kmodel 文件路径 |
-| `track_high_thresh` | 高置信度阈值 | `0.6` | 高于该值的检测被视为可靠目标，用于抑制低分检测引起的 ID 切换 |
-| `track_low_thresh` | 低置信度阈值 | `0.2` | 低于该值的检测将被丢弃，用于过滤 YOLO 的误检 |
-| `new_track_thresh` | 新建轨迹阈值 | `0.75` | 只有高于该值的检测才能生成新轨迹，较大的值可以减少错误轨迹初始化 |
-| `frame_buffer` | 轨迹缓冲大小 | `600` | 未匹配情况下轨迹的最大保留帧数 |
-| `match_thresh` | 最大匹配代价阈值 | `0.9` | IOU/距离超过该值视为不匹配 |
-| `proximity_thresh` | 邻近匹配阈值 | `0.3` | 中心距离或 IOU 阈值，数值越小匹配条件越严格 |
-| `appearance_thresh` | ReID 外观特征距离阈值 | `0.2` | 数值越小，外观匹配越严格 |
-| `lambda` | IOU/ReID 权重因子 | `0.99` | 越接近 1 越依赖 IOU，越接近 0 越依赖外观特征 |
-| `debug_mode` | 调试模式 | `0` | `0`=关闭，`1`=简单调试，`2`=详细调试 |
-| `video_path` | 视频源路径 | `rtsp://...` / `*.mp4` / `uvc` / `realtime` | 支持 RTSP 流、MP4 文件、UVC 摄像头、实时采集 |
+| video_path | 视频源路径 | rtsp://... / *.mp4 / uvc / realtime | 支持 RTSP 流、MP4 文件、UVC 摄像头、实时采集 |
+
+#### 可选参数
+
+| 参数 | 含义 | 默认值 | 说明 |
+|------|------|--------|------|
+| --det-model <path> | YOLOv8 检测模型路径 | yolov8n_320.kmodel | YOLOv8 目标检测的 kmodel 文件路径 |
+| --score-thres <float> | 目标检测置信度阈值 | 0.4 | 低于该阈值的检测结果将被过滤 |
+| --nms-thres <float> | 目标检测 NMS 阈值 | 0.6 | 非极大值抑制阈值，用于去除重复检测框 |
+| --reid-model <path> | ReID 特征模型路径 | feature.kmodel | 外观特征提取的 kmodel 文件路径 |
+| --track-high <float> | 高置信度阈值 | 0.6 | 高于该值的检测被视为可靠目标 |
+| --track-low <float> | 低置信度阈值 | 0.2 | 低于该值的检测将被丢弃 |
+| --new-track <float> | 新建轨迹阈值 | 0.75 | 只有高于该值的检测才能生成新轨迹 |
+| --frame-buffer <int> | 轨迹缓冲大小 | 600 | 未匹配情况下轨迹的最大保留帧数 |
+| --match-thresh <float> | 最大匹配代价阈值 | 0.9 | IOU/距离超过该值视为不匹配 |
+| --proximity <float> | 邻近匹配阈值 | 0.3 | 中心距离或 IOU 阈值 |
+| --appearance <float> | ReID 外观特征距离阈值 | 0.2 | 数值越小，外观匹配越严格 |
+| --lambda <float> | IOU/ReID 权重因子 | 0.99 | 越接近 1 越依赖 IOU |
+| --debug <0|1|2> | 调试模式 | 0 | 0=关闭，1=简单调试，2=详细调试 |
+| --help | 显示帮助信息 | - | 显示使用说明并退出 |
 
 ### 四种输入源启动示例
 
-> 💡 **提示**：RTSP 和 MP4 的地址需要根据实际情况修改，UVC 和 Realtime 使用固定参数无需修改。
-
-#### 1️⃣ RTSP 流输入
+##### RTSP 流输入
 
 ```bash
-./multisource_ai_analyzer.elf yolov8n_320.kmodel 0.4 0.6 feature.kmodel 0.6 0.2 0.75 600 0.9 0.3 0.2 0.99 0 "rtsp://192.168.1.100:554/stream1"
-```
-> ⚠️ 请将 `rtsp://192.168.1.100:554/stream1` 替换为你的实际 RTSP 流地址
+# 最简单用法 (全部使用默认值)
+./multisource_ai_analyzer.elf "rtsp://192.168.1.100:554/stream1"
 
-#### 2️⃣ MP4 文件输入
+# 自定义检测模型和阈值
+./multisource_ai_analyzer.elf --det-model yolov8m_640.kmodel --score-thres 0.6 "rtsp://192.168.1.100:554/stream1"
+```
+请将 rtsp://192.168.1.100:554/stream1 替换为你的实际 RTSP 流地址
+
+##### MP4 文件输入
 
 ```bash
-./multisource_ai_analyzer.elf yolov8n_320.kmodel 0.4 0.6 feature.kmodel 0.6 0.2 0.75 600 0.9 0.3 0.2 0.99 0 "test_video.mp4"
-```
-> ⚠️ 请将 `test_video.mp4` 替换为你的实际 MP4 文件路径
+# 使用默认参数
+./multisource_ai_analyzer.elf "test_video.mp4"
 
-#### 3️⃣ UVC 摄像头输入
+# 调整跟踪参数
+./multisource_ai_analyzer.elf --track-high 0.7 --track-low 0.3 --new-track 0.8 "test_video.mp4"
+```
+请将 test_video.mp4 替换为你的实际 MP4 文件路径
+
+##### UVC 摄像头输入
 
 ```bash
-./multisource_ai_analyzer.elf yolov8n_320.kmodel 0.4 0.6 feature.kmodel 0.6 0.2 0.75 600 0.9 0.3 0.2 0.99 0 "uvc"
-```
-> ✅ `uvc` 为固定参数，无需修改
+# 最简单用法
+./multisource_ai_analyzer.elf uvc
 
-#### 4️⃣ Realtime 原生采集
+# 启用调试模式
+./multisource_ai_analyzer.elf --debug 1 uvc
+```
+uvc 为固定参数，无需修改
+
+##### Realtime 原生采集
 
 ```bash
-./multisource_ai_analyzer.elf yolov8n_320.kmodel 0.4 0.6 feature.kmodel 0.6 0.2 0.75 600 0.9 0.3 0.2 0.99 0 "realtime"
+# 最简单用法
+./multisource_ai_analyzer.elf realtime
+
+# 自定义所有参数
+./multisource_ai_analyzer.elf --det-model yolov8n_320.kmodel --score-thres 0.5 --debug 1 realtime
 ```
-> ✅ `realtime` 为固定参数，无需修改
+realtime 为固定参数，无需修改
+
+### 查看帮助
+
+运行以下命令查看完整的参数说明:
+
+```bash
+./multisource_ai_analyzer.elf --help
+```
+
+输出示例:
+
+```
+Usage: multisource_ai_analyzer.elf [OPTIONS] <video_path>
+
+Required:
+  <video_path>              视频源路径，支持以下类型:
+                            - "realtime"   实时摄像头采集
+                            - "*.mp4"      MP4 视频文件
+                            - "UVC"        UVC 摄像头
+                            - "rtsp://*"   RTSP 网络视频流
+
+Optional:
+  --det-model <path>        YOLOv8 检测模型路径 (默认：yolov8n_320.kmodel)
+  --score-thres <float>     检测置信度阈值 (默认：0.4)
+  --nms-thres <float>       NMS 阈值 (默认：0.6)
+  --reid-model <path>       ReID 特征模型路径 (默认：feature.kmodel)
+  --track-high <float>      高置信度阈值 (默认：0.6)
+  --track-low <float>       低置信度阈值 (默认：0.2)
+  --new-track <float>       新建轨迹阈值 (默认：0.75)
+  --frame-buffer <int>      轨迹缓冲大小 (默认：600)
+  --match-thresh <float>    匹配代价阈值 (默认：0.9)
+  --proximity <float>       邻近匹配阈值 (默认：0.3)
+  --appearance <float>      外观特征距离阈值 (默认：0.2)
+  --lambda <float>          IOU/ReID 权重因子 (默认：0.99)
+  --debug <0|1|2>           调试模式 (默认：0)
+  --help                    显示此帮助信息
+
+Examples:
+  multisource_ai_analyzer.elf "rtsp://192.168.1.100:554/stream1"
+  multisource_ai_analyzer.elf --det-model yolov8n_320.kmodel --score-thres 0.5 "realtime"
+  multisource_ai_analyzer.elf --debug 1 --track-high 0.7 test.mp4
+```
 
 ---
 

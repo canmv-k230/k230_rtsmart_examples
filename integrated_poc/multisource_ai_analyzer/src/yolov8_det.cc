@@ -6,7 +6,7 @@
  * Initializes the YOLOv8 detection model, loads the kmodel, configures
  * preprocessing (ai2d), detection thresholds, and internal buffers.
  */
-YOLOv8Det::YOLOv8Det(char *kmodel_file,
+YOLOv8Det::YOLOv8Det(const char *kmodel_file,
                      float score_thres,
                      float nms_thres,
                      FrameCHWSize image_size,

@@ -1,3 +1,6 @@
+#ifndef __SETTING_H__
+#define __SETTING_H__
+
     #define DISPLAY_TYPE 'st7701'   // Select display type: 'st7701' or 'lt9611'
     #define RTSP_RTP_OVER_TCP 0     // 1=TCP, 0=UDP
 
@@ -48,3 +51,42 @@
     #define OSD_CHANNEL 4        // OSD color channels (e.g., ARGB)
 
 #endif
+
+#include <string>
+
+// 默认参数配置结构体
+struct AppSettings {
+    // 模型路径
+    std::string det_model_path = "yolov8n_320.kmodel";     // YOLOv8 检测模型
+    std::string reid_model_path = "feature.kmodel";        // ReID 特征模型
+    
+    // 检测参数
+    float score_thresh = 0.4f;         // 检测置信度阈值
+    float nms_thresh = 0.6f;           // NMS 阈值
+    
+    // 跟踪参数
+    float track_high_thresh = 0.6f;    // 高置信度阈值
+    float track_low_thresh = 0.2f;     // 低置信度阈值
+    float new_track_thresh = 0.75f;    // 新建轨迹阈值
+    int frame_buffer = 600;            // 轨迹缓冲大小
+    float match_thresh = 0.9f;         // 匹配代价阈值
+    float proximity_thresh = 0.3f;     // 邻近匹配阈值
+    float appearance_thresh = 0.2f;    // 外观特征距离阈值
+    float lambda = 0.99f;              // IOU/ReID 权重因子
+    
+    // 运行参数
+    int debug_mode = 0;                // 调试模式：0/1/2
+    std::string video_path;            // 视频源路径（必需）
+    
+    // 打印当前配置
+    void print() const;
+};
+
+// 命令行参数解析器
+class CmdLineParser {
+public:
+    static bool parse(int argc, char* argv[], AppSettings& settings);
+    static void print_usage(const char* name);
+};
+
+#endif // __SETTING_H__

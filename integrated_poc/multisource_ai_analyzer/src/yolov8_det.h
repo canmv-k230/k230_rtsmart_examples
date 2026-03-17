@@ -39,7 +39,7 @@ public:
      *                    1 - timing information only
      *                    2 - verbose debug information
      */
-    YOLOv8Det(char *kmodel_file, float score_thres, float nms_thres, FrameCHWSize image_size, int debug_mode);
+    YOLOv8Det(const char *kmodel_file, float score_thres, float nms_thres, FrameCHWSize image_size, int debug_mode);
     
     /**
      * @brief Destructor for YOLOv8Det

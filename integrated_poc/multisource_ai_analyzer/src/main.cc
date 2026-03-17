@@ -29,62 +29,38 @@ using std::endl;
 // 全局原子标志，用于安全地停止 ISP / 视频处理线程
 std::atomic<bool> isp_stop(false);
 
-/**
- * @brief 打印命令行使用说明
- * @param name 程序名称
- */
-void print_usage(const char *name)
-{
-    cout << "Usage: " << name << "<yolov8_kmodel> <score_thres> <nms_thres> <feature_kmodel> <track_high_thresh> <track_low_thresh> <new_track_thresh> <frame_buffer> <match_thresh> <proximity_thresh> <appearance_thresh> <appearance_thresh> <lambda> <debug_mode> <video_path>" << endl
-         << "Options:" << endl
-         << "  yolov8_kmodel            YOLOv8 检测模型的 kmodel 路径\n"
-         << "  score_thres              目标检测置信度阈值\n"
-         << "  nms_thres                目标检测 NMS 阈值\n"
-         << "  feature_kmodel           ReID（外观特征）模型的 kmodel 路径\n"
-         << "  track_high_thresh        高置信度阈值，高于该值的检测被视为可靠目标\n"
-         << "                           用于抑制低分检测引起的 ID 切换\n"
-         << "  track_low_thresh         低置信度阈值，低于该值的检测将被丢弃\n"
-         << "                           用于过滤 YOLO 的误检\n"
-         << "  new_track_thresh         新建轨迹阈值，只有高于该值的检测才能生成新轨迹\n"
-         << "                           较大的值可以减少错误轨迹初始化\n"
-         << "  frame_buffer             轨迹缓冲大小（未匹配情况下轨迹的最大保留帧数）\n"
-         << "  match_thresh             最大匹配代价阈值（IOU / 距离），超过该值视为不匹配\n"
-         << "  proximity_thresh         邻近匹配阈值（中心距离或 IOU）\n"
-         << "                           数值越小，匹配条件越严格\n"
-         << "  appearance_thresh        ReID 外观特征距离阈值\n"
-         << "                           数值越小，外观匹配越严格\n"
-         << "  lambda                   IOU / 距离 与 ReID 特征之间的权重因子\n"
-         << "                           越接近 1：越依赖 IOU；越接近 0：越依赖外观特征\n"
-         << "  debug_mode               调试模式：0 = 关闭，1 = 简单调试，2 = 详细调试\n"
-         << "  video_path               视频源路径，支持以下类型：\n"
-         << "                           - \"realtime\"   实时摄像头采集\n"
-         << "                           - \"*.mp4\"      MP4 视频文件\n"
-         << "                           - \"UVC\"        UVC 摄像头\n"
-         << "                           - \"rtsp://*\"   RTSP 网络视频流\n"
-         << endl;
-}
-
 template <typename T>
-int process_pipeline(char *argv[], T& pl)
+int process_pipeline(const AppSettings& settings, T& pl)
 {
-    // 1. 参数解析 (统一从 argv 获取)
-    int debug_mode = atoi(argv[13]);
+    // 1. 参数解析 (从 settings 获取)
+    int debug_mode = settings.debug_mode;
     FrameCHWSize image_size = {AI_FRAME_CHANNEL, AI_FRAME_HEIGHT, AI_FRAME_WIDTH};
     dims_t in_shape { 1, AI_FRAME_CHANNEL, AI_FRAME_HEIGHT, AI_FRAME_WIDTH };
 
     // 2. 初始化应用 (Detection, ReID, Tracker)
-    YOLOv8Det yolo_det_app(argv[1], atof(argv[2]), atof(argv[3]), image_size, debug_mode);
-    Feature feature_app(argv[4], image_size, debug_mode);
+    YOLOv8Det yolo_det_app(settings.det_model_path.c_str(), 
+                           settings.score_thresh, 
+                           settings.nms_thresh, 
+                           image_size, debug_mode);
+    Feature feature_app(settings.reid_model_path.c_str(), 
+                        image_size, debug_mode);
 
     BoTSORT tracker(
         true, // reid_enabled
-        atof(argv[5]), atof(argv[6]), atof(argv[7]), atol(argv[8]),
-        atof(argv[9]), atof(argv[10]), atof(argv[11]), 30, atof(argv[12])
+        settings.track_high_thresh, 
+        settings.track_low_thresh, 
+        settings.new_track_thresh, 
+        settings.frame_buffer,
+        settings.match_thresh, 
+        settings.proximity_thresh, 
+        settings.appearance_thresh, 
+        30, 
+        settings.lambda
     );
 
     // 3. 资源创建
     if (pl.Create()){
-        print_usage(argv[0]);
+        CmdLineParser::print_usage("multisource_ai_analyzer");
         return -1;
     }
 
@@ -162,21 +138,21 @@ int process_pipeline(char *argv[], T& pl)
  * @brief 视频处理线程函数
  *        负责视频采集、目标检测、特征提取、
  *        BoTSORT 跟踪以及 OSD 绘制
- * @param argv 命令行参数
+ * @param settings 应用配置参数
  */
-void video_proc(char *argv[])
+void video_proc(const AppSettings& settings)
 {
     // 调试级别
-    int debug_mode = atoi(argv[13]);
-    string video_path = argv[14];
+    int debug_mode = settings.debug_mode;
+    string video_path = settings.video_path;
     if (video_path == "realtime"){
         PipeLine pl(debug_mode);
-        process_pipeline(argv, pl);
+        process_pipeline(settings, pl);
     }
     else{
         DisplayType display_type = (DISPLAY_MODE == 1) ? DISPLAY_LCD : DISPLAY_HDMI;
-        VideoStreamPipeline pl(video_path, display_type, AI_FRAME_WIDTH, AI_FRAME_HEIGHT, 30, -1,RTSP_RTP_OVER_TCP);
-        process_pipeline(argv, pl);
+        VideoStreamPipeline pl(video_path, display_type, AI_FRAME_WIDTH, AI_FRAME_HEIGHT, 30, -1, RTSP_RTP_OVER_TCP);
+        process_pipeline(settings, pl);
     }
 }
 
@@ -189,17 +165,19 @@ int main(int argc, char *argv[])
               << " built at " << __DATE__ << " " << __TIME__
               << std::endl;
 
-    // 检查参数个数
-    if (argc != 15)
-    {
-        print_usage(argv[0]);
+    // 解析命令行参数
+    AppSettings settings;
+    if (!CmdLineParser::parse(argc, argv, settings)) {
         return -1;
     }
+    
+    // 可选：打印配置信息
+    settings.print();
 
     std::thread thread_isp;
 
     // 启动视频处理线程
-    thread_isp = std::thread(video_proc, argv);
+    thread_isp = std::thread(video_proc, std::ref(settings));
 
     // 等待按下 'q' 键退出
     while (getchar() != 'q')
