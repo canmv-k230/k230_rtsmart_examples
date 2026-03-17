@@ -12,7 +12,7 @@
 #define TEST_GPIO_PIN1      11  // 用于基本功能测试
 #define TEST_GPIO_PIN2      12  // 用于输入输出测试
 #define TEST_GPIO_PIN_IRQ   11  // 用于中断测试（必须小于64）
-#define TEST_GPIO_PIN_MAX   71  // 最大引脚号
+#define TEST_GPIO_PIN_MAX   63  // 最大引脚号; 71或63，某些板子无法测试到PMU GPIO
 #define TEST_GPIO_PIN_INVALID 72  // 无效引脚号
 
 // 测试结果统计
