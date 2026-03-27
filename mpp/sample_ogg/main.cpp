@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <iostream>
+#include <signal.h>
+#include <atomic>
+#include <unistd.h>
 using namespace std;
 #include "k_vb_comm.h"
 #include "k_video_comm.h"
@@ -23,6 +26,13 @@ static kd_ogg_muxer g_ogg_muxer = NULL;
 static kd_ogg_demuxer g_ogg_demuxer = NULL;
 static k_u32 g_audio_stream_pool_id = VB_INVALID_HANDLE;
 static k_audio_stream g_audio_stream;
+static std::atomic<bool> g_running(true);  // 程序运行标志
+
+// 信号处理函数 - 用于优雅退出
+void signal_handler(int signum) {
+    printf("\nReceived signal %d, exiting...\n", signum);
+    g_running = false;
+}
 
 // Create a VB pool for audio data
 static k_u32 audio_data_vb_create_pool()
@@ -69,6 +79,62 @@ static k_s32 audio_sample_vb_init() {
     audio_stream->phys_addr = kd_mpi_vb_handle_to_phyaddr(handle);
     audio_stream->stream = kd_mpi_sys_mmap(audio_stream->phys_addr, MAX_AUDIO_STREAM_SIZE);
     return ret;
+}
+
+// 清理资源函数
+static void cleanup_resources() {
+    k_s32 ret;
+    printf("Cleaning up resources...\n");
+    
+    // 销毁 Ogg muxer
+    if (g_ogg_muxer) {
+        kd_ogg_muxer_destroy(g_ogg_muxer);
+        g_ogg_muxer = NULL;
+        printf("Ogg muxer destroyed\n");
+    }
+    
+    // 销毁 Ogg demuxer
+    if (g_ogg_demuxer) {
+        kd_ogg_demuxer_destroy(g_ogg_demuxer);
+        g_ogg_demuxer = NULL;
+        printf("Ogg demuxer destroyed\n");
+    }
+    
+    // 释放 VB 块
+    if (g_audio_stream.stream) {
+        kd_mpi_sys_munmap(g_audio_stream.stream, g_audio_stream.len);
+        g_audio_stream.stream = NULL;
+
+        k_vb_blk_handle handle;
+        handle = kd_mpi_vb_phyaddr_to_handle(g_audio_stream.phys_addr);
+        if (handle == VB_INVALID_HANDLE)
+        {
+            printf("kd_mpi_vb_phyaddr_to_handle failed\n");
+            return ;
+        }
+
+        ret = kd_mpi_vb_release_block(handle);
+        if (ret != K_SUCCESS)
+        {
+            printf("kd_mpi_vb_release_block failed\n");
+            return ;
+        }
+    }
+    
+    // 销毁 VB 池
+    if (g_audio_stream_pool_id != VB_INVALID_HANDLE) {
+        kd_mpi_vb_destory_pool(g_audio_stream_pool_id);
+        g_audio_stream_pool_id = VB_INVALID_HANDLE;
+        printf("VB pool destroyed\n");
+    }
+    
+    // VB 退出
+    kd_mpi_vb_exit();
+    printf("VB exited\n");
+    
+    printf("Cleanup completed\n");
+
+    return ;
 }
 
 // Initialize Ogg muxer
@@ -259,7 +325,7 @@ static k_s32 audio_sample_ogg(k_audio_dev ai_dev, k_ai_chn ai_chn, k_audio_dev a
     kd_mpi_sys_bind(&adec_mpp_chn, &ao_mpp_chn);
 
     k_audio_stream audio_stream;
-    while (1)
+    while (g_running)  // 使用全局标志控制循环
     {
         if (K_SUCCESS != kd_mpi_aenc_get_stream(aenc_chn, &audio_stream, 100))
         {
@@ -271,6 +337,8 @@ static k_s32 audio_sample_ogg(k_audio_dev ai_dev, k_ai_chn ai_chn, k_audio_dev a
         kd_mpi_aenc_release_stream(aenc_chn, &audio_stream);
     }
 
+    printf("Exiting audio sample loop\n");
+    
     kd_mpi_sys_unbind(&ai_mpp_chn, &aenc_mpp_chn);
     kd_mpi_sys_unbind(&adec_mpp_chn, &ao_mpp_chn);
 
@@ -285,8 +353,25 @@ static k_s32 audio_sample_ogg(k_audio_dev ai_dev, k_ai_chn ai_chn, k_audio_dev a
 }
 
 int main() {
-    audio_sample_vb_init();
-    audio_sample_ogg(0, 0, 0, 0, 0, 0, SAMPLE_RATE, KD_AUDIO_BIT_WIDTH_16, K_PT_OPUS, K_FALSE);
+    printf("Starting Ogg audio sample program. Press Ctrl+C to exit.\n");
+    
+    // 注册信号处理函数
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    
+    if (audio_sample_vb_init() != K_SUCCESS) {
+        fprintf(stderr, "VB init failed\n");
+        cleanup_resources();
+        return 1;
+    }
+    
+    k_s32 ret = audio_sample_ogg(0, 0, 0, 0, 0, 0, SAMPLE_RATE, KD_AUDIO_BIT_WIDTH_16, K_PT_OPUS, K_FALSE);
+    
+    if (ret != K_SUCCESS) {
+        fprintf(stderr, "Audio sample failed with ret: %d\n", ret);
+    }
+    
+    cleanup_resources();
 
     return 0;
 }
