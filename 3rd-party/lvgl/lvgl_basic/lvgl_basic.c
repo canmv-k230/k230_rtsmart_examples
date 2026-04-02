@@ -416,6 +416,8 @@ int main(int argc, char* argv[])
         g_display = NULL;
     }
 
+    kd_display_deinit();
+
     printf("LVGL application exited gracefully\n");
 
 _failed_init_connector:
