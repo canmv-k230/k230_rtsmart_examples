@@ -47,6 +47,10 @@ if RTT_ENABLE_AI_EXAMPLES
         bool "Enable Build Triple Camera AI Programs"
         default n
 
+    config RTSMART_AI_EXAMPLES_ENABLE_TRIPLE_CAMERA_AI_RTSP
+        bool "Enable Build Triple Camera AI with RTSP Programs"
+        default n
+
     config RTSMART_AI_EXAMPLES_ENABLE_USAGE_AI2D
         bool "Enable Build AI2D Sample Programs"
         default n

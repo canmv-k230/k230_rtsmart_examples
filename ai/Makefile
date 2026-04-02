@@ -8,6 +8,7 @@ subdirs-$(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_FACE_DETECTION) += face_detection
 subdirs-$(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_FACE_RECOGNITION) += face_recognition
 subdirs-$(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_MULTI_OBJECT_TRACKING) += multi_object_tracking/botsort_track_app multi_object_tracking/bytetrack_track_app multi_object_tracking/deepsort_track_app multi_object_tracking/ocsort_track_app
 subdirs-$(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_TRIPLE_CAMERA_AI) += triple_camera_ai
+subdirs-$(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_TRIPLE_CAMERA_AI_RTSP) += triple_camera_ai_rtsp
 subdirs-$(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_USAGE_AI2D) += usage_ai2d
 subdirs-$(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_USAGE_KPU) += usage_kpu
 subdirs-$(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_UVC_FACE_DETECTION) += uvc_face_detection
