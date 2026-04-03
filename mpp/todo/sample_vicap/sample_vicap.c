@@ -977,8 +977,8 @@ chn_parse:
         printf("sample_vicap, the sensor type not supported!\n");
         return ret;
     }
-    display_width = connector_info.resolution.hdisplay;
-    display_height = connector_info.resolution.vdisplay;
+    display_width = connector_info.resolution.hactive;
+    display_height = connector_info.resolution.vactive;
     display_width = VICAP_ALIGN_UP(display_width, 16);
 
     for (int dev_num = 0; dev_num < VICAP_DEV_ID_MAX; dev_num++) {

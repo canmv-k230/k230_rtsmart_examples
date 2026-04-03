@@ -75,7 +75,6 @@ static k_s32 csc_vb_create_pool()
 
 static k_s32 init_layer_ex(sample_vo_info* vo_info)
 {
-    k_vo_pub_attr attr;
     k_u32 ret = 0;
 
     kd_mpi_vo_disable_layer(vo_info->layer_id);

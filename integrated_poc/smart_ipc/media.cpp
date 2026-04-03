@@ -766,9 +766,9 @@ int KdMedia::_init_connector()
     // connector init
     kd_mpi_connector_init(connector_fd, connector_info);
 
-    printf("connector init success, connector type: %d, width:%d,height:%d\n", connector_type, connector_info.resolution.hdisplay,connector_info.resolution.vdisplay);
-    wbc_width_ = connector_info.resolution.hdisplay;
-    wbc_height_ = connector_info.resolution.vdisplay;
+    printf("connector init success, connector type: %d, width:%d,height:%d\n", connector_type, connector_info.resolution.hactive, connector_info.resolution.vactive);
+    wbc_width_ = connector_info.resolution.hactive;
+    wbc_height_ = connector_info.resolution.vactive;
     connector_name_ = (char*)connector_info.connector_name;
 
     return 0;
@@ -795,7 +795,6 @@ typedef struct {
 
 static k_s32 init_layer_ex(sample_vo_info* vo_info)
 {
-    k_vo_pub_attr attr;
     k_u32 ret = 0;
 
     kd_mpi_vo_disable_layer(vo_info->layer_id);

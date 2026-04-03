@@ -174,13 +174,11 @@ typedef struct {
 
 static k_s32 sample_vo_init_ex(sample_vo_info* vo_info)
 {
-    k_vo_pub_attr attr;
     k_u32 ret = 0;
     k_s32 connector_fd;
     k_connector_type connector_type = vo_info->type;
     k_connector_info connector_info;
 
-    memset(&attr, 0, sizeof(attr));
     memset(&connector_info, 0, sizeof(k_connector_info));
 
     //connector get sensor info
