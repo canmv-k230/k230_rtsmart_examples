@@ -24,11 +24,9 @@ if RTT_ENABLE_MPP_EXAMPLES
       help
         MP4 Demuxer: Extract raw bitstreams from MP4 containers.
 
-  config RTSMART_MPP_ENABLE_SAMPLE_FFT
-      bool "Enable Build sample_fft"
+  config RTSMART_MPP_ENABLE_SAMPLE_FFT_DISPLAY
+      bool "Enable Build sample_fft_display"
       default n
-      help
-        Fast Fourier Transform API test program.
 
   config RTSMART_MPP_ENABLE_SAMPLE_GSDMA
       bool "Enable Build sample_gsdma"

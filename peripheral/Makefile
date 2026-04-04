@@ -18,6 +18,7 @@ subdirs-y := \
 	uart \
 	usb_hid_kbd \
 	wdt \
+	fft \
 
 .PHONY: all clean distclean
 

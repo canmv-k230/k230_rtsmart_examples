@@ -6,7 +6,6 @@ subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_AUDIO)           += sample_audio
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_CIPHER)          += sample_cipher/sample_aes sample_cipher/sample_hash sample_cipher/sample_hwhash sample_cipher/sample_pufs
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_CSC)             += sample_csc
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_DEMUXER)         += sample_demuxer
-subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_FFT)             += sample_fft
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_GSDMA)           += sample_gsdma
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_LOG)             += sample_log
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_MMZ)             += sample_mmz
@@ -28,6 +27,7 @@ subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VO_MIX_ORDER)    += sample_vo_mix_ord
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VO_OSD)          += sample_vo_osd
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VO_VIDEO)        += sample_vo_video
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VO_WBC_DUMP)     += sample_vo_wbc_dump
+subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_FFT_DISPLAY)     += sample_fft_display
 
 .PHONY: all clean distclean
 
