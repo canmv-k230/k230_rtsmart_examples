@@ -1,11 +1,11 @@
 # Include base configuration
-include ../../mkenv.mk
+include ../../../mkenv.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/toolchain_riscv64_musl.mk
 
 # Build configuration
 DIR := $(shell basename `pwd`)
-BUILD := $(SDK_RTSMART_BUILD_DIR)/examples/peripheral/$(DIR)
-BIN := $(RTT_PERIPHERAL_EXAMPLES_ELF_INSTALL_PATH)/$(DIR).elf
+BUILD := $(SDK_RTSMART_BUILD_DIR)/examples/3rd_party/$(DIR)
+BIN := $(RTT_3RD_PARTY_EXAMPLES_ELF_INSTALL_PATH)/$(DIR).elf
 
 # Source files handling
 C_SRCS    := $(wildcard *.c)
@@ -22,17 +22,17 @@ DEPS      := $(OBJS:.o=.d)
 OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
 
 # Library configuration
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/liblvgl.mk
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/libmpp.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/librtsmart_hal.mk
 
 # Compiler flags
 C_CXX_FLAGS := -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os
 C_CXX_FLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
-C_CXX_FLAGS += -I$(SDK_RTSMART_SRC_DIR)/libs/rtsmart_hal/utils
-C_CXX_FLAGS += -I$(SDK_RTSMART_SRC_DIR)/libs/rtsmart_hal/drivers/input
 C_CXX_FLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
 
-CFLAGS 		:= $(C_CXX_FLAGS) -std=gnu99
-CXX_FLAGS 	:= $(C_CXX_FLAGS) -std=c++20 
+CFLAGS := $(C_CXX_FLAGS) -std=gnu99
+CXX_FLAGS := $(C_CXX_FLAGS) -std=c++20 
 
 # Linker flags
 LDFLAGS := -T $(SDK_RTSMART_SRC_DIR)/libs/mk/link.lds --static -Wl,--gc-sections
@@ -42,7 +42,7 @@ LDFLAGS += $(LIB_LDFLAGS)
 .PHONY: all clean distclean .FORCE
 
 all: $(BIN)
-	@$(ECHO) [BUILD] examples peripheral $(DIR) done.
+	@$(ECHO) [BUILD] examples 3rd-party $(DIR) done.
 
 .FORCE:
 
@@ -67,7 +67,7 @@ $(OBJ_DIRS):
 	$(Q)mkdir -p $@
 
 clean:
-	@rm -rf $(BIN)
+	@rm -f $(BIN)
 
 distclean: clean
 	@rm -rf $(BUILD)

@@ -17,6 +17,7 @@ subdirs-y := \
 	tsensor \
 	uart \
 	usb_hid_kbd \
+	usb_hid_mouse \
 	wdt \
 	fft \
 

@@ -4,8 +4,28 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <errno.h>
-#include "hid_keyboard.h"
+
+#include "drv_input.h"
+
+static int reconnect_input_device(drv_input_inst_t **inst,
+                                  char *dev_path,
+                                  size_t dev_path_size,
+                                  bool auto_detect,
+                                  uint32_t kind)
+{
+    struct drv_input_info info;
+    int ret;
+
+    if (auto_detect)
+        ret = drv_input_reconnect_by_type(inst, kind, dev_path, dev_path_size, &info);
+    else
+        ret = drv_input_reconnect_path(inst, dev_path, &info);
+
+    if (ret == 0)
+        printf("Reconnected input device: %s (%s)\n", dev_path, info.name);
+
+    return ret;
+}
 
 /* Helper function to print key name */
 static const char *key_name(uint16_t code)
@@ -108,10 +128,10 @@ static const char *key_name(uint16_t code)
 }
 
 /* Test 1: Blocking read operation */
-int test_blocking_read(const char *dev_path)
+int test_blocking_read(char *dev_path, size_t dev_path_size, bool auto_detect)
 {
-    int fd;
-    struct hid_keyboard_event event;
+    drv_input_inst_t *inst = NULL;
+    struct drv_keyboard_frame frame;
     int count = 0;
     int max_events = 10;
 
@@ -119,54 +139,71 @@ int test_blocking_read(const char *dev_path)
     printf("This tests the blocking read behavior and rx_indicate callback\n");
     printf("Opening %s in blocking mode...\n", dev_path);
 
-    fd = open(dev_path, O_RDONLY);
-    if (fd < 0)
+    if (drv_input_inst_create_path(dev_path, &inst) != 0)
     {
         perror("Failed to open device");
         return -1;
     }
 
-    printf("Device opened successfully (fd=%d)\n", fd);
+    printf("Device opened successfully (fd=%d)\n", inst->fd);
     printf("Press keys on USB keyboard (will read %d event frames)...\n", max_events);
     printf("The read() call will BLOCK until data is available\n");
     printf("Note: Each frame ends with EV_SYN event\n\n");
 
     while (count < max_events)
     {
-        ssize_t ret = read(fd, &event, sizeof(event));
-
+        int ret = drv_input_poll(inst, -1);
         if (ret < 0)
         {
+            if (drv_input_is_disconnect_error(ret))
+            {
+                printf("Keyboard disconnected, waiting for reconnect...\n");
+                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
+                    usleep(200000);
+                continue;
+            }
+            perror("Poll error");
+            break;
+        }
+
+        ret = drv_input_read_keyboard_frame(inst, &frame);
+        if (ret < 0)
+        {
+            if (drv_input_is_disconnect_error(ret))
+            {
+                printf("Keyboard disconnected, waiting for reconnect...\n");
+                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
+                    usleep(200000);
+                continue;
+            }
             perror("Read error");
             break;
         }
 
-        if (ret == sizeof(event))
+        for (size_t index = 0; index < frame.count; index++)
         {
-            if (event.type == EV_KEY)
-            {
                 printf("    EV_KEY: %s -> %s\n",
-                       key_name(event.code),
-                       event.value == KEY_PRESSED ? "PRESSED" : "RELEASED");
-            }
-            else if (event.type == EV_SYN)
-            {
-                printf("    EV_SYN: --- frame %d end ---\n\n", count + 1);
-                count++;
-            }
+                       key_name(frame.keycodes[index]),
+                       frame.values[index] == KEY_PRESSED ? "PRESSED" : "RELEASED");
+        }
+
+        if (frame.complete)
+        {
+            printf("    EV_SYN: --- frame %d end ---\n\n", count + 1);
+            count++;
         }
     }
 
-    close(fd);
+    drv_input_inst_destroy(&inst);
     printf("Test 1 completed: Read %d event frames\n", count);
     return 0;
 }
 
 /* Test 2: Non-blocking read operation */
-int test_nonblocking_read(const char *dev_path)
+int test_nonblocking_read(char *dev_path, size_t dev_path_size, bool auto_detect)
 {
-    int fd;
-    struct hid_keyboard_event event;
+    drv_input_inst_t *inst = NULL;
+    struct drv_keyboard_frame frame;
     int empty_reads = 0;
     int event_count = 0;
     int frame_count = 0;
@@ -176,43 +213,47 @@ int test_nonblocking_read(const char *dev_path)
     printf("\n=== Test 2: Non-blocking Read ===\n");
     printf("This tests non-blocking read with O_NONBLOCK flag\n");
 
-    fd = open(dev_path, O_RDONLY | O_NONBLOCK);
-    if (fd < 0)
+    if (drv_input_inst_create_path(dev_path, &inst) != 0)
     {
         perror("Failed to open device");
         return -1;
     }
 
-    printf("Device opened in non-blocking mode (fd=%d)\n", fd);
+    printf("Device opened in non-blocking mode (fd=%d)\n", inst->fd);
     printf("Press keys on USB keyboard (test will run for 5 seconds)...\n");
     printf("Non-blocking reads will return -EAGAIN when no data available\n\n");
 
     while (loop_count < max_loops)
     {
-        ssize_t ret = read(fd, &event, sizeof(event));
+        int ret = drv_input_read_keyboard_frame(inst, &frame);
 
         if (ret < 0)
         {
-            if (errno == EAGAIN)
+            if (drv_input_is_disconnect_error(ret))
             {
-                empty_reads++;
+                printf("Keyboard disconnected, waiting for reconnect...\n");
+                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
+                    usleep(200000);
+                continue;
             }
-            else
-            {
-                perror("Unexpected read error");
-                break;
-            }
+            perror("Unexpected read error");
+            break;
         }
-        else if (ret == sizeof(event))
+        else if (ret == 0)
         {
-            if (event.type == EV_KEY)
+            empty_reads++;
+        }
+        else
+        {
+            for (size_t index = 0; index < frame.count; index++)
             {
                 printf("    EV_KEY: %s -> %s\n",
-                       key_name(event.code),
-                       event.value == KEY_PRESSED ? "PRESSED" : "RELEASED");
+                       key_name(frame.keycodes[index]),
+                       frame.values[index] == KEY_PRESSED ? "PRESSED" : "RELEASED");
                 event_count++;
             }
-            else if (event.type == EV_SYN)
+
+            if (frame.complete)
             {
                 printf("    EV_SYN: --- frame end ---\n\n");
                 frame_count++;
@@ -223,18 +264,17 @@ int test_nonblocking_read(const char *dev_path)
         loop_count++;
     }
 
-    close(fd);
+        drv_input_inst_destroy(&inst);
     printf("Test 2 completed: %d empty reads (EAGAIN), %d events, %d frames\n",
            empty_reads, event_count, frame_count);
     return 0;
 }
 
 /* Test 3: Poll functionality */
-int test_poll(const char *dev_path)
+int test_poll(char *dev_path, size_t dev_path_size, bool auto_detect)
 {
-    int fd;
-    struct hid_keyboard_event event;
-    struct pollfd pfd;
+    drv_input_inst_t *inst = NULL;
+    struct drv_keyboard_frame frame;
     int event_count = 0;
     int poll_count = 0;
     int max_events = 10;
@@ -242,29 +282,32 @@ int test_poll(const char *dev_path)
     printf("\n=== Test 3: Poll Functionality ===\n");
     printf("This tests poll() for event notification\n");
 
-    fd = open(dev_path, O_RDONLY);
-    if (fd < 0)
+    if (drv_input_inst_create_path(dev_path, &inst) != 0)
     {
         perror("Failed to open device");
         return -1;
     }
 
-    printf("Device opened (fd=%d)\n", fd);
+    printf("Device opened (fd=%d)\n", inst->fd);
     printf("Press keys on USB keyboard (will read %d events)...\n", max_events);
     printf("Using poll() with 1 second timeout\n");
-
-    pfd.fd = fd;
-    pfd.events = POLLIN;
 
     while (event_count < max_events)
     {
         printf("  Polling for events (timeout=1000ms)...\n");
 
-        int ret = poll(&pfd, 1, 1000);
+        int ret = drv_input_poll(inst, 1000);
         poll_count++;
 
         if (ret < 0)
         {
+            if (drv_input_is_disconnect_error(ret))
+            {
+                printf("Keyboard disconnected, waiting for reconnect...\n");
+                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
+                    usleep(200000);
+                continue;
+            }
             perror("Poll error");
             break;
         }
@@ -272,36 +315,47 @@ int test_poll(const char *dev_path)
         {
             printf("  Poll timeout (no events)\n");
         }
-        else if (pfd.revents & POLLIN)
+        else
         {
             printf("  Poll returned POLLIN - data available\n");
 
-            /* Read all available events */
             while (1)
             {
-                ssize_t rret = read(fd, &event, sizeof(event));
-                if (rret < 0)
+                ret = drv_input_read_keyboard_frame(inst, &frame);
+                if (ret < 0)
                 {
-                    if (errno != EAGAIN)
-                        perror("Read error after poll");
+                    if (drv_input_is_disconnect_error(ret))
+                    {
+                        printf("Keyboard disconnected, waiting for reconnect...\n");
+                        while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
+                            usleep(200000);
+                        break;
+                    }
+                    perror("Read error after poll");
                     break;
                 }
-                else if (rret == sizeof(event) && event.type == EV_KEY)
+                if (ret == 0)
+                    break;
+
+                for (size_t index = 0; index < frame.count; index++)
                 {
                     printf("    [%02d] %s: %s\n",
                            event_count + 1,
-                           key_name(event.code),
-                           event.value == KEY_PRESSED ? "PRESSED" : "RELEASED");
+                           key_name(frame.keycodes[index]),
+                           frame.values[index] == KEY_PRESSED ? "PRESSED" : "RELEASED");
                     event_count++;
 
                     if (event_count >= max_events)
                         break;
                 }
+
+                if (event_count >= max_events)
+                    break;
             }
         }
     }
 
-    close(fd);
+    drv_input_inst_destroy(&inst);
     printf("Test 3 completed: %d poll calls, %d events read\n",
            poll_count, event_count);
     return 0;
@@ -310,34 +364,51 @@ int test_poll(const char *dev_path)
 
 int main(int argc, char **argv)
 {
-    const char *dev_path = "/dev/hidk0";
+    const char *dev_path = "/dev/input/event0";
+    char detected_path[DRV_INPUT_PATH_MAX];
+    char active_path[DRV_INPUT_PATH_MAX];
+    struct drv_input_info info;
+    bool auto_detect = false;
 
     if (argc > 1)
     {
         dev_path = argv[1];
     }
+    else if (drv_input_find_first_by_type(DRV_INPUT_DEV_KEYBOARD,
+                                          detected_path,
+                                          sizeof(detected_path),
+                                          &info) == 0)
+    {
+        dev_path = detected_path;
+        auto_detect = true;
+    }
+
+    snprintf(active_path, sizeof(active_path), "%s", dev_path);
+    active_path[sizeof(active_path) - 1] = '\0';
 
     printf("========================================\n");
     printf("HID Keyboard Driver Comprehensive Test\n");
     printf("========================================\n");
     printf("Device: %s\n", dev_path);
-    printf("Event size: %zu bytes\n", sizeof(struct hid_keyboard_event));
+    if (argc <= 1)
+        printf("Detected device: %s (%s)\n", dev_path, info.name);
+    printf("Event size: %zu bytes\n", sizeof(struct input_event));
     printf("\n");
 
     /* Run all tests */
-    if (test_blocking_read(dev_path) != 0)
+    if (test_blocking_read(active_path, sizeof(active_path), auto_detect) != 0)
     {
         printf("\nTest 1 FAILED\n");
         return 1;
     }
 
-    if (test_nonblocking_read(dev_path) != 0)
+    if (test_nonblocking_read(active_path, sizeof(active_path), auto_detect) != 0)
     {
         printf("\nTest 2 FAILED\n");
         return 1;
     }
 
-    if (test_poll(dev_path) != 0)
+    if (test_poll(active_path, sizeof(active_path), auto_detect) != 0)
     {
         printf("\nTest 3 FAILED\n");
         return 1;
