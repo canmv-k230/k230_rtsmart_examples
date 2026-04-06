@@ -43,6 +43,7 @@
  */
 
 #include <math.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -58,10 +59,13 @@
 #include "k_video_comm.h"
 
 #include "mpi_ai_api.h"
+#include "mpi_gsdma_api.h"
 #include "mpi_sys_api.h"
 #include "mpi_vb_api.h"
 
 #include "drv_fft.h"
+#include "hal_utils.h"
+#include "hal_rvv_ops.h"
 #include "kd_display.h"
 
 #define ALIGN_UP(x, a) (((x) + ((a)-1)) & ~((a)-1))
@@ -70,6 +74,8 @@
 #define AI_CHN    0 /* channel 0 */
 #define OSD_LAYER K_VO_LAYER_OSD0
 #define OSD_BPP   4 /* ARGB8888 = 4 bytes/pixel */
+#define MAX_FB_COUNT 3
+#define DISPLAY_FPS_LIMIT 60
 
 /* Colors (ARGB8888) */
 #define COLOR_BG       0xFF000000 /* black background */
@@ -134,9 +140,10 @@ typedef struct {
 static int fb_alloc(framebuf_t* fb)
 {
     k_vb_pool_config pcfg;
-    memset(&pcfg, 0, sizeof(pcfg));
+    hal_rvv_memset(&pcfg, 0, sizeof(pcfg));
     pcfg.blk_cnt  = 1;
     pcfg.blk_size = ALIGN_UP(fb->width * fb->height * OSD_BPP + 4096, 0x1000);
+    pcfg.mode     = VB_REMAP_MODE_NOCACHE;
 
     fb->pool_id = kd_mpi_vb_create_pool(&pcfg);
     if (fb->pool_id < 0) {
@@ -182,7 +189,7 @@ static void fb_free(framebuf_t* fb)
 static void fb_push(const framebuf_t* fb)
 {
     k_video_frame_info vf;
-    memset(&vf, 0, sizeof(vf));
+    hal_rvv_memset(&vf, 0, sizeof(vf));
     vf.mod_id               = K_ID_VO;
     vf.pool_id              = fb->pool_id;
     vf.v_frame.width        = fb->width;
@@ -199,9 +206,27 @@ static void fb_push(const framebuf_t* fb)
 
 static inline void fb_fill(framebuf_t* fb, k_u32 color)
 {
-    k_u32 n = fb->width * fb->height;
-    for (k_u32 i = 0; i < n; i++)
-        fb->pixels[i] = color;
+    k_sdma_memset_t cfg;
+
+    hal_rvv_memset(&cfg, 0, sizeof(cfg));
+    cfg.phys_addr  = fb->phys;
+    cfg.size       = fb->width * fb->height * OSD_BPP;
+    cfg.data       = color;
+    cfg.data_size  = SDMA_DATA_SIZE_4_BYTE;
+    cfg.timeout_ms = 1000;
+    if (kd_mpi_gsdma_sdma_memset(&cfg) == K_SUCCESS)
+        return;
+
+    {
+        k_u32* row0 = fb->pixels;
+        size_t row_bytes = fb->width * OSD_BPP;
+
+        for (k_u32 x = 0; x < fb->width; x++)
+            row0[x] = color;
+
+        for (k_u32 y = 1; y < fb->height; y++)
+            hal_rvv_memcpy(fb->pixels + y * fb->width, row0, row_bytes);
+    }
 }
 
 static inline void fb_put_pixel(framebuf_t* fb, int x, int y, k_u32 color)
@@ -214,24 +239,39 @@ static inline void fb_put_pixel(framebuf_t* fb, int x, int y, k_u32 color)
 
 static inline void fb_rect(framebuf_t* fb, int x0, int y0, int w, int h, k_u32 color)
 {
-    if (x0 < 0) {
-        w += x0;
-        x0 = 0;
-    }
-    if (y0 < 0) {
-        h += y0;
-        y0 = 0;
-    }
     int x1 = x0 + w;
     int y1 = y0 + h;
+
+    if (w <= 0 || h <= 0)
+        return;
+    if (x0 >= (int)fb->width || y0 >= (int)fb->height)
+        return;
+    if (x1 <= 0 || y1 <= 0)
+        return;
+
+    if (x0 < 0)
+        x0 = 0;
+    if (y0 < 0)
+        y0 = 0;
     if (x1 > (int)fb->width)
         x1 = (int)fb->width;
     if (y1 > (int)fb->height)
         y1 = (int)fb->height;
-    for (int y = y0; y < y1; y++) {
-        k_u32* row = fb->pixels + y * fb->width;
-        for (int x = x0; x < x1; x++)
-            row[x] = color;
+
+    w = x1 - x0;
+    h = y1 - y0;
+    if (w <= 0 || h <= 0)
+        return;
+
+    {
+        k_u32* row0 = fb->pixels + y0 * fb->width + x0;
+        size_t row_bytes = w * OSD_BPP;
+
+        for (int x = 0; x < w; x++)
+            row0[x] = color;
+
+        for (int y = y0 + 1; y < y1; y++)
+            hal_rvv_memcpy(fb->pixels + y * fb->width + x0, row0, row_bytes);
     }
 }
 
@@ -494,7 +534,7 @@ static void render_spectrum(framebuf_t* fb, const float* magnitudes, int num_bar
 static int ai_init(k_u32 sample_rate, k_u32 point_num_per_frame)
 {
     k_aio_dev_attr attr;
-    memset(&attr, 0, sizeof(attr));
+    hal_rvv_memset(&attr, 0, sizeof(attr));
     attr.audio_type                                 = KD_AUDIO_INPUT_TYPE_I2S;
     attr.kd_audio_attr.i2s_attr.chn_cnt             = 2;
     attr.kd_audio_attr.i2s_attr.sample_rate         = sample_rate;
@@ -564,6 +604,10 @@ int main(int argc, char** argv)
     k_u32             panel_w      = 0;
     k_u32             panel_h      = 0;
     k_gdma_rotation_e rotate;
+    framebuf_t        fb[MAX_FB_COUNT];
+    k_u32             fb_count = 1;
+    k_u32             fb_index = 0;
+    uint64_t          next_present_us;
 
     int opt;
     while ((opt = getopt(argc, argv, "c:w:h:r:s:p:g:")) != -1) {
@@ -629,6 +673,22 @@ int main(int argc, char** argv)
     }
 
     rotate = rotation_from_degrees(rotation_deg);
+    /* Unrotated OSD updates can overlap with current + queued VO scanout state,
+     * so keep one extra render target. Rotated mode already goes through GDMA and
+     * is less prone to the same direct scanout reuse pattern, so a single buffer is
+     * still sufficient there for this sample. */
+    if (rotate == GDMA_ROTATE_DEGREE_0)
+        fb_count = 3;
+
+    for (k_u32 i = 0; i < MAX_FB_COUNT; i++) {
+        fb[i].width = osd_w;
+        fb[i].height = osd_h;
+        fb[i].pixels = NULL;
+        fb[i].phys = 0;
+        fb[i].size = 0;
+        fb[i].pool_id = -1;
+        fb[i].blk = VB_INVALID_HANDLE;
+    }
 
     float gain_linear = powf(10.0f, gain_db / 20.0f);
 
@@ -648,7 +708,7 @@ int main(int argc, char** argv)
 
     /* 2) VB system init */
     k_vb_config vb_cfg;
-    memset(&vb_cfg, 0, sizeof(vb_cfg));
+    hal_rvv_memset(&vb_cfg, 0, sizeof(vb_cfg));
     vb_cfg.max_pool_cnt = 10;
     if (kd_mpi_vb_set_config(&vb_cfg) || kd_mpi_vb_init()) {
         printf("VB init failed\n");
@@ -656,18 +716,24 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    /* 3) Allocate framebuffer */
-    framebuf_t fb = { .width = osd_w, .height = osd_h, .pool_id = -1, .blk = VB_INVALID_HANDLE };
-    if (fb_alloc(&fb) != 0) {
-        kd_mpi_vb_exit();
-        kd_display_deinit();
-        return 1;
+    /* 3) Allocate framebuffer(s) */
+    for (k_u32 i = 0; i < fb_count; i++) {
+        if (fb_alloc(&fb[i]) != 0) {
+            while (i > 0) {
+                --i;
+                fb_free(&fb[i]);
+            }
+            kd_mpi_vb_exit();
+            kd_display_deinit();
+            return 1;
+        }
     }
 
     /* 4) Configure OSD layer */
     if (kd_display_layer_configure(OSD_LAYER, PIXEL_FORMAT_ARGB_8888, osd_w, osd_h, 0, 0) != 0) {
         printf("layer_configure failed\n");
-        fb_free(&fb);
+        for (k_u32 i = 0; i < fb_count; i++)
+            fb_free(&fb[i]);
         kd_mpi_vb_exit();
         kd_display_deinit();
         return 1;
@@ -675,13 +741,16 @@ int main(int argc, char** argv)
     kd_display_layer_enable(OSD_LAYER);
 
     /* Show initial blank screen */
-    fb_fill(&fb, COLOR_BG);
-    fb_push(&fb);
+    for (k_u32 i = 0; i < fb_count; i++) {
+        fb_fill(&fb[i], COLOR_BG);
+        fb_push(&fb[i]);
+    }
 
     /* 5) Init audio input */
     if (ai_init(sample_rate, fft_points) != 0) {
         kd_display_layer_disable(OSD_LAYER);
-        fb_free(&fb);
+        for (k_u32 i = 0; i < fb_count; i++)
+            fb_free(&fb[i]);
         kd_mpi_vb_exit();
         kd_display_deinit();
         return 1;
@@ -694,7 +763,8 @@ int main(int argc, char** argv)
         printf("drv_fft_open failed\n");
         ai_deinit();
         kd_display_layer_disable(OSD_LAYER);
-        fb_free(&fb);
+        for (k_u32 i = 0; i < fb_count; i++)
+            fb_free(&fb[i]);
         kd_mpi_vb_exit();
         kd_display_deinit();
         return 1;
@@ -727,6 +797,7 @@ int main(int argc, char** argv)
     };
 
     printf("Running... press Ctrl+C to stop\n");
+    next_present_us = utils_cpu_ticks_us();
 
     /* Exponential moving average for peak tracking */
     float peak_mag = 100.0f;
@@ -757,7 +828,7 @@ int main(int argc, char** argv)
         /* Zero-pad if fewer samples than FFT points */
         for (k_u32 i = num_samples; i < fft_points; i++)
             fft_in_real[i] = 0;
-        memset(fft_in_imag, 0, fft_points * sizeof(short));
+        hal_rvv_memset(fft_in_imag, 0, fft_points * sizeof(short));
 
         kd_mpi_sys_munmap(pcm, frame.len);
         kd_mpi_ai_release_frame(AI_DEV, AI_CHN, &frame);
@@ -786,8 +857,24 @@ int main(int argc, char** argv)
             peak_mag = peak_mag * 0.95f + frame_peak * 0.05f;
 
         /* Render and push */
-        render_spectrum(&fb, magnitudes, num_bins, peak_mag, sample_rate);
-        fb_push(&fb);
+        render_spectrum(&fb[fb_index], magnitudes, num_bins, peak_mag, sample_rate);
+
+        {
+            const uint64_t frame_interval_us = 1000000ULL / DISPLAY_FPS_LIMIT;
+            uint64_t now_us = utils_cpu_ticks_us();
+
+            if (now_us < next_present_us)
+                usleep((useconds_t)(next_present_us - now_us));
+
+            now_us = utils_cpu_ticks_us();
+            if (now_us > next_present_us + frame_interval_us)
+                next_present_us = now_us + frame_interval_us;
+            else
+                next_present_us += frame_interval_us;
+        }
+
+        fb_push(&fb[fb_index]);
+        fb_index = (fb_index + 1) % fb_count;
     }
 
 cleanup:
@@ -801,7 +888,8 @@ cleanup:
     drv_fft_close(&fft_inst);
     ai_deinit();
     kd_display_layer_disable(OSD_LAYER);
-    fb_free(&fb);
+    for (k_u32 i = 0; i < fb_count; i++)
+        fb_free(&fb[i]);
     kd_mpi_vb_exit();
     kd_display_deinit();
 

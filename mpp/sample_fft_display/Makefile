@@ -22,12 +22,14 @@ DEPS      := $(OBJS:.o=.d)
 OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
 
 # Library configuration
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/librtsmart_hal.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/libmpp.mk
 
 # Compiler flags
 C_CXX_FLAGS := -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os
 C_CXX_FLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
 C_CXX_FLAGS += -I$(SDK_RTSMART_SRC_DIR)/libs/rtsmart_hal/drivers/fft
+C_CXX_FLAGS += -I$(SDK_RTSMART_SRC_DIR)/libs/rtsmart_hal/utils
 C_CXX_FLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
 
 CFLAGS 		:= $(C_CXX_FLAGS) -std=gnu99
