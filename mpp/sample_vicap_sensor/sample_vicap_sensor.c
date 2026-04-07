@@ -88,6 +88,7 @@ static volatile bool g_app_run = true;
 static k_u32 g_sensor_width = 1920;
 static k_s32 g_sensor_fd = -1;
 static k_u32 g_sensor_height = 1080;
+static k_vicap_sensor_info g_sensor_info;  // Save full sensor info
 
 /* Channel 0 output format for dump: 0=YUV, 1=RGB888, 2=RGB888P, 3=RAW */
 static k_u32 g_ch0_format = 0;
@@ -338,6 +339,12 @@ static k_s32 get_sensor_resolution(k_vicap_dev dev_chn, k_u32 *width, k_u32 *hei
     if (height) *height = sensor_info.height;
     if (fps) *fps = sensor_info.fps;
     
+    // Save full sensor info for later use
+    memcpy(&g_sensor_info, &sensor_info, sizeof(k_vicap_sensor_info));
+    printf("INFO: Saved sensor: %s, type=%d, csi=%d\n",
+           g_sensor_info.sensor_name ? g_sensor_info.sensor_name : "NULL",
+           g_sensor_info.sensor_type, g_sensor_info.csi_num);
+    
     return K_SUCCESS;
 }
 
@@ -382,9 +389,8 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn, k_u32 out_width, k_u32 out_h
 {
     k_vicap_dev_attr     dev_attr;
     k_vicap_chn_attr     chn_attr;
-    k_vicap_sensor_info  sensor_info;
-    k_vicap_probe_config probe_cfg;
-    k_vicap_sensor_type  sensor_type;
+    k_vicap_sensor_info  sensor_info = {0};
+    k_s32 ret;
 
     // Width must be multiple of 8 (hardware requirement)
     if ((out_width & 7) != 0) {
@@ -392,40 +398,27 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn, k_u32 out_width, k_u32 out_h
         printf("INFO: VICAP output width aligned to %u\n", out_width);
     }
 
-    memset(&sensor_info, 0, sizeof(sensor_info));
-    memset(&probe_cfg, 0, sizeof(probe_cfg));
+    // Use saved sensor info (from get_sensor_resolution in main)
+    memcpy(&sensor_info, &g_sensor_info, sizeof(k_vicap_sensor_info));
+    printf("INFO: Using sensor: %s, %ux%u, type=%d, csi=%d\n",
+           sensor_info.sensor_name ? sensor_info.sensor_name : "NULL",
+           sensor_info.width, sensor_info.height,
+           sensor_info.sensor_type, sensor_info.csi_num);
 
-    /* 这里沿用 SDK 示例的写法：用 dev_chn 作为 CSI 编号做 sensor 自适应 */
-    probe_cfg.csi_num = dev_chn;
-    probe_cfg.width   = 1920;  // Default request, will get actual from sensor_info
-    probe_cfg.height  = 1080;  // Default request, will get actual from sensor_info
-    probe_cfg.fps     = 30;
-
-    if (0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
-        printf("ERROR: kd_mpi_sensor_adapt_get failed on CSI %d, want %dx%d@%d\n",
-               probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
+    if(sensor_info.sensor_name == NULL)
+    {
+        printf("no sensor find in csi %d,please check\n", sensor_info.csi_num);
         return -1;
     }
 
-    sensor_type = sensor_info.sensor_type;
-
-    k_s32 ret = kd_mpi_vicap_get_sensor_info(sensor_type, &sensor_info);
-    if (ret) {
-        printf("ERROR: kd_mpi_vicap_get_sensor_info failed, ret=%d\n", ret);
-        return ret;
-    }
-    printf("DEBUG: sensor_name=%s, sensor_type=%d, csi_num=%d\n", 
-           sensor_info.sensor_name ? sensor_info.sensor_name : "NULL", 
-           sensor_info.sensor_type, sensor_info.csi_num);
-
     memset(&dev_attr, 0, sizeof(dev_attr));
-    dev_attr.acq_win.width  = sensor_info.width;  // Use actual sensor width
+    dev_attr.acq_win.width  = sensor_info.width;   // Use actual sensor width
     dev_attr.acq_win.height = sensor_info.height;  // Use actual sensor height
     dev_attr.mode           = VICAP_WORK_ONLINE_MODE;
     dev_attr.buffer_num     = 6;
     dev_attr.buffer_size    = VB_ALIGN_UP(sensor_info.width * sensor_info.height * 2, 1024);
     dev_attr.buffer_pool_id = VB_INVALID_POOLID;
-    memcpy(&dev_attr.sensor_info, &sensor_info, sizeof(sensor_info));
+    memcpy(&dev_attr.sensor_info, &sensor_info, sizeof(sensor_info));  // Copy sensor info
     
     // Configure pipe control with AE/AWB/HDR/DNR3 settings
     dev_attr.pipe_ctrl.data = 0xFFFFFFFF;
@@ -444,27 +437,27 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn, k_u32 out_width, k_u32 out_h
 
     // Configure CHN0 for dump
     memset(&chn_attr, 0, sizeof(chn_attr));
-    chn_attr.out_win.width  = out_width;
-    chn_attr.out_win.height = out_height;
+    chn_attr.out_win.width  = dev_attr.acq_win.width;   // Sensor native width
+    chn_attr.out_win.height = dev_attr.acq_win.height;  // Sensor native height
     chn_attr.crop_win       = dev_attr.acq_win;
     chn_attr.scale_win      = chn_attr.out_win;
     chn_attr.crop_enable    = K_FALSE;
-    chn_attr.scale_enable   = K_TRUE;
+    chn_attr.scale_enable   = K_FALSE;  // Disable scaling for CHN0
     chn_attr.chn_enable     = K_TRUE;
     
     // Set CHN0 format based on ofmt parameter
     switch (ch0_format) {
         case 0:
             chn_attr.pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
-            chn_attr.buffer_size = VB_ALIGN_UP(out_width * out_height * 3 / 2, 4096);
+            chn_attr.buffer_size = VB_ALIGN_UP(dev_attr.acq_win.width * dev_attr.acq_win.height * 3 / 2, 4096);
             break;
         case 1:
             chn_attr.pix_format = PIXEL_FORMAT_RGB_888;
-            chn_attr.buffer_size = VB_ALIGN_UP(out_width * out_height * 3, 4096);
+            chn_attr.buffer_size = VB_ALIGN_UP(dev_attr.acq_win.width * dev_attr.acq_win.height * 3, 4096);
             break;
         case 2:
             chn_attr.pix_format = PIXEL_FORMAT_RGB_888_PLANAR;
-            chn_attr.buffer_size = VB_ALIGN_UP(out_width * out_height * 3, 4096);
+            chn_attr.buffer_size = VB_ALIGN_UP(dev_attr.acq_win.width * dev_attr.acq_win.height * 3, 4096);
             break;
         case 3:
             chn_attr.pix_format = PIXEL_FORMAT_RGB_BAYER_10BPP;
@@ -472,7 +465,7 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn, k_u32 out_width, k_u32 out_h
             break;
         default:
             chn_attr.pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
-            chn_attr.buffer_size = VB_ALIGN_UP(out_width * out_height * 3 / 2, 4096);
+            chn_attr.buffer_size = VB_ALIGN_UP(dev_attr.acq_win.width * dev_attr.acq_win.height * 3 / 2, 4096);
             break;
     }
     chn_attr.buffer_num     = 6;
@@ -491,8 +484,8 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn, k_u32 out_width, k_u32 out_h
     chn_attr.out_win.height = out_height;
     chn_attr.crop_win       = dev_attr.acq_win;
     chn_attr.scale_win      = chn_attr.out_win;
-    chn_attr.crop_enable    = K_FALSE;
-    chn_attr.scale_enable   = K_TRUE;
+    chn_attr.crop_enable    = K_TRUE;
+    chn_attr.scale_enable   = K_FALSE;
     chn_attr.chn_enable     = K_TRUE;
     chn_attr.pix_format     = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
     chn_attr.buffer_num     = 6;
