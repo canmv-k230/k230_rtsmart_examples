@@ -7,22 +7,12 @@
 
 #include "drv_input.h"
 
-static int reconnect_input_device(drv_input_inst_t **inst,
-                                  char *dev_path,
-                                  size_t dev_path_size,
-                                  bool auto_detect,
-                                  uint32_t kind)
+static int reconnect_input_device(drv_input_inst_t *inst)
 {
-    struct drv_input_info info;
-    int ret;
-
-    if (auto_detect)
-        ret = drv_input_reconnect_by_type(inst, kind, dev_path, dev_path_size, &info);
-    else
-        ret = drv_input_reconnect_path(inst, dev_path, &info);
+    int ret = drv_input_inst_try_reconnect(inst);
 
     if (ret == 0)
-        printf("Reconnected input device: %s (%s)\n", dev_path, info.name);
+        printf("Reconnected input device: %s (%s)\n", inst->path, inst->info.name);
 
     return ret;
 }
@@ -125,15 +115,18 @@ static int test_blocking_read(char *dev_path, size_t dev_path_size, bool auto_de
         return -1;
     }
 
+    if (auto_detect)
+        drv_input_inst_set_auto_reconnect(inst, DRV_INPUT_DEV_MOUSE);
+
     while (frames < 10)
     {
         int ret = drv_input_poll(inst, -1);
         if (ret < 0)
         {
-            if (drv_input_is_disconnect_error(ret))
+            if (!drv_input_inst_is_connected(inst))
             {
                 printf("Pointer device disconnected, waiting for reconnect...\n");
-                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_MOUSE) != 0)
+                while (reconnect_input_device(inst) != 0)
                     usleep(200000);
                 continue;
             }
@@ -142,18 +135,8 @@ static int test_blocking_read(char *dev_path, size_t dev_path_size, bool auto_de
         }
 
         ret = drv_input_read_pointer_frame(inst, &frame);
-        if (ret < 0)
-        {
-            if (drv_input_is_disconnect_error(ret))
-            {
-                printf("Pointer device disconnected, waiting for reconnect...\n");
-                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_MOUSE) != 0)
-                    usleep(200000);
-                continue;
-            }
-            perror("Read error");
-            break;
-        }
+        if (ret <= 0)
+            continue;
 
         print_pointer_frame(&frame);
         if (frame.complete)
@@ -179,22 +162,13 @@ static int test_nonblocking_read(char *dev_path, size_t dev_path_size, bool auto
         return -1;
     }
 
+    if (auto_detect)
+        drv_input_inst_set_auto_reconnect(inst, DRV_INPUT_DEV_MOUSE);
+
     while (loops < 500)
     {
         int ret = drv_input_read_pointer_frame(inst, &frame);
-        if (ret < 0)
-        {
-            if (drv_input_is_disconnect_error(ret))
-            {
-                printf("Pointer device disconnected, waiting for reconnect...\n");
-                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_MOUSE) != 0)
-                    usleep(200000);
-                continue;
-            }
-            perror("Unexpected read error");
-            break;
-        }
-        else if (ret == 0)
+        if (ret <= 0)
         {
             empty_reads++;
         }
@@ -226,15 +200,18 @@ static int test_poll_read(char *dev_path, size_t dev_path_size, bool auto_detect
         return -1;
     }
 
+    if (auto_detect)
+        drv_input_inst_set_auto_reconnect(inst, DRV_INPUT_DEV_MOUSE);
+
     while (frames < 10)
     {
         int ret = drv_input_poll(inst, 1000);
         if (ret < 0)
         {
-            if (drv_input_is_disconnect_error(ret))
+            if (!drv_input_inst_is_connected(inst))
             {
                 printf("Pointer device disconnected, waiting for reconnect...\n");
-                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_MOUSE) != 0)
+                while (reconnect_input_device(inst) != 0)
                     usleep(200000);
                 continue;
             }
@@ -247,19 +224,7 @@ static int test_poll_read(char *dev_path, size_t dev_path_size, bool auto_detect
         while (1)
         {
             ret = drv_input_read_pointer_frame(inst, &frame);
-            if (ret < 0)
-            {
-                if (drv_input_is_disconnect_error(ret))
-                {
-                    printf("Pointer device disconnected, waiting for reconnect...\n");
-                    while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_MOUSE) != 0)
-                        usleep(200000);
-                    break;
-                }
-                perror("Read error after poll");
-                break;
-            }
-            if (ret == 0)
+            if (ret <= 0)
                 break;
 
             print_pointer_frame(&frame);

@@ -7,22 +7,12 @@
 
 #include "drv_input.h"
 
-static int reconnect_input_device(drv_input_inst_t **inst,
-                                  char *dev_path,
-                                  size_t dev_path_size,
-                                  bool auto_detect,
-                                  uint32_t kind)
+static int reconnect_input_device(drv_input_inst_t *inst)
 {
-    struct drv_input_info info;
-    int ret;
-
-    if (auto_detect)
-        ret = drv_input_reconnect_by_type(inst, kind, dev_path, dev_path_size, &info);
-    else
-        ret = drv_input_reconnect_path(inst, dev_path, &info);
+    int ret = drv_input_inst_try_reconnect(inst);
 
     if (ret == 0)
-        printf("Reconnected input device: %s (%s)\n", dev_path, info.name);
+        printf("Reconnected input device: %s (%s)\n", inst->path, inst->info.name);
 
     return ret;
 }
@@ -145,6 +135,9 @@ int test_blocking_read(char *dev_path, size_t dev_path_size, bool auto_detect)
         return -1;
     }
 
+    if (auto_detect)
+        drv_input_inst_set_auto_reconnect(inst, DRV_INPUT_DEV_KEYBOARD);
+
     printf("Device opened successfully (fd=%d)\n", inst->fd);
     printf("Press keys on USB keyboard (will read %d event frames)...\n", max_events);
     printf("The read() call will BLOCK until data is available\n");
@@ -155,10 +148,10 @@ int test_blocking_read(char *dev_path, size_t dev_path_size, bool auto_detect)
         int ret = drv_input_poll(inst, -1);
         if (ret < 0)
         {
-            if (drv_input_is_disconnect_error(ret))
+            if (!drv_input_inst_is_connected(inst))
             {
                 printf("Keyboard disconnected, waiting for reconnect...\n");
-                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
+                while (reconnect_input_device(inst) != 0)
                     usleep(200000);
                 continue;
             }
@@ -167,18 +160,8 @@ int test_blocking_read(char *dev_path, size_t dev_path_size, bool auto_detect)
         }
 
         ret = drv_input_read_keyboard_frame(inst, &frame);
-        if (ret < 0)
-        {
-            if (drv_input_is_disconnect_error(ret))
-            {
-                printf("Keyboard disconnected, waiting for reconnect...\n");
-                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
-                    usleep(200000);
-                continue;
-            }
-            perror("Read error");
-            break;
-        }
+        if (ret <= 0)
+            continue;
 
         for (size_t index = 0; index < frame.count; index++)
         {
@@ -219,6 +202,9 @@ int test_nonblocking_read(char *dev_path, size_t dev_path_size, bool auto_detect
         return -1;
     }
 
+    if (auto_detect)
+        drv_input_inst_set_auto_reconnect(inst, DRV_INPUT_DEV_KEYBOARD);
+
     printf("Device opened in non-blocking mode (fd=%d)\n", inst->fd);
     printf("Press keys on USB keyboard (test will run for 5 seconds)...\n");
     printf("Non-blocking reads will return -EAGAIN when no data available\n\n");
@@ -227,19 +213,7 @@ int test_nonblocking_read(char *dev_path, size_t dev_path_size, bool auto_detect
     {
         int ret = drv_input_read_keyboard_frame(inst, &frame);
 
-        if (ret < 0)
-        {
-            if (drv_input_is_disconnect_error(ret))
-            {
-                printf("Keyboard disconnected, waiting for reconnect...\n");
-                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
-                    usleep(200000);
-                continue;
-            }
-            perror("Unexpected read error");
-            break;
-        }
-        else if (ret == 0)
+        if (ret <= 0)
         {
             empty_reads++;
         }
@@ -264,7 +238,7 @@ int test_nonblocking_read(char *dev_path, size_t dev_path_size, bool auto_detect
         loop_count++;
     }
 
-        drv_input_inst_destroy(&inst);
+    drv_input_inst_destroy(&inst);
     printf("Test 2 completed: %d empty reads (EAGAIN), %d events, %d frames\n",
            empty_reads, event_count, frame_count);
     return 0;
@@ -288,6 +262,9 @@ int test_poll(char *dev_path, size_t dev_path_size, bool auto_detect)
         return -1;
     }
 
+    if (auto_detect)
+        drv_input_inst_set_auto_reconnect(inst, DRV_INPUT_DEV_KEYBOARD);
+
     printf("Device opened (fd=%d)\n", inst->fd);
     printf("Press keys on USB keyboard (will read %d events)...\n", max_events);
     printf("Using poll() with 1 second timeout\n");
@@ -301,10 +278,10 @@ int test_poll(char *dev_path, size_t dev_path_size, bool auto_detect)
 
         if (ret < 0)
         {
-            if (drv_input_is_disconnect_error(ret))
+            if (!drv_input_inst_is_connected(inst))
             {
                 printf("Keyboard disconnected, waiting for reconnect...\n");
-                while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
+                while (reconnect_input_device(inst) != 0)
                     usleep(200000);
                 continue;
             }
@@ -322,19 +299,7 @@ int test_poll(char *dev_path, size_t dev_path_size, bool auto_detect)
             while (1)
             {
                 ret = drv_input_read_keyboard_frame(inst, &frame);
-                if (ret < 0)
-                {
-                    if (drv_input_is_disconnect_error(ret))
-                    {
-                        printf("Keyboard disconnected, waiting for reconnect...\n");
-                        while (reconnect_input_device(&inst, dev_path, dev_path_size, auto_detect, DRV_INPUT_DEV_KEYBOARD) != 0)
-                            usleep(200000);
-                        break;
-                    }
-                    perror("Read error after poll");
-                    break;
-                }
-                if (ret == 0)
+                if (ret <= 0)
                     break;
 
                 for (size_t index = 0; index < frame.count; index++)
