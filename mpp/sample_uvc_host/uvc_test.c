@@ -146,6 +146,12 @@ k_s32 sample_connector_init(k_connector_type type)
         return K_ERR_VO_NOTREADY;
     }
 
+    // connector init
+    ret = kd_mpi_connector_init(connector_fd, connector_info);
+    if (ret) {
+        goto out;
+    }
+
     // set connect power
     ret = kd_mpi_connector_power_set(connector_fd, 1);
     if (ret) {
@@ -153,11 +159,6 @@ k_s32 sample_connector_init(k_connector_type type)
     }
     // set connect get id
     ret = kd_mpi_connector_id_get(connector_fd, &chip_id);
-    if (ret) {
-        goto out;
-    }
-    // connector init
-    ret = kd_mpi_connector_init(connector_fd, connector_info);
     if (ret) {
         goto out;
     }

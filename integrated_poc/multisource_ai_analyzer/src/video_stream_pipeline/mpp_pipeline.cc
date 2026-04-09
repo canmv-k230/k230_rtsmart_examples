@@ -402,8 +402,8 @@ int MppPipeline::_init_vo() {
     }
 
     // 打开屏幕电源并初始化连接器
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
     kd_mpi_connector_init(connector_fd, connector_info);
+    kd_mpi_connector_power_set(connector_fd, K_TRUE);
 
     sample_vo_info vo_info;
     vo_info.layer_id = vo_layer_chn_id_;

@@ -761,10 +761,10 @@ int KdMedia::_init_connector()
         return K_ERR_VO_NOTREADY;
     }
 
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
     // connector init
     kd_mpi_connector_init(connector_fd, connector_info);
+    // set connect power
+    kd_mpi_connector_power_set(connector_fd, K_TRUE);
 
     printf("connector init success, connector type: %d, width:%d,height:%d\n", connector_type, connector_info.resolution.hactive, connector_info.resolution.vactive);
     wbc_width_ = connector_info.resolution.hactive;

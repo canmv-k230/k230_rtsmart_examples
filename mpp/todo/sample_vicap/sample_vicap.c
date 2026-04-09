@@ -144,10 +144,10 @@ static k_s32 sample_vicap_vo_init(k_connector_type connector_type)
         return K_ERR_VO_NOTREADY;
     }
 
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, 1);
     // connector init
     kd_mpi_connector_init(connector_fd, connector_info);
+    // set connect power
+    kd_mpi_connector_power_set(connector_fd, 1);
 
     return 0;
 

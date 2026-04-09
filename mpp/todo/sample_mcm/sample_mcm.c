@@ -288,10 +288,10 @@ static k_s32 sample_connector_init(k_connector_type type)
         return K_ERR_VO_NOTREADY;
     }
 
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
     // connector init
     kd_mpi_connector_init(connector_fd, connector_info);
+    // set connect power
+    kd_mpi_connector_power_set(connector_fd, K_TRUE);
 
     return 0;
 }

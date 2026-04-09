@@ -288,10 +288,10 @@ static k_s32 sample_vo_init(sample_vo_info* vo_info)
         return K_ERR_VO_NOTREADY;
     }
 
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
     // connector init
     kd_mpi_connector_init(connector_fd, connector_info);
+    // set connect power
+    kd_mpi_connector_power_set(connector_fd, K_TRUE);
 
     // 关闭设备句柄（配置完成即可关闭）
     ret = kd_mpi_connector_close(connector_fd);

@@ -67,6 +67,8 @@ static k_u32 sample_vicap_vo_init(k_bool mirror)
     k_connector_type connector_type = HX8377_V2_MIPI_4LAN_1080X1920_30FPS;
     k_connector_info connector_info;
 
+    (void)mirror;
+
     memset(&connector_info, 0, sizeof(k_connector_info));
 
     //connector get sensor info
@@ -82,13 +84,17 @@ static k_u32 sample_vicap_vo_init(k_bool mirror)
         return K_ERR_VO_NOTREADY;
     }
 
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
-
-    if(mirror)
-        kd_mpi_connector_set_mirror(connector_fd, K_CONNECTOR_MIRROR_VER);
     // connector init
-    kd_mpi_connector_init(connector_fd, connector_info);
+    ret = kd_mpi_connector_init(connector_fd, connector_info);
+    if (ret) {
+        return ret;
+    }
+
+    // set connect power
+    ret = kd_mpi_connector_power_set(connector_fd, K_TRUE);
+    if (ret) {
+        return ret;
+    }
 
     return 0;
 }

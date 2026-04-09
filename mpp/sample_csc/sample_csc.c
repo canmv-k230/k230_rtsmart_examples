@@ -194,10 +194,10 @@ static k_s32 sample_vo_init_ex(sample_vo_info* vo_info)
         return K_ERR_VO_NOTREADY;
     }
 
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
     // connector init
     kd_mpi_connector_init(connector_fd, connector_info);
+    // set connect power
+    kd_mpi_connector_power_set(connector_fd, K_TRUE);
 
     kd_mpi_vo_disable_layer(vo_info->layer_id);
 
