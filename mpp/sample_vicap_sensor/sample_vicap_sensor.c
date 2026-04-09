@@ -187,10 +187,13 @@ static void print_usage(const char *prog)
     printf("  -height <value> Sensor height [default: 1080]\n");
     printf("  -fps <value> Sensor FPS [default: 30]\n");
     printf("  -ofmt <0|1|2|3> Channel 0 format [0:yuv, 1:rgb888, 2:rgb888p, 3:raw][default: 0]\n");
+    printf("  -scene_name <name>  Scene name (e.g., \"day\", \"night\")\n");
+    printf("  -scene_path <path>  Config path (must end with /, e.g., \"/etc/vicap/day/\")\n");
     printf("\nNote: CHN0 for dump, CHN1 for preview.\n");
     printf("\nExample:\n");
     printf("  %s -c 20 -ae 1 -awb 1 -hdr 0\n", prog);
     printf("  %s -c 20 -ae 0 -exp 10000  # 10000 us = 10ms\n", prog);
+    printf("  %s -c 20 -scene_name day -scene_path /etc/vicap/day/\n", prog);
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +218,9 @@ typedef struct {
     k_bool again_set;
     float again_value;
     bool c_set;
+    char scene_name[32];
+    char scene_path[256];
+    k_bool scene_set;
 } sample_params_t;
 
 static k_s32 parse_parameters(int argc, char **argv, sample_params_t *params)
@@ -234,6 +240,7 @@ static k_s32 parse_parameters(int argc, char **argv, sample_params_t *params)
     params->ch0_format = 0;
     params->again_set = K_FALSE;
     params->again_value = 1.0f;
+    params->scene_set = K_FALSE;
     
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
@@ -271,6 +278,12 @@ static k_s32 parse_parameters(int argc, char **argv, sample_params_t *params)
         } else if (strcmp(argv[i], "-again") == 0 && i + 1 < argc) {
             params->again_set = K_TRUE;
             params->again_value = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "-scene_name") == 0 && i + 1 < argc) {
+            strncpy(params->scene_name, argv[++i], sizeof(params->scene_name) - 1);
+            params->scene_set = K_TRUE;
+        } else if (strcmp(argv[i], "-scene_path") == 0 && i + 1 < argc) {
+            strncpy(params->scene_path, argv[++i], sizeof(params->scene_path) - 1);
+            params->scene_set = K_TRUE;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "-help") == 0) {
             return 1;  // Help requested
         } else {
@@ -736,6 +749,28 @@ int main(int argc, char **argv)
         printf("ERROR: sample_vicap_init failed, ret=%d\n", ret);
         goto cleanup_display;
     }
+
+    // 如果设置了场景参数，注册并加载场景
+    if (params.scene_set) {
+        printf("\nRegistering scene '%s' with path '%s'...\n", params.scene_name, params.scene_path);
+        ret = kd_mpi_vicap_register_scene(params.scene_name, params.scene_path);
+        if (ret < 0) {
+            printf("ERROR: Failed to register scene\n");
+            goto cleanup_display;
+        }
+        
+        // 加载场景（在启动流之前）
+        printf("Loading scene '%s'...\n", params.scene_name);
+        ret = kd_mpi_vicap_load_scene(params.scene_name);
+        if (ret < 0) {
+            printf("ERROR: Failed to load scene\n");
+            goto cleanup_display;
+        }
+        
+        const char *current = kd_mpi_vicap_get_scene();
+        printf("Current scene: %s\n", current ? current : "none");
+    }
+
 
 
     // Configure layer for fullscreen (offset_x=0, offset_y=0)
