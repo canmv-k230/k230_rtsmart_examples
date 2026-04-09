@@ -131,6 +131,12 @@ if RTT_ENABLE_MPP_EXAMPLES
       help
         Video Encoder: Hardware H.264/H.265/JPEG encoding to file.
 
+  config RTSMART_MPP_ENABLE_SAMPLE_VICAP
+      bool "Enabel Build sample_vicap_sensor"
+      default n
+      help
+        Vicap Bind to Display and Dump to File
+
   config RTSMART_MPP_ENABLE_SAMPLE_VO_MIX_ORDER
       bool "Enable Build sample_vo_mix_order"
       default n
