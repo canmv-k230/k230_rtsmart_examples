@@ -446,6 +446,10 @@ static void sample_cleanup(sample_uvc_runtime *rt)
         sample_vdec_unbind_vo(rt->chn_id);
         rt->vdec_bound = false;
     }
+    if (rt->vo_layer_enabled) {
+        kd_mpi_vo_disable_layer(rt->chn_id);
+        rt->vo_layer_enabled = false;
+    }
     if (rt->vdec_started) {
         kd_mpi_vdec_stop_chn(rt->ch);
         rt->vdec_started = false;
@@ -462,11 +466,6 @@ static void sample_cleanup(sample_uvc_runtime *rt)
         vb_destroy_vdec_pool(rt->vdec_poolid);
         rt->vdec_pool_created = false;
         rt->vdec_poolid = VB_INVALID_POOLID;
-    }
-
-    if (rt->vo_layer_enabled) {
-        kd_mpi_vo_disable_layer(rt->chn_id);
-        rt->vo_layer_enabled = false;
     }
 
     if (rt->uvc_started) {
