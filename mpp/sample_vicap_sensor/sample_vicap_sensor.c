@@ -657,6 +657,12 @@ int main(int argc, char **argv)
     }
     printf("INFO: Sensor resolution: %ux%u\n", g_sensor_width, g_sensor_height);
 
+       /* 1. 初始化 VB */
+    ret = sample_vb_init();
+    if (ret != K_SUCCESS) {
+        printf("ERROR: sample_vb_init failed, ret=%d\n", ret);
+        return -1;
+    }
 
     // Initialize display first to get correct resolution
     k_gdma_rotation_e rotate = GDMA_ROTATE_DEGREE_0;
@@ -735,13 +741,6 @@ int main(int argc, char **argv)
     printf("\n");
 
     signal(SIGINT, handle_signal);
-
-    /* 1. 初始化 VB */
-    ret = sample_vb_init();
-    if (ret != K_SUCCESS) {
-        printf("ERROR: sample_vb_init failed, ret=%d\n", ret);
-        return -1;
-    }
 
     /* 2. 初始化 VICAP（sensor + dev0/ch0 输出到指定分辨率） */
     ret = sample_vicap_init(g_vicap_dev_id, width, height, ae_enable, awb_enable, hdr_enable, dw_enable, dnr3_enable, g_ch0_format);
