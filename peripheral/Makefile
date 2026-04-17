@@ -19,6 +19,7 @@ subdirs-y := \
 	usb_hid_kbd \
 	usb_hid_mouse \
 	wdt \
+	pmu \
 	fft \
 
 .PHONY: all clean distclean
