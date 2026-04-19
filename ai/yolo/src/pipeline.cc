@@ -113,18 +113,18 @@ int PipeLine::Create()
         printf("%s, connector open failed.\n", __func__);
         return K_ERR_VO_NOTREADY;
     }
+    
+    // 初始化 connector（配置时序、分辨率等）
+    ret = kd_mpi_connector_init(connector_fd, connector_info);
+    if (ret) {
+        printf("ERROR: kd_mpi_connector_init failed, ret=%d\n", ret);
+        return ret;
+    }
 
     // 打开电源
     ret = kd_mpi_connector_power_set(connector_fd, K_TRUE);
     if (ret) {
         printf("ERROR: kd_mpi_connector_power_set failed, ret=%d\n", ret);
-        return ret;
-    }
-
-    // 初始化 connector（配置时序、分辨率等）
-    ret = kd_mpi_connector_init(connector_fd, connector_info);
-    if (ret) {
-        printf("ERROR: kd_mpi_connector_init failed, ret=%d\n", ret);
         return ret;
     }
 
