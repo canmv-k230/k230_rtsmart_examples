@@ -66,6 +66,8 @@ typedef struct YoloConfig
     float conf_thres=0.35;
     float nms_thres=0.65;
     float mask_thres=0.5;
+    int kp_num=17;
+    int kp_dim=3;
     std::string labels_txt_filepath="coco_labels.txt";
     int debug_mode=0;
 } YoloConfig;

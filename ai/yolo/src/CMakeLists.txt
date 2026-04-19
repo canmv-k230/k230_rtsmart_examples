@@ -1,4 +1,4 @@
-set(src main.cc pipeline.cc ai_base.cc yolov5.cc yolov8.cc yolo11.cc utils.cc)
+set(src main.cc pipeline.cc ai_base.cc yolov5.cc yolov8.cc yolo11.cc yolo26.cc utils.cc)
 set(bin yolo.elf)
 
 include_directories(${PROJECT_SOURCE_DIR})

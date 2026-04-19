@@ -25,7 +25,7 @@
 
 #include "yolov8.h"
 
-Yolov8::Yolov8(char* task_type, char* task_mode, char *kmodel_file, float conf_thres,float nms_thres,float mask_thres,std::vector<std::string> labels, FrameSize image_wh,int debug_mode)
+Yolov8::Yolov8(char* task_type, char* task_mode, char *kmodel_file, float conf_thres,float nms_thres,float mask_thres,std::vector<std::string> labels, FrameSize image_wh,int kp_num, int kp_dim, int debug_mode)
 :AIBase(kmodel_file,"Yolov8", debug_mode)
 {
     task_type_=task_type;
@@ -38,6 +38,10 @@ Yolov8::Yolov8(char* task_type, char* task_mode, char *kmodel_file, float conf_t
     labels_=labels;
     label_num_=labels_.size();
     colors=getColorsForClasses(label_num_);
+    kp_num_=kp_num;
+    kp_dim_=kp_dim;
+    kps_size_=kp_num*kp_dim;
+    kp_colors=getColorsForClasses(kp_num);
     max_box_num_=50;
     box_num_=((input_wh_.width/8)*(input_wh_.height/8)+(input_wh_.width/16)*(input_wh_.height/16)+(input_wh_.width/32)*(input_wh_.height/32));
     debug_mode_=debug_mode;
@@ -55,6 +59,10 @@ Yolov8::Yolov8(char* task_type, char* task_mode, char *kmodel_file, float conf_t
     }
     else if(strcmp(task_type_,"obb")==0){
         box_feature_len_=label_num_+5;
+        Utils::padding_resize_one_side_set(image_wh_,input_wh_,ai2d_builder_, cv::Scalar(114, 114, 114));
+    }
+    else if(strcmp(task_type_,"pose")==0){
+        box_feature_len_=5+kp_num_*kp_dim_;
         Utils::padding_resize_one_side_set(image_wh_,input_wh_,ai2d_builder_, cv::Scalar(114, 114, 114));
     }
     else{
@@ -285,6 +293,66 @@ void Yolov8::post_process(std::vector<YOLOBbox> &yolo_results)
         yolov8_rotate_nms(yolo_results, conf_thres_, nms_thres_, nms_result);
         delete[] output_det;
     }
+    else if(strcmp(task_type_,"pose")==0){
+        float ratiow = (float)input_wh_.width / image_wh_.width;
+        float ratioh = (float)input_wh_.height / image_wh_.height;
+        float ratio = ratiow < ratioh ? ratiow : ratioh;
+        float *output_det = new float[box_num_ * box_feature_len_];
+        // 模型推理结束后，进行后处理
+        float* output0= p_outputs_[0];
+        // // 将输出数据排布从[label_num_+4+kp_num_*kp_dim_,(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32)]调整为[(w/8)*(h/8)+(w/16)*(h/16)+(w/32)*(h/32),label_num_+4+kp_num_*kp_dim_],方便后续处理
+        // for(int r = 0; r < box_num_; r++)
+        // {
+        //     for(int c = 0; c < box_feature_len_; c++)
+        //     {
+        //         output_det[r*box_feature_len_ + c] = output0[c*box_num_ + r];
+        //     }
+        // }
+        transpose_block_fast(p_outputs_[0], output_det, box_num_, box_feature_len_);
+        for(int i=0;i<box_num_;i++){
+            float* vec=output_det+i*box_feature_len_;
+            float box[4]={vec[0],vec[1],vec[2],vec[3]};
+            float score=vec[4];
+            float* kps = vec+5;
+            if(score>conf_thres_){
+                YOLOBbox bbox;
+                float x_=box[0]/ratio*1.0;
+                float y_=box[1]/ratio*1.0;
+                float w_=box[2]/ratio*1.0;
+                float h_=box[3]/ratio*1.0;
+                int x=int(MAX(x_-0.5*w_,0));
+                int y=int(MAX(y_-0.5*h_,0));
+                int w=int(w_);
+                int h=int(h_);
+                if (w <= 0 || h <= 0) { continue; }
+                bbox.box=cv::Rect(x,y,w,h);
+                bbox.confidence=score;
+                bbox.kp_num=kp_num_;
+                bbox.kp_dim=kp_dim_;
+                bbox.index=0;
+                bbox.kps.resize(kps_size_);
+                // 关键点坐标还原到原始图像尺寸
+                for(int k=0;k<kp_num_;k++){
+                    if(kp_dim_==3){
+                        bbox.kps[k*3+0] = kps[k*3+0] / ratio;
+                        bbox.kps[k*3+1] = kps[k*3+1] / ratio;
+                        bbox.kps[k*3+2] = kps[k*3+2];
+                    }
+                    else if(kp_dim_==2){
+                        bbox.kps[k*2+0] = kps[k*2+0] / ratio;
+                        bbox.kps[k*2+1] = kps[k*2+1] / ratio;
+                    }
+                    else{
+                        std::copy(kps, kps + kps_size_, bbox.kps.begin());
+                    }
+                }
+                yolo_results.push_back(bbox);
+            }
+        }
+        std::vector<int> nms_result;
+        yolov8_nms(yolo_results, conf_thres_, nms_thres_, nms_result);
+        delete[] output_det;
+    }
 }
 
 void Yolov8::draw_results(cv::Mat &draw_frame,std::vector<YOLOBbox> &yolo_results)
@@ -382,6 +450,61 @@ void Yolov8::draw_results(cv::Mat &draw_frame,std::vector<YOLOBbox> &yolo_result
             cv::line(draw_frame, cv::Point(x_2, y_2), cv::Point(x_3, y_3), colors[idx], 2);
             cv::line(draw_frame, cv::Point(x_3, y_3), cv::Point(x_0, y_0), colors[idx], 2);
             cv::putText(draw_frame, std::to_string(idx), cv::Point(x_0 , y_0 - 10), cv::FONT_HERSHEY_DUPLEX, 1, colors[idx], 2, 0);
+        }
+    }
+    else if(strcmp(task_type_,"pose")==0){
+        int w_=draw_frame.cols;
+        int h_=draw_frame.rows;
+        int res_size=MIN(yolo_results.size(),max_box_num_);
+        for(int i=0;i<res_size;i++){
+            YOLOBbox box_=yolo_results[i];
+            cv::Rect box=box_.box;
+            int idx=box_.index;
+            float score=box_.confidence;
+            int x=int(box.x*float(w_)/image_wh_.width);
+            int y=int(box.y*float(h_)/image_wh_.height);
+            int w=int(box.width*float(w_)/image_wh_.width);
+            int h=int(box.height*float(h_)/image_wh_.height);
+            int x_right = x + w;
+            int y_bottom = y + h;
+            if (x_right > w_)
+            {
+                w = w_ - x;
+            }
+            if (y_bottom > h_)
+            {
+                h = h_ - y;
+            }
+            cv::Rect new_box(x,y,w,h);
+            cv::rectangle(draw_frame, new_box, colors[idx], 2, 8);
+            cv::putText(draw_frame, labels_[idx]+" "+std::to_string(score), cv::Point(MIN(new_box.x + 5,w_), MAX(new_box.y - 10,0)), cv::FONT_HERSHEY_DUPLEX, 1, colors[idx], 2, 0);
+            if(kp_dim_==3){
+                for (int j = 0; j < kps_size_; j++) {
+                    if(j%3==0)
+                    box_.kps[j] = box_.kps[j]*float(w_)/image_wh_.width;
+                    else if(j%3==1)
+                    box_.kps[j] = box_.kps[j]*float(h_)/image_wh_.height;
+                    else if(j%3==2)
+                    box_.kps[j] = box_.kps[j];
+                    
+                }
+            }
+            else if(kp_dim_==2){
+                for (int j = 0; j < kps_size_; j++) {
+                    if(j%2==0)
+                    box_.kps[j] = box_.kps[j]*float(w_)/image_wh_.width;
+                    else if(j%2==1)
+                    box_.kps[j] = box_.kps[j]*float(h_)/image_wh_.height;
+                }
+            }
+            else{
+                std::cerr << "Invalid kp_dim" << std::endl;
+            }
+            for (int j = 0; j < kp_num_; j++) {
+                int x=int(box_.kps[3*j]);
+                int y=int(box_.kps[3*j+1]);
+                cv::circle(draw_frame, cv::Point(x, y), 5, kp_colors[j], -1, 8);
+            }
         }
     }
 }

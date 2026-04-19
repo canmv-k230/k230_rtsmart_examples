@@ -150,6 +150,9 @@ typedef struct YOLOBbox{
 	int index;          // cls、det、seg、obb均会用到
     cv::Mat mask;       // 仅seg会用到
     float angle;        // 仅obb会用到
+    std::vector<float> kps;  // 仅pose会用到，关键点数量由kp_num决定
+    int kp_num;         // 仅pose会用到，关键点数量
+    int kp_dim;         // 仅pose会用到，关键点维度
 }YOLOBbox;
 
 // 根据类别数使用模运算循环获取颜色

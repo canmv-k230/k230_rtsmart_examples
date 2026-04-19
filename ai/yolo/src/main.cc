@@ -13,6 +13,7 @@
 #include "yolov5.h"
 #include "yolov8.h"
 #include "yolo11.h"
+#include "yolo26.h"
 
 using std::string;
 using std::vector;
@@ -43,10 +44,39 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
     PipeLine pl(general_config,yolo_config.debug_mode);
     // 初始化PipeLine对象
     pl.Create();
+    if(strcmp(yolo_config.model_type, "yolo26") == 0){
+        // 创建一个Yolo26对象，用于执行yolo26的推理流程
+        Yolo26 yolo26(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.kp_num,yolo_config.kp_dim,yolo_config.debug_mode);
+        // 循环执行推理流程，直到isp_stop为true
+        while(!isp_stop){
+            // 创建一个ScopedTiming对象，用于计算总时间
+            ScopedTiming st("total time", 1);
+            // 从PipeLine中获取一帧数据
+            pl.GetFrame(dump_res);
+            // 创建一个运行时张量，用于存储输入数据
+            input_tensor = host_runtime_tensor::create(typecode_t::dt_uint8, in_shape, { (gsl::byte *)dump_res.virt_addr, compute_size(in_shape) },false, hrt::pool_shared, dump_res.phy_addr).expect("cannot create input tensor");
+            // 将输入张量的数据同步到设备上
+            hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("sync write_back failed");
+            // 执行预处理
+            yolo26.pre_process(input_tensor);
+            // 执行推理
+            yolo26.inference();
+            // 执行后处理
+            yolo26.post_process(yolo_results);
+            // 将绘制的帧设置为黑色
+            draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
+            // 在绘制的帧上绘制检测结果
+            yolo26.draw_results(draw_frame,yolo_results);
+            // 将绘制的帧插入到PipeLine中
+            pl.InsertFrame(draw_frame.data);
+            // 释放帧数据
+            pl.ReleaseFrame(dump_res);
+        }
+    }
     // 如果模型类型为yolo11，则执行yolo11的推理流程
-    if(strcmp(yolo_config.model_type, "yolo11") == 0){
+    else if(strcmp(yolo_config.model_type, "yolo11") == 0){
         // 创建一个Yolo11对象，用于执行yolo11的推理流程
-        Yolo11 yolo11(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.nms_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.debug_mode);
+        Yolo11 yolo11(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.nms_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.kp_num,yolo_config.kp_dim,yolo_config.debug_mode);
         // 循环执行推理流程，直到isp_stop为true
         while(!isp_stop){
             // 创建一个ScopedTiming对象，用于计算总时间
@@ -76,7 +106,7 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
     // 如果模型类型为yolov8，则执行yolov8的推理流程
     else if(strcmp(yolo_config.model_type, "yolov8") == 0){
         // 创建一个Yolov8对象，用于执行yolov8的推理流程
-        Yolov8 yolov8(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.nms_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.debug_mode);
+        Yolov8 yolov8(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.nms_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.kp_num,yolo_config.kp_dim,yolo_config.debug_mode);
         // 循环执行推理流程，直到isp_stop为true
         while(!isp_stop){
             // 创建一个ScopedTiming对象，用于计算总时间
@@ -135,7 +165,7 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
     }
     // 如果模型类型不是yolov5、yolov8或yolo11，则打印错误信息并返回-1
     else{
-        std::cout << "仅支持模型: yolov5/yolov8/yolo11 " << std::endl;
+        std::cout << "仅支持模型: yolov5/yolov8/yolo11/yolo26 " << std::endl;
         // 销毁PipeLine对象
         pl.Destroy();
         return -1;
@@ -177,9 +207,16 @@ int yolo_image_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
     // 将输入张量的数据同步到设备上
     hrt::sync(input_tensor, sync_op_t::sync_write_back, true).expect("write back input failed");
 
+    if(strcmp(yolo_config.model_type, "yolo26") == 0){
+        Yolo26 yolo26(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.kp_num,yolo_config.kp_dim,yolo_config.debug_mode);
+        yolo26.pre_process(input_tensor);
+        yolo26.inference();
+        yolo26.post_process(yolo_results);
+        yolo26.draw_results(ori_img,yolo_results);
+    }
     // 如果模型类型为yolo11，则执行yolo11的推理流程
-    if(strcmp(yolo_config.model_type, "yolo11") == 0){
-        Yolo11 yolo11(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.nms_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.debug_mode);
+    else if(strcmp(yolo_config.model_type, "yolo11") == 0){
+        Yolo11 yolo11(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.nms_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.kp_num,yolo_config.kp_dim,yolo_config.debug_mode);
         yolo11.pre_process(input_tensor);
         yolo11.inference();
         yolo11.post_process(yolo_results);
@@ -187,7 +224,7 @@ int yolo_image_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
     }
     // 如果模型类型为yolov8，则执行yolov8的推理流程
     else if(strcmp(yolo_config.model_type, "yolov8") == 0){
-        Yolov8 yolov8(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.nms_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.debug_mode);
+        Yolov8 yolov8(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.nms_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.kp_num,yolo_config.kp_dim,yolo_config.debug_mode);
         yolov8.pre_process(input_tensor);
         yolov8.inference();
         yolov8.post_process(yolo_results);
@@ -203,7 +240,7 @@ int yolo_image_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
     }
     // 如果模型类型不是yolov5、yolov8或yolo11，则打印错误信息并返回-1
     else{
-        std::cout << "仅支持模型: yolov5/yolov8/yolo11 " << std::endl;
+        std::cout << "仅支持模型: yolov5/yolov8/yolo11/yolo26 " << std::endl;
         return -1;
     }
 
@@ -223,8 +260,8 @@ void _help(){
     printf("   mode 0: LT9611\n");
     printf("   mode 1: ST7701\n");
     printf("   mode 2: HX8377\n");
-    printf("-model_type: default yolov8, yolov5/yolov8/yolo11\n");
-    printf("-task_type: default detect, yolov5 support classify/detect/segment, yolov8 and yolo11 support classify/detect/segment/obb task\n");
+    printf("-model_type: default yolov8, yolov5/yolov8/yolo11/yolo26\n");
+    printf("-task_type: default detect, yolov5 support classify/detect/segment, yolov8、yolo11 and yolo26 support classify/detect/segment/obb/pose task\n");
     printf("-task_mode: default video, image/video\n");
     printf("-image_path: default test.jpg, image path\n");
     printf("-kmodel_path: default yolov8n.kmodel, kmodel path\n");
@@ -232,6 +269,8 @@ void _help(){
     printf("-conf_thres: default 0.35\n");
     printf("-nms_thres: default 0.65\n");
     printf("-mask_thres: default 0.5\n");
+    printf("-kp_num: default 17\n");
+    printf("-kp_dim: default 3\n");
     printf("-debug_mode: default 0, 0/1\n");
 }
 
@@ -333,6 +372,16 @@ int main(int argc, char *argv[])
         {
             // 设置掩码阈值
             yolo_config.mask_thres = atof(argv[i + 1]);
+        }
+        else if (strcmp(argv[i], "-kp_num") == 0)
+        {
+            // 设置关键点数量
+            yolo_config.kp_num = atoi(argv[i + 1]);
+        }
+        else if (strcmp(argv[i], "-kp_dim") == 0)
+        {
+            // 设置关键点维度
+            yolo_config.kp_dim = atoi(argv[i + 1]);
         }
         else if (strcmp(argv[i], "-debug_mode") == 0)
         {
