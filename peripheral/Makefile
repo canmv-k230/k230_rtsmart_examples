@@ -21,6 +21,7 @@ subdirs-y := \
 	wdt \
 	pmu \
 	fft \
+	pufs \
 
 .PHONY: all clean distclean
 

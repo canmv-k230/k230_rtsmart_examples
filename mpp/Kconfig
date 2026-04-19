@@ -6,12 +6,6 @@ if RTT_ENABLE_MPP_EXAMPLES
       help
         Audio functionality demo: AI/AO, AENC/ADEC G.711/Opus, and I2S/PDM testing.
 
-  config RTSMART_MPP_ENABLE_SAMPLE_CIPHER
-      bool "Enable Build sample_cipher"
-      default n
-      help
-        Security samples: Includes AES, Hash, Hardware Hash, and PUFS demos.
-
   config RTSMART_MPP_ENABLE_SAMPLE_CSC
       bool "Enable Build sample_csc"
       default n

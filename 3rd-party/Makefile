@@ -4,6 +4,7 @@ subdirs-y :=
 
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_FREETYPE_SAMPLES) += freetype/freetype_basic
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_LVGL_SAMPLES) += lvgl/lvgl_basic lvgl/lvgl_sensor lvgl/lvgl_hid
+subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_MBEDTLS_TESTS) += mbedtls/pufs_alt_verify
 subdirs-$(CONFIG_RTSMART_LIBS_MINIHTTP_ENABLE_SAMPLES) += minihttp/minihttp_basic minihttp/minihttp_advanced
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_TUYALINKSDK_SAMPLES) += tuya/tuya_basic
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_OPENCV_SAMPLES) += opencv
