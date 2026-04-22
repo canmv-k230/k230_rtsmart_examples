@@ -41,9 +41,14 @@ UVC_PipeLine::UVC_PipeLine(int debug_mode)
     nonai2d_yuv420sp_chn_id = 1;
 
     // 设置为 JPEG 解码模式（1 表示 JPEG 格式）
-    is_jpeg = 1;
+    bool m_isJpeg = true;
     // 初始化 UVC 格式结构体
-    init_format = { UVC_WIDTH, UVC_HEIGHT, is_jpeg, 0 };
+    init_format = {
+        UVC_WIDTH,
+        UVC_HEIGHT,
+        m_isJpeg ? USBH_VIDEO_FOURCC_MJPEG : USBH_VIDEO_FOURCC_YUY2,
+        0
+    };
 
     // 存储调试模式标志
     debug_mode_ = debug_mode;
