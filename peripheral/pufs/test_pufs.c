@@ -68,6 +68,20 @@ static void print_hex(const char *label, const uint8_t *data, uint32_t len)
     printf("\n");
 }
 
+static const char *otp_lock_state_name(uint8_t lock)
+{
+    switch (lock) {
+    case OTP_NA:
+        return "NA";
+    case OTP_RO:
+        return "RO";
+    case OTP_RW:
+        return "RW";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 static uint64_t get_time_us(void)
 {
     struct timespec ts;
@@ -2342,6 +2356,45 @@ static int test_otp_read(void)
     return 0;
 }
 
+static int test_otp_security_state(void)
+{
+    TEST_START("OTP Security Config State");
+
+    drv_pufs_inst dev;
+    pufs_otp_security_state_t state;
+    int ret;
+
+    ret = drv_pufs_open(&dev);
+    TEST_ASSERT(ret == 0, "Open device");
+
+    memset(&state, 0, sizeof(state));
+    ret = drv_pufs_otp_get_security_config_state(&dev, &state);
+    TEST_ASSERT(ret == 0, "Query OTP security config state");
+    TEST_ASSERT(state.spi2axi_word_lock <= OTP_RW,
+                "SPI2AXI config word lock state valid");
+    TEST_ASSERT(state.jtag_word_lock <= OTP_RW,
+                "JTAG config word lock state valid");
+    TEST_ASSERT(state.boot_ctrl_word_lock <= OTP_RW,
+                "Boot control word lock state valid");
+
+    printf("  disable_spi2axi:    %u\n", state.disable_spi2axi);
+    printf("  disable_jtag:       %u\n", state.disable_jtag);
+    printf("  force_secure_boot:  %u\n", state.force_secure_boot);
+    printf("  disable_isp:        %u\n", state.disable_isp);
+    printf("  spi2axi_word_lock:  %s (%u)\n",
+           otp_lock_state_name(state.spi2axi_word_lock),
+           state.spi2axi_word_lock);
+    printf("  jtag_word_lock:     %s (%u)\n",
+           otp_lock_state_name(state.jtag_word_lock),
+           state.jtag_word_lock);
+    printf("  boot_ctrl_word_lock:%s (%u)\n",
+           otp_lock_state_name(state.boot_ctrl_word_lock),
+           state.boot_ctrl_word_lock);
+
+    drv_pufs_close(&dev);
+    return 0;
+}
+
 /* ================================================================
  * Section 12: Key Management Tests
  * ================================================================ */
@@ -3030,6 +3083,7 @@ int main(int argc, char *argv[])
     run_test(test_rt_version, "rt_version");
     run_test(test_otp_rwlck_query, "otp_rwlck_query");
     run_test(test_otp_read, "otp_read");
+    run_test(test_otp_security_state, "otp_security_state");
 
     /* Section 12: Key management */
     run_test(test_key_import_export_roundtrip, "key_import_export_roundtrip");
