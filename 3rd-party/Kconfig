@@ -1,5 +1,13 @@
 if RTT_ENABLE_3RD_PARTY_EXAMPLES
 
+    config RTSMART_3RD_PARTY_ENABLE_OPENCV_SAMPLES
+        bool "Enable Build OpenCV Sample Programs"
+        default n
+
+    config RTSMART_3RD_PARTY_ENABLE_OPENBLAS_SAMPLES
+        bool "Enable Build OpenBlas Sample Programs"
+        default n
+
     config RTSMART_3RD_PARTY_ENABLE_FREETYPE_SAMPLES
         bool "Enable Build FreeType Sample Programs"
         default n
@@ -30,12 +38,9 @@ if RTT_ENABLE_3RD_PARTY_EXAMPLES
         default n
         depends on RTSMART_3RD_PARTY_ENABLE_TUYALINKSDK
 
-    config RTSMART_3RD_PARTY_ENABLE_OPENCV_SAMPLES
-        bool "Enable Build OpenCV Sample Programs"
+    config RTSMART_3RD_PARTY_ENABLE_CJSON_SAMPLES
+        bool "Enable Build cJSON Sample Programs"
         default n
-
-    config RTSMART_3RD_PARTY_ENABLE_OPENBLAS_SAMPLES
-        bool "Enable Build OpenBlas Sample Programs"
-        default n
+        depends on RTSMART_3RD_PARTY_ENABLE_CJSON
 
 endif
