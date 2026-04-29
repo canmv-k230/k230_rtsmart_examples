@@ -742,13 +742,6 @@ int main(int argc, char **argv)
 
     signal(SIGINT, handle_signal);
 
-    /* 2. 初始化 VICAP（sensor + dev0/ch0 输出到指定分辨率） */
-    ret = sample_vicap_init(g_vicap_dev_id, width, height, ae_enable, awb_enable, hdr_enable, dw_enable, dnr3_enable, g_ch0_format);
-    if (ret != K_SUCCESS) {
-        printf("ERROR: sample_vicap_init failed, ret=%d\n", ret);
-        goto cleanup_display;
-    }
-
     // 如果设置了场景参数，注册并加载场景
     if (params.scene_set) {
         printf("\nRegistering scene '%s' with path '%s'...\n", params.scene_name, params.scene_path);
@@ -770,6 +763,12 @@ int main(int argc, char **argv)
         printf("Current scene: %s\n", current ? current : "none");
     }
 
+    /* 2. 初始化 VICAP（sensor + dev0/ch0 输出到指定分辨率） */
+    ret = sample_vicap_init(g_vicap_dev_id, width, height, ae_enable, awb_enable, hdr_enable, dw_enable, dnr3_enable, g_ch0_format);
+    if (ret != K_SUCCESS) {
+        printf("ERROR: sample_vicap_init failed, ret=%d\n", ret);
+        goto cleanup_display;
+    }
 
 
     // Configure layer for fullscreen (offset_x=0, offset_y=0)
