@@ -1,6 +1,7 @@
 include ../mkenv.mk
 
 subdirs-y := \
+	fs_speedtest \
 	adc \
 	fpioa \
 	gpio \
