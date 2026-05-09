@@ -136,6 +136,9 @@ static void sample_vicap_dump_frame(k_vicap_dev dev, k_vicap_chn chn, k_u32 *dum
     } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_BAYER_10BPP) {
         suffix = "raw10";
         data_size = dump_info.v_frame.width * dump_info.v_frame.height * 2;
+    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_BAYER_12BPP) {
+        suffix = "raw12";
+        data_size = dump_info.v_frame.width * dump_info.v_frame.height * 2;
     } else {
         suffix = "yuv420sp";
         data_size = dump_info.v_frame.width * dump_info.v_frame.height * 3 / 2;
