@@ -14,6 +14,9 @@
 #define TEST_GPIO_PIN_IRQ   11  // 用于中断测试（必须小于64）
 #define TEST_GPIO_PIN_MAX   63  // 最大引脚号; 71或63，某些板子无法测试到PMU GPIO
 #define TEST_GPIO_PIN_INVALID 72  // 无效引脚号
+#define TEST_GPIO_CONCURRENCY_THREADS 6
+#define TEST_GPIO_CONCURRENCY_MIN_THREADS 4
+#define TEST_GPIO_CONCURRENCY_LOOPS 2000
 
 // 测试结果统计
 static int test_passed = 0;
@@ -22,6 +25,8 @@ static int test_failed = 0;
 // 中断测试变量
 static volatile int irq_count = 0;
 static volatile int irq_test_running = 0;
+
+static int g_run_manual_tests = 1;
 
 // 测试宏
 #define TEST_ASSERT(cond, msg) do { \
@@ -47,6 +52,86 @@ static void gpio_irq_handler(void* args)
         (*count)++;
     }
     printf("[IRQ] GPIO interrupt triggered, count=%d\n", irq_count);
+}
+
+struct gpio_concurrency_ctx {
+    drv_gpio_inst_t* gpio;
+    int              pin;
+    int              is_output;
+    int              completed_loops;
+    int              failures;
+    volatile int*    start_flag;
+};
+
+static void* gpio_concurrency_worker(void* args)
+{
+    struct gpio_concurrency_ctx* ctx = (struct gpio_concurrency_ctx*)args;
+
+    while (!*ctx->start_flag) {
+        usleep(100);
+    }
+
+    for (int i = 0; i < TEST_GPIO_CONCURRENCY_LOOPS; i++) {
+        if (ctx->is_output) {
+            gpio_pin_value_t expected = (i & 0x01) ? GPIO_PV_HIGH : GPIO_PV_LOW;
+
+            if ((i % 32) == 0 && drv_gpio_mode_set(ctx->gpio, GPIO_DM_OUTPUT) != 0) {
+                ctx->failures++;
+                break;
+            }
+
+            if (drv_gpio_value_set(ctx->gpio, expected) != 0) {
+                ctx->failures++;
+                break;
+            }
+
+            if (drv_gpio_value_get(ctx->gpio) != expected) {
+                ctx->failures++;
+                break;
+            }
+        } else {
+            gpio_drive_mode_t expected_mode;
+            gpio_drive_mode_t current_mode;
+            gpio_pin_value_t  value;
+
+            switch (i % 3) {
+            case 0:
+                expected_mode = GPIO_DM_INPUT;
+                break;
+            case 1:
+                expected_mode = GPIO_DM_INPUT_PULLUP;
+                break;
+            default:
+                expected_mode = GPIO_DM_INPUT_PULLDOWN;
+                break;
+            }
+
+            if (drv_gpio_mode_set(ctx->gpio, expected_mode) != 0) {
+                ctx->failures++;
+                break;
+            }
+
+            current_mode = drv_gpio_mode_get(ctx->gpio);
+            if (current_mode != expected_mode) {
+                ctx->failures++;
+                break;
+            }
+
+            value = drv_gpio_value_get(ctx->gpio);
+            if ((value != GPIO_PV_LOW) && (value != GPIO_PV_HIGH)) {
+                ctx->failures++;
+                break;
+            }
+        }
+
+        ctx->completed_loops++;
+
+        if ((i % 64) == 0) {
+            usleep(100);
+        }
+    }
+
+    return NULL;
 }
 
 // 测试1：创建和销毁实例
@@ -444,9 +529,121 @@ static int test_io_loopback(void)
     return 0;
 }
 
+static int test_concurrent_gpio_fpioa_access(void)
+{
+    TEST_START("Concurrent GPIO/FPIOA Access");
+
+    static const int candidate_pins[] = { 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
+    struct gpio_concurrency_ctx ctx[TEST_GPIO_CONCURRENCY_THREADS];
+    pthread_t                   threads[TEST_GPIO_CONCURRENCY_THREADS];
+    volatile int               start_flag = 0;
+    int                        prepared = 0;
+    int                        created_threads = 0;
+
+    memset(ctx, 0, sizeof(ctx));
+    memset(threads, 0, sizeof(threads));
+
+    for (size_t i = 0; i < sizeof(candidate_pins) / sizeof(candidate_pins[0]); i++) {
+        drv_gpio_inst_t* gpio = NULL;
+        int              pin  = candidate_pins[i];
+        int              ret;
+
+        if (prepared >= TEST_GPIO_CONCURRENCY_THREADS) {
+            break;
+        }
+
+        ret = drv_fpioa_set_pin_func(pin, GPIO0 + pin);
+        if (ret != 0) {
+            continue;
+        }
+
+        ret = drv_gpio_inst_create(pin, &gpio);
+        if (ret != 0) {
+            continue;
+        }
+
+        ctx[prepared].gpio       = gpio;
+        ctx[prepared].pin        = pin;
+        ctx[prepared].is_output  = ((prepared & 0x01) == 0);
+        ctx[prepared].start_flag = &start_flag;
+
+        ret = drv_gpio_mode_set(gpio, ctx[prepared].is_output ? GPIO_DM_OUTPUT : GPIO_DM_INPUT);
+        if (ret != 0) {
+            drv_gpio_inst_destroy(&gpio);
+            memset(&ctx[prepared], 0, sizeof(ctx[prepared]));
+            continue;
+        }
+
+        if (ctx[prepared].is_output) {
+            ret = drv_gpio_value_set(gpio, GPIO_PV_LOW);
+            if (ret != 0) {
+                drv_gpio_inst_destroy(&gpio);
+                memset(&ctx[prepared], 0, sizeof(ctx[prepared]));
+                continue;
+            }
+        }
+
+        prepared++;
+    }
+
+    if (prepared & 0x01) {
+        drv_gpio_inst_destroy(&ctx[prepared - 1].gpio);
+        memset(&ctx[prepared - 1], 0, sizeof(ctx[prepared - 1]));
+        prepared--;
+    }
+
+    TEST_ASSERT(prepared >= TEST_GPIO_CONCURRENCY_MIN_THREADS, "Prepared enough GPIOs for concurrent stress test");
+
+    printf("[INFO] Starting %d concurrent GPIO workers, %d loops each\n", prepared, TEST_GPIO_CONCURRENCY_LOOPS);
+
+    for (int i = 0; i < prepared; i++) {
+        int ret = pthread_create(&threads[i], NULL, gpio_concurrency_worker, &ctx[i]);
+        if (ret != 0) {
+            printf("[INFO] Failed to create worker for pin %d, ret=%d\n", ctx[i].pin, ret);
+            ctx[i].failures++;
+            break;
+        }
+        created_threads++;
+    }
+
+    start_flag = 1;
+
+    for (int i = 0; i < created_threads; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    for (int i = 0; i < prepared; i++) {
+        if (ctx[i].failures != 0 || ctx[i].completed_loops != TEST_GPIO_CONCURRENCY_LOOPS) {
+            printf("[INFO] pin=%d output=%d loops=%d failures=%d\n",
+                   ctx[i].pin,
+                   ctx[i].is_output,
+                   ctx[i].completed_loops,
+                   ctx[i].failures);
+        }
+    }
+
+    for (int i = 0; i < prepared; i++) {
+        drv_gpio_inst_destroy(&ctx[i].gpio);
+    }
+
+    for (int i = 0; i < prepared; i++) {
+        TEST_ASSERT(ctx[i].failures == 0, "Concurrent worker completed without GPIO/FPIOA error");
+        TEST_ASSERT(ctx[i].completed_loops == TEST_GPIO_CONCURRENCY_LOOPS,
+                    "Concurrent worker finished every planned iteration");
+    }
+
+    return 0;
+}
+
 // 主测试函数
 int main(int argc, char* argv[])
 {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--skip-manual")) {
+            g_run_manual_tests = 0;
+        }
+    }
+
     printf("\n==================================================\n");
     printf("GPIO HAL Comprehensive Test Program\n");
     printf("==================================================\n");
@@ -455,20 +652,34 @@ int main(int argc, char* argv[])
     signal(SIGPIPE, SIG_IGN);
 
     // 执行所有测试
-    int test_results[] = {
-        test_create_destroy(),
-        test_mode_operations(),
-        test_value_operations(),
-        test_get_pin_id(),
-        test_interrupt_operations(),
-        test_boundary_conditions(),
-        test_io_loopback()
-    };
+    int test_count = 0;
+
+    test_create_destroy();
+    test_count++;
+    test_mode_operations();
+    test_count++;
+    test_value_operations();
+    test_count++;
+    test_get_pin_id();
+    test_count++;
+    test_boundary_conditions();
+    test_count++;
+    test_concurrent_gpio_fpioa_access();
+    test_count++;
+
+    if (g_run_manual_tests) {
+        test_interrupt_operations();
+        test_count++;
+        test_io_loopback();
+        test_count++;
+    } else {
+        printf("[INFO] Manual IRQ/loopback tests skipped by --skip-manual\n");
+    }
 
     // 统计结果
     printf("\n==================================================\n");
     printf("Test Summary:\n");
-    printf("  Total Tests: %d\n", sizeof(test_results)/sizeof(test_results[0]));
+    printf("  Total Tests: %d\n", test_count);
     printf("  Passed: %d\n", test_passed);
     printf("  Failed: %d\n", test_failed);
     printf("==================================================\n");
