@@ -33,34 +33,28 @@
 
 #include "drv_wdt.h"
 
-volatile sig_atomic_t stop_flag        = false;
-bool                  stop_wdt_on_exit = true;
+volatile sig_atomic_t stop_flag = false;
+bool                  feed_wdt  = true;
 
 // Signal handler for Ctrl+C
 void handle_sigint(int sig)
 {
     (void)sig;
     stop_flag = true;
-    printf("\nReceived Ctrl+C - ");
-
-    if (stop_wdt_on_exit) {
-        printf("Stopping watchdog before exit...\n");
-    } else {
-        printf("Feeding watchdog before exit...\n");
-        wdt_feed();
-    }
+    printf("\nReceived Ctrl+C - closing watchdog handle and handing off to kernel...\n");
 }
 
 void print_usage(const char* prog_name)
 {
-    printf("Usage: %s <timeout_sec> [--no-stop]\n", prog_name);
+    printf("Usage: %s <timeout_sec> [--no-feed]\n", prog_name);
     printf("  <timeout_sec>  : Watchdog timeout in seconds (1-60)\n");
-    printf("  --no-stop      : Keep WDT running on exit (feed instead of stop)\n");
+    printf("  --no-feed      : Do not feed WDT after start; use this to test timeout reboot\n");
 }
 
 int main(int argc, char** argv)
 {
     uint32_t timeout_sec;
+    uint32_t current_timeout;
 
     // Parse command line arguments
     if (argc < 2) {
@@ -69,18 +63,22 @@ int main(int argc, char** argv)
     }
 
     timeout_sec = (uint32_t)atoi(argv[1]);
-    if (timeout_sec < 1 || timeout_sec > 60) {
-        fprintf(stderr, "Error: Timeout must be between 1-60 seconds\n");
-        return 1;
-    }
 
     if (argc > 2) {
-        if (strcmp(argv[2], "--no-stop") == 0) {
-            stop_wdt_on_exit = false;
-        } else {
-            print_usage(argv[0]);
-            return 1;
+        int argi;
+
+        for (argi = 2; argi < argc; ++argi) {
+            if (strcmp(argv[argi], "--no-feed") == 0) {
+                feed_wdt = false;
+            } else {
+                print_usage(argv[0]);
+                return 1;
+            }
         }
+    }
+
+    if (!feed_wdt) {
+        printf("No-feed mode enabled; system should reboot when watchdog expires unless interrupted first.\n");
     }
 
     // Register signal handler
@@ -89,7 +87,8 @@ int main(int argc, char** argv)
     printf("Watchdog Timer Test\n");
     printf("===================\n");
     printf("Setting timeout: %u seconds\n", timeout_sec);
-    printf("Behavior on exit: %s\n", stop_wdt_on_exit ? "STOP WDT" : "KEEP WDT RUNNING");
+    printf("Behavior on exit: CLOSE HANDLE AND HAND OFF TO KERNEL\n");
+    printf("Feeding mode: %s\n", feed_wdt ? "FEED PERIODICALLY" : "DO NOT FEED; EXPECT TIMEOUT REBOOT");
     printf("Press Ctrl+C to quit\n\n");
 
     // Initialize and start watchdog
@@ -98,8 +97,11 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    uint32_t current_timeout = wdt_get_timeout();
+    current_timeout = wdt_get_timeout();
     printf("Current WDT timeout: %u seconds\n", current_timeout);
+    if (current_timeout != timeout_sec) {
+        printf("Requested timeout was rounded to the nearest hardware-supported value.\n");
+    }
 
     if (wdt_start() != 0) {
         fprintf(stderr, "Error: Failed to start WDT\n");
@@ -110,23 +112,24 @@ int main(int argc, char** argv)
 
     // Main loop - feed the watchdog periodically
     while (!stop_flag) {
-        printf("Feeding watchdog...\n");
-        if (wdt_feed() != 0) {
-            fprintf(stderr, "Error: Failed to feed WDT\n");
-            break;
-        }
+        if (feed_wdt) {
+            printf("Feeding watchdog...\n");
+            if (wdt_feed() != 0) {
+                fprintf(stderr, "Error: Failed to feed WDT\n");
+                break;
+            }
 
-        // Sleep for half the timeout period
-        sleep(timeout_sec / 2);
+            sleep(current_timeout / 2);
+        } else {
+            printf("Watchdog running without feed; waiting for timeout reboot...\n");
+            sleep(current_timeout + 1);
+        }
     }
 
     // Cleanup
-    if (stop_wdt_on_exit) {
-        printf("Stopping watchdog...\n");
-        if (wdt_stop() != 0) {
-            fprintf(stderr, "Error: Failed to stop WDT\n");
-            return 1;
-        }
+    if (wdt_close() != 0) {
+        fprintf(stderr, "Error: Failed to close WDT\n");
+        return 1;
     }
 
     printf("Test completed\n");
