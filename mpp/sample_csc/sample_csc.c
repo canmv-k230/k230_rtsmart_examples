@@ -90,6 +90,8 @@ static k_bool vicap_started=K_FALSE;
 static k_u32 venc_attach_pool_id = 0;
 static k_u32 nonai_2d_attach_pool_id[3] = {0};
 static k_u32 osd_attach_pool_id = 0;
+static volatile k_bool g_output_stop = K_FALSE;
+static volatile k_bool g_dump_stop = K_FALSE;
 
 static inline void CHECK_RET(k_s32 ret, const char *func, const int line)
 {
@@ -439,7 +441,7 @@ static void *output_thread(void *arg)
     out_cnt = 0;
     out_frames = 0;
 
-    while (1)
+    while (!g_output_stop)
     {
         k_venc_chn_status status;
 
@@ -453,8 +455,7 @@ static void *output_thread(void *arg)
 
         output.pack = malloc(sizeof(k_venc_pack) * output.pack_cnt);
 
-        ret = kd_mpi_venc_get_stream(0, &output, -1);
-        CHECK_RET(ret, __func__, __LINE__);
+        ret = kd_mpi_venc_get_stream(0, &output, 1000);
         if(ret)
         {
             free(output.pack);
@@ -520,6 +521,45 @@ static void *output_thread(void *arg)
         }
     }
 
+    /* drain: take all remaining encoded data before exit */
+    while (1)
+    {
+        k_venc_chn_status status;
+
+        ret = kd_mpi_venc_query_status(0, &status);
+        if (ret || status.cur_packs == 0)
+            break;
+
+        output.pack_cnt = status.cur_packs;
+        output.pack = malloc(sizeof(k_venc_pack) * output.pack_cnt);
+
+        ret = kd_mpi_venc_get_stream(0, &output, 500);
+        if (ret)
+        {
+            free(output.pack);
+            break;
+        }
+
+        for (i = 0; i < output.pack_cnt; i++)
+        {
+            if (output.pack[i].type != K_VENC_HEADER)
+                out_frames++;
+
+            k_u8 *pData;
+            pData = (k_u8 *)kd_mpi_sys_mmap(output.pack[i].phys_addr, output.pack[i].len);
+            if (g_nonai_2d_conf.output_file)
+                fwrite(pData, 1, output.pack[i].len, g_nonai_2d_conf.output_file);
+            kd_mpi_sys_munmap(pData, output.pack[i].len);
+
+            total_len += output.pack[i].len;
+        }
+
+        ret = kd_mpi_venc_release_stream(0, &output);
+        CHECK_RET(ret, __func__, __LINE__);
+
+        free(output.pack);
+    }
+
     printf("%s>done, out_frames %d, size %d bits\n", __func__, out_frames, total_len * 8);
     return arg;
 }
@@ -534,7 +574,7 @@ static void *dump_thread(void *arg)
 
     dump_buf_rgb888 = malloc(size);
 
-    while (1)
+    while (!g_dump_stop)
     {
         if(!vicap_started)
         {
@@ -597,7 +637,7 @@ static void *dump_thread_1(void *arg)
 
     dump_buf_rgb565 = malloc(size);
 
-    while (1)
+    while (!g_dump_stop)
     {
         if(!vicap_started)
         {
@@ -743,13 +783,12 @@ k_s32 sample_exit()
 
     sample_unbind(ch);
 
-    pthread_cancel(g_nonai_2d_conf.output_tid);
+    g_output_stop = K_TRUE;
     pthread_join(g_nonai_2d_conf.output_tid, NULL);
 
-    pthread_cancel(g_nonai_2d_conf.dump_tid);
+    g_dump_stop = K_TRUE;
     pthread_join(g_nonai_2d_conf.dump_tid, NULL);
 
-    pthread_cancel(g_nonai_2d_conf.dump_tid_1);
     pthread_join(g_nonai_2d_conf.dump_tid_1, NULL);
 
     ret = kd_mpi_nonai_2d_close();

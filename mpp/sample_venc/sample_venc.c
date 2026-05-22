@@ -146,6 +146,7 @@ static k_u32 enc_width=1280;
 static k_u32 enc_height=720;
 static k_u32 venc_attach_pool_id = 0;
 static k_u32 osd_attach_pool_id = 0;
+static volatile k_bool g_venc_output_stop = K_FALSE;
 
 static inline void CHECK_RET(k_s32 ret, const char *func, const int line)
 {
@@ -347,7 +348,7 @@ static void *output_thread(void *arg)
     out_cnt = 0;
     out_frames = 0;
 
-    while (1)
+    while (!g_venc_output_stop)
     {
         k_venc_chn_status status;
 
@@ -361,8 +362,7 @@ static void *output_thread(void *arg)
 
         output.pack = malloc(sizeof(k_venc_pack) * output.pack_cnt);
 
-        ret = kd_mpi_venc_get_stream(info->ch_id, &output, -1);
-        CHECK_RET(ret, __func__, __LINE__);
+        ret = kd_mpi_venc_get_stream(info->ch_id, &output, 1000);
         if(ret)
         {
             free(output.pack);
@@ -394,8 +394,53 @@ static void *output_thread(void *arg)
 
     }
 
-    if (output_file)
+    /* drain: take all remaining encoded data before exit */
+    venc_debug("%s>draining remaining encoded data, ch %d\n", __func__, info->ch_id);
+    while (1)
+    {
+        k_venc_chn_status status;
+
+        ret = kd_mpi_venc_query_status(info->ch_id, &status);
+        if (ret || status.cur_packs == 0)
+            break;
+
+        output.pack_cnt = status.cur_packs;
+        output.pack = malloc(sizeof(k_venc_pack) * output.pack_cnt);
+
+        ret = kd_mpi_venc_get_stream(info->ch_id, &output, 500);
+        if (ret)
+        {
+            free(output.pack);
+            break;
+        }
+
+        for (i = 0; i < output.pack_cnt; i++)
+        {
+            if (output.pack[i].type != K_VENC_HEADER)
+                out_frames++;
+
+            k_u8 *pData;
+            pData = (k_u8 *)kd_mpi_sys_mmap(output.pack[i].phys_addr, output.pack[i].len);
+            if (output_file)
+                fwrite(pData, 1, output.pack[i].len, output_file);
+
+            kd_mpi_sys_munmap(pData, output.pack[i].len);
+
+            total_len += output.pack[i].len;
+        }
+
+        ret = kd_mpi_venc_release_stream(info->ch_id, &output);
+        CHECK_RET(ret, __func__, __LINE__);
+
+        free(output.pack);
+    }
+    venc_debug("%s>drain done, ch %d\n", __func__, info->ch_id);
+
+    if (output_file){
         fclose(output_file);
+        output_file = NULL;
+    }
+        
     venc_debug("%s>done, ch %d: out_frames %d, size %d bits\n", __func__, info->ch_id, out_frames, total_len * 8);
     return arg;
 }
@@ -556,7 +601,7 @@ k_s32 sample_exit(venc_conf_t *venc_conf)
         break;
     }
 
-    pthread_cancel(venc_conf->output_tid);
+    g_venc_output_stop = K_TRUE;
     pthread_join(venc_conf->output_tid, NULL);
 
     venc_debug("kill ch %d thread done! ch_done %d, chnum %d\n", ch, g_venc_conf.ch_done, g_venc_conf.chnum);
@@ -571,8 +616,11 @@ k_s32 sample_exit(venc_conf_t *venc_conf)
         osd_attach_pool_id = 0;
     }
 
-    if (output_file)
+    if (output_file){
         fclose(output_file);
+        output_file = NULL;
+    }
+        
     sample_vb_exit();
 
     g_venc_conf.ch_done = K_TRUE;
