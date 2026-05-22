@@ -13,9 +13,13 @@ menuconfig RTT_ENABLE_BUILD_EXAMPLES
                 source "$(SDK_RTSMART_SRC_DIR)/examples/3rd-party/Kconfig"
             endif
 
-        config RTT_ENABLE_PERIPHERAL_EXAMPLES
+        menuconfig RTT_ENABLE_PERIPHERAL_EXAMPLES
             bool "Enable build peripheral examples"
             default n
+
+            if RTT_ENABLE_PERIPHERAL_EXAMPLES
+                source "$(SDK_RTSMART_SRC_DIR)/examples/peripheral/Kconfig"
+            endif
 
         menuconfig RTT_ENABLE_MPP_EXAMPLES
             bool "Enable MPP examples"
