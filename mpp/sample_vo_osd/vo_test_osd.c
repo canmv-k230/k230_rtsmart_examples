@@ -31,10 +31,10 @@
  * 各显示一遍彩条。
  *
  * 命令行：
- *   vo_test_osd <connector_type> <width> <height> <layer_id>
+ *   vo_test_osd -c <connector_type> -l <layer_id> [-w <width>] [-h <height>] ...
  *
- * 示例（你的屏 480x800，connector type = 20，测试 OSD0）：
- *   vo_test_osd 20 480 800 4
+ * 示例（先用 list_connector 查看 connector type，再测试 OSD0）：
+ *   vo_test_osd -c <connector_type> -l 4
  *
  * 程序行为：
  *   - 初始化 connector、电源、VO；
@@ -63,17 +63,41 @@
 #include "k_type.h"
 #include "k_vb_comm.h"
 #include "k_video_comm.h"
-#include "k_sys_comm.h"
 
 #include "mpi_vb_api.h"
+#include "mpi_connector_api.h"
 #include "mpi_sys_api.h"
-#include "mpi_vo_api.h"
 
 #include "kd_display.h"
 
 #define ALIGN_UP(x, align) (((x) + ((align) - 1)) & ~((align)-1))
 
 static volatile bool g_exit = false;
+
+static int resolve_connector_size(k_connector_type *connector_type, k_u32 *width, k_u32 *height)
+{
+    k_connector_info info;
+
+    memset(&info, 0, sizeof(info));
+    if (kd_mpi_get_connector_info(*connector_type, &info) == K_SUCCESS) {
+        if (*width == 0)
+            *width = info.resolution.hactive;
+        if (*height == 0)
+            *height = info.resolution.vactive;
+    }
+
+    if (*width == 0)
+        *width = K_CONN_WIDTH(*connector_type);
+    if (*height == 0)
+        *height = K_CONN_HEIGHT(*connector_type);
+
+    if (*width == 0 || *height == 0) {
+        printf("ERROR: unable to resolve display size for connector type %u, please pass -w/-h\n", *connector_type);
+        return -1;
+    }
+
+    return 0;
+}
 
 static void sig_handler(int sig_no)
 {
@@ -574,34 +598,35 @@ static void print_usage(const char *prog)
 {
     printf("Usage: %s [options]\n", prog);
     printf("Options:\n");
-    printf("  -c <type>   Connector type (e.g., 20 for ST7701 480x800)\n");
-    printf("  -w <width>  OSD Image width\n");
-    printf("  -h <height> OSD Image height\n");
+    printf("  -c <type>   Connector type. Use list_connector to view supported types\n");
+    printf("  -w <width>  OSD image width [default: panel width]\n");
+    printf("  -h <height> OSD image height [default: panel height]\n");
     printf("  -l <layer>  VO Layer ID (4-7 for OSD)\n");
     printf("  -r <degree> Rotation (0, 90, 180, 270) [default: 0]\n");
     printf("  -x <offset> X offset [default: 0]\n");
     printf("  -y <offset> Y offset [default: 0]\n");
     printf("\nExample:\n");
-    printf("  %s -c 20 -w 480 -h 800 -l 4 -r 90 -x 10 -y 10\n", prog);
+    printf("  list_connector\n");
+    printf("  %s -c <connector_type> -l 4 -r 90 -x 10 -y 10\n", prog);
 }
 
 int main(int argc, char **argv)
 {
     k_connector_type connector_type = 0;
     k_u32 width = 0, height = 0;
-    k_vo_layer_id layer_id = 0;
+    k_vo_layer_id layer_id = 4;
     int rot_val = 0;
     k_s32 offset_x = 0, offset_y = 0;
 
     int opt;
-    bool c_set = false, w_set = false, h_set = false, l_set = false;
+    bool c_set = false;
 
     while ((opt = getopt(argc, argv, "c:w:h:l:r:x:y:")) != -1) {
         switch (opt) {
             case 'c': connector_type = (k_connector_type)atoi(optarg); c_set = true; break;
-            case 'w': width = (k_u32)atoi(optarg); w_set = true; break;
-            case 'h': height = (k_u32)atoi(optarg); h_set = true; break;
-            case 'l': layer_id = (k_vo_layer_id)atoi(optarg); l_set = true; break;
+            case 'w': width = (k_u32)atoi(optarg); break;
+            case 'h': height = (k_u32)atoi(optarg); break;
+            case 'l': layer_id = (k_vo_layer_id)atoi(optarg); break;
             case 'r': rot_val = atoi(optarg); break;
             case 'x': offset_x = atoi(optarg); break;
             case 'y': offset_y = atoi(optarg); break;
@@ -609,8 +634,13 @@ int main(int argc, char **argv)
         }
     }
 
-    if (!c_set || !w_set || !h_set || !l_set) {
-        printf("ERROR: Missing required arguments (-c, -w, -h, -l)\n");
+    if (!c_set) {
+        printf("ERROR: Missing required arguments (-c)\n");
+        print_usage(argv[0]);
+        return -1;
+    }
+
+    if (resolve_connector_size(&connector_type, &width, &height) != 0) {
         print_usage(argv[0]);
         return -1;
     }
@@ -620,20 +650,21 @@ int main(int argc, char **argv)
     else if (rot_val == 180) rotate = GDMA_ROTATE_DEGREE_180;
     else if (rot_val == 270) rotate = GDMA_ROTATE_DEGREE_270;
 
-    printf("vo_test_osd: connector=%d, size=%ux%u, layer=%d, rotate=%d, offset=(%d,%d)\n",
+    printf("vo_test_osd: connector=%u, size=%ux%u, layer=%d, rotate=%d, offset=(%d,%d)\n",
            connector_type, width, height, layer_id, rot_val, offset_x, offset_y);
 
     signal(SIGINT, sig_handler);
     signal(SIGPIPE, SIG_IGN);
 
-    /* 1) Initialize Display */
+    /* 1) VB System Init */
+    if (osd_vb_init() != K_SUCCESS) return -1;
+
+    /* 2) Initialize Display */
     if(kd_display_init(connector_type, 0, 0, rotate) != 0) {
         printf("ERROR: kd_display_init failed\n");
+        osd_vb_exit();
         return -1;
     }
-
-    /* 2) VB System Init */
-    if (osd_vb_init() != K_SUCCESS) return -1;
 
     /* Create VB Pool */
     k_vb_pool_config pool_cfg;

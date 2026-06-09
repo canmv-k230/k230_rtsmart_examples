@@ -431,9 +431,9 @@ int main(void)
 {
     // 首先需要配置引脚功能为GPIO
     // 假设使用的引脚如下（根据实际硬件调整）
-    int pin_dc = 20;
-    int pin_cs = 19;
-    int pin_rst = 12;
+    int pin_dc = 17;
+    int pin_cs = 14;
+    int pin_rst = 18;
     int pin_bl = -1;
     int spi_id = 1;
 
