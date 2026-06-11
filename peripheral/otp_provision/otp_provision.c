@@ -87,8 +87,10 @@ static void print_usage(const char *prog)
     printf("  - For otp_full.kdimg, this sample requires exactly two parts and writes\n");
     printf("    the otp_data part to 0x000-0x3ff\n");
     printf("    and converts the otp_key_lock part into drv_pufs_otp_lock calls.\n");
-    printf("  - After --yes, GPIO%d is used as a status LED by default (override OTP_STATUS_LED_PIN at build time).\n",
-           OTP_STATUS_LED_PIN);
+    printf("  - After --yes, GPIO%d reports success and GPIO%d reports failure by default.\n",
+           OTP_SUCCESS_LED_PIN,
+           OTP_FAILURE_LED_PIN);
+    printf("    Override OTP_SUCCESS_LED_PIN / OTP_FAILURE_LED_PIN at build time or in otp_provision_board.h.\n");
 }
 
 static const char *otp_outcome_name(otp_outcome_t outcome)
@@ -105,32 +107,53 @@ static const char *otp_outcome_name(otp_outcome_t outcome)
     }
 }
 
-static gpio_pin_value_t otp_status_led_value(bool on)
+typedef struct {
+    int              pin;
+    gpio_pin_value_t active_value;
+} otp_status_led_cfg_t;
+
+typedef struct {
+    drv_gpio_inst_t *success;
+    drv_gpio_inst_t *failure;
+    bool             shared;
+} otp_status_leds_t;
+
+static const otp_status_led_cfg_t g_success_led_cfg = {
+    .pin          = OTP_SUCCESS_LED_PIN,
+    .active_value = (OTP_SUCCESS_LED_ACTIVE_POL != 0) ? GPIO_PV_HIGH : GPIO_PV_LOW,
+};
+
+static const otp_status_led_cfg_t g_failure_led_cfg = {
+    .pin          = OTP_FAILURE_LED_PIN,
+    .active_value = (OTP_FAILURE_LED_ACTIVE_POL != 0) ? GPIO_PV_HIGH : GPIO_PV_LOW,
+};
+
+static gpio_pin_value_t otp_status_led_value(const otp_status_led_cfg_t *cfg, bool on)
 {
-#if OTP_STATUS_LED_ACTIVE_LOW
-    return on ? GPIO_PV_LOW : GPIO_PV_HIGH;
-#else
-    return on ? GPIO_PV_HIGH : GPIO_PV_LOW;
-#endif
+    gpio_pin_value_t active_value = cfg ? cfg->active_value : GPIO_PV_HIGH;
+    gpio_pin_value_t inactive_value = (active_value == GPIO_PV_HIGH) ? GPIO_PV_LOW : GPIO_PV_HIGH;
+
+    return on ? active_value : inactive_value;
 }
 
-static int otp_status_led_prepare(drv_gpio_inst_t **led)
+static int otp_status_led_prepare_one(const otp_status_led_cfg_t *cfg, drv_gpio_inst_t **led)
 {
-    if (!led) {
+    if (!cfg || !led) {
         errno = EINVAL;
         return -1;
     }
 
-    if (OTP_STATUS_LED_PIN < 0) {
+    *led = NULL;
+    if (cfg->pin < 0) {
         errno = ENODEV;
         return -1;
     }
 
-    if (drv_fpioa_set_pin_func(OTP_STATUS_LED_PIN, (fpioa_func_t)(GPIO0 + OTP_STATUS_LED_PIN)) != 0) {
+    if (drv_fpioa_set_pin_func(cfg->pin, (fpioa_func_t)(GPIO0 + cfg->pin)) != 0) {
         return -1;
     }
 
-    if (drv_gpio_inst_create(OTP_STATUS_LED_PIN, led) != 0) {
+    if (drv_gpio_inst_create(cfg->pin, led) != 0) {
         return -1;
     }
 
@@ -139,7 +162,7 @@ static int otp_status_led_prepare(drv_gpio_inst_t **led)
         return -1;
     }
 
-    if (drv_gpio_value_set(*led, otp_status_led_value(false)) != 0) {
+    if (drv_gpio_value_set(*led, otp_status_led_value(cfg, false)) != 0) {
         drv_gpio_inst_destroy(led);
         return -1;
     }
@@ -147,77 +170,173 @@ static int otp_status_led_prepare(drv_gpio_inst_t **led)
     return 0;
 }
 
-static void otp_status_led_blink(drv_gpio_inst_t *led, unsigned int delay_us)
+static void otp_status_led_set(const otp_status_led_cfg_t *cfg, drv_gpio_inst_t *led, bool on)
 {
     if (!led) {
         return;
     }
 
-    drv_gpio_value_set(led, otp_status_led_value(true));
+    drv_gpio_value_set(led, otp_status_led_value(cfg, on));
+}
+
+static void otp_status_led_blink(const otp_status_led_cfg_t *cfg, drv_gpio_inst_t *led, unsigned int delay_us)
+{
+    if (!led) {
+        return;
+    }
+
+    otp_status_led_set(cfg, led, true);
     usleep(delay_us);
-    drv_gpio_value_set(led, otp_status_led_value(false));
+    otp_status_led_set(cfg, led, false);
     usleep(delay_us);
 }
 
-static void otp_status_led_blink_group(drv_gpio_inst_t *led, size_t count, unsigned int delay_us)
+static void otp_status_led_blink_group(const otp_status_led_cfg_t *cfg,
+                                       drv_gpio_inst_t             *led,
+                                       size_t                       count,
+                                       unsigned int                 delay_us)
 {
     if (!led || count == 0U) {
         return;
     }
 
     for (size_t index = 0; index < count; ++index) {
-        otp_status_led_blink(led, delay_us);
+        otp_status_led_blink(cfg, led, delay_us);
     }
 
     usleep(OTP_STATUS_LED_PATTERN_GAP_US);
 }
 
-static void otp_status_led_loop(drv_gpio_inst_t *led, otp_outcome_t outcome)
+static int otp_status_leds_prepare(otp_status_leds_t *leds)
 {
-    if (!led) {
+    int prepared = 0;
+
+    if (!leds) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(leds, 0, sizeof(*leds));
+
+    if (otp_status_led_prepare_one(&g_success_led_cfg, &leds->success) == 0) {
+        ++prepared;
+    }
+
+    if (g_failure_led_cfg.pin == g_success_led_cfg.pin && leds->success) {
+        leds->failure = leds->success;
+        leds->shared = true;
+        ++prepared;
+    } else if (otp_status_led_prepare_one(&g_failure_led_cfg, &leds->failure) == 0) {
+        ++prepared;
+    }
+
+    if (prepared == 0) {
+        errno = ENODEV;
+        return -1;
+    }
+
+    return 0;
+}
+
+static void otp_status_leds_destroy(otp_status_leds_t *leds)
+{
+    if (!leds) {
         return;
     }
 
+    if (leds->shared) {
+        if (leds->success) {
+            drv_gpio_inst_destroy(&leds->success);
+        }
+        leds->failure = NULL;
+        return;
+    }
+
+    if (leds->failure) {
+        drv_gpio_inst_destroy(&leds->failure);
+    }
+
+    if (leds->success) {
+        drv_gpio_inst_destroy(&leds->success);
+    }
+}
+
+static void otp_status_led_loop(otp_status_leds_t *leds, otp_outcome_t outcome)
+{
+    drv_gpio_inst_t            *led = NULL;
+    drv_gpio_inst_t            *inactive_led = NULL;
+    const otp_status_led_cfg_t *cfg = NULL;
+    const otp_status_led_cfg_t *inactive_cfg = NULL;
+    size_t                      blinks = 0;
+    unsigned int                delay_us = OTP_STATUS_LED_BLINK_DELAY_US;
+
+    if (!leds) {
+        return;
+    }
+
+    otp_status_led_set(&g_success_led_cfg, leds->success, false);
+    otp_status_led_set(&g_failure_led_cfg, leds->failure, false);
+
     switch (outcome) {
     case OTP_OUTCOME_SUCCESS:
-        while (1) {
-            otp_status_led_blink_group(led, 1U, OTP_STATUS_LED_BLINK_DELAY_US);
-        }
+        led = leds->success ? leds->success : leds->failure;
+        cfg = leds->success ? &g_success_led_cfg : &g_failure_led_cfg;
+        inactive_led = leds->success ? leds->failure : NULL;
+        inactive_cfg = leds->success ? &g_failure_led_cfg : NULL;
+        blinks = 1U;
         break;
     case OTP_OUTCOME_DRY_RUN:
-        while (1) {
-            otp_status_led_blink_group(led, OTP_STATUS_LED_DRYRUN_BLINKS, OTP_STATUS_LED_BLINK_DELAY_US);
-        }
+        led = leds->failure ? leds->failure : leds->success;
+        cfg = leds->failure ? &g_failure_led_cfg : &g_success_led_cfg;
+        inactive_led = leds->failure ? leds->success : NULL;
+        inactive_cfg = leds->failure ? &g_success_led_cfg : NULL;
+        blinks = OTP_STATUS_LED_DRYRUN_BLINKS;
         break;
     case OTP_OUTCOME_FAILURE:
-        while (1) {
-            otp_status_led_blink_group(led, OTP_STATUS_LED_FAIL_BLINKS, OTP_STATUS_LED_BLINK_DELAY_US / 2U);
-        }
+        led = leds->failure ? leds->failure : leds->success;
+        cfg = leds->failure ? &g_failure_led_cfg : &g_success_led_cfg;
+        inactive_led = leds->failure ? leds->success : NULL;
+        inactive_cfg = leds->failure ? &g_success_led_cfg : NULL;
+        blinks = OTP_STATUS_LED_FAIL_BLINKS;
+        delay_us = OTP_STATUS_LED_BLINK_DELAY_US / 2U;
         break;
     default:
-        break;
+        fprintf(stderr, "[otp_provision] Warning: unknown LED outcome %d\n", (int)outcome);
+        return;
+    }
+
+    if (inactive_led == led) {
+        inactive_led = NULL;
+        inactive_cfg = NULL;
+    }
+
+    while (led && blinks > 0U) {
+        otp_status_led_set(inactive_cfg, inactive_led, false);
+        otp_status_led_blink_group(cfg, led, blinks, delay_us);
+        otp_status_led_set(inactive_cfg, inactive_led, false);
     }
 }
 
 static void otp_status_led_signal(otp_outcome_t outcome)
 {
-    drv_gpio_inst_t *led = NULL;
+    otp_status_leds_t leds;
 
-    if (outcome == OTP_OUTCOME_NONE || OTP_STATUS_LED_PIN < 0) {
+    if (outcome == OTP_OUTCOME_NONE || (OTP_SUCCESS_LED_PIN < 0 && OTP_FAILURE_LED_PIN < 0)) {
         return;
     }
 
-    if (otp_status_led_prepare(&led) != 0) {
+    if (otp_status_leds_prepare(&leds) != 0) {
         fprintf(stderr,
-                "[otp_provision] Warning: failed to drive status LED on GPIO%d\n",
-                OTP_STATUS_LED_PIN);
+                "[otp_provision] Warning: failed to drive status LEDs (success GPIO%d, failure GPIO%d)\n",
+                OTP_SUCCESS_LED_PIN,
+                OTP_FAILURE_LED_PIN);
         return;
     }
 
-    fprintf(stderr, "[otp_provision] LED status loop active, press Ctrl+C to stop.\n");
-    otp_status_led_loop(led, outcome);
+    fprintf(stderr, "[otp_provision] LED status active, press Ctrl+C to stop.\n");
+    otp_status_led_loop(&leds, outcome);
 
-    drv_gpio_inst_destroy(&led);
+    otp_status_leds_destroy(&leds);
 }
 
 static int read_full(int fd, uint8_t *buffer, size_t size)
