@@ -29,6 +29,7 @@ subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VO_VIDEO)        += sample_vo_video
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VO_WBC_DUMP)     += sample_vo_wbc_dump
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_FFT_DISPLAY)     += sample_fft_display
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VICAP)     		+= sample_vicap_sensor
+subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_WEBRTC)    		+= sample_webrtc
 
 .PHONY: all clean distclean
 

@@ -155,4 +155,12 @@ if RTT_ENABLE_MPP_EXAMPLES
       help
         Video Output: Using Write Back Channel WBC to dump screen content to file.
 
+  config RTSMART_MPP_ENABLE_SAMPLE_WEBRTC
+      bool "Enable Build sample_webrtc"
+      default n
+      depends on RTSMART_3RD_PARTY_ENABLE_LIBPEER
+      help
+        WebRTC demo: Connect to signaling server and stream H.264 video and
+        G.711A audio via libpeer DataChannel.
+
 endif
