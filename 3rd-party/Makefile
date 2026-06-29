@@ -10,6 +10,7 @@ subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_MBEDTLS_TESTS) += mbedtls/pufs_alt_ver
 subdirs-$(CONFIG_RTSMART_LIBS_MINIHTTP_ENABLE_SAMPLES) += minihttp/minihttp_basic minihttp/minihttp_advanced
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_TUYALINKSDK_SAMPLES) += tuya/tuya_basic
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_CJSON_SAMPLES) += cjson/cjson_basic
+subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_LIBWEBSOCKETS_SAMPLES) += libwebsockets/ws_server libwebsockets/ws_client libwebsockets/ws_poll_test
 
 .PHONY: all clean distclean
 

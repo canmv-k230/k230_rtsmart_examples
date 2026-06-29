@@ -2,3 +2,4 @@ elf
 out
 build
 k230_bin
+__pycache__

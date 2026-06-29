@@ -43,4 +43,9 @@ if RTT_ENABLE_3RD_PARTY_EXAMPLES
         default n
         depends on RTSMART_3RD_PARTY_ENABLE_CJSON
 
+    config RTSMART_3RD_PARTY_ENABLE_LIBWEBSOCKETS_SAMPLES
+        bool "Enable Build libwebsockets Sample Programs"
+        default n
+        depends on RTSMART_3RD_PARTY_ENABLE_LIBWEBSOCKETS
+
 endif
