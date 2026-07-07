@@ -6,11 +6,11 @@
  *
  *   ┌──────────┐    bind     ┌──────────┐    bind     ┌──────────┐
  *   │  VICAP   │───────────> │    VO    │            │  VENC   │
- *   │ (camera) │ CHN0        │ (LCD/    │            │ (H.264  │
- *   │          │───────────> │  HDMI)   │            │  encode)│
- *   │          │ CHN1        └──────────┘            └────┬─────┘
+ *   │ (camera) │ CHN0        │ (LCD/    │            │ (H.264/ │
+ *   │          │───────────> │  HDMI)   │            │ H.265   │
+ *   │          │ CHN1        └──────────┘            │ encode) │
  *   └──────────┘                                        │
- *                                                       │ H.264 frames
+ *                                                       │ H.264/H.265 frames
  *                                                       ▼
  *   ┌────────────────────────────────────────────────────────────┐
  *   │                    WebRTC (libpeer)                         │
@@ -167,17 +167,17 @@ static void signal_handler(int sig) {
 /**
  * Send an encoded VENC frame to the WebRTC peer.
  *
- * H.264 over RTP requires SPS/PPS before each I-frame for the
- * decoder to initialize. The K230 VENC emits SPS/PPS as a
- * separate K_VENC_HEADER pack (usually once at stream start),
+ * H.264/H.265 over RTP requires parameter sets (SPS/PPS or VPS/SPS/PPS)
+ * before each I-frame for the decoder to initialize. The K230 VENC emits
+ * them as a separate K_VENC_HEADER pack (usually once at stream start),
  * so we:
  *   1. Cache any K_VENC_HEADER packs we see
- *   2. Prepend cached SPS/PPS to every I-frame
+ *   2. Prepend cached parameter sets to every I-frame
  *   3. Send P-frames as-is
  */
 static void send_venc_frame_to_webrtc(const uint8_t* data, size_t size,
-                                       k_venc_pack_type type, uint64_t pts) {
-  /* Cache SPS/PPS regardless of connection state,
+                                        k_venc_pack_type type, uint64_t pts) {
+  /* Cache parameter sets regardless of connection state,
      so they are available when the first I-frame is sent */
   if (type == K_VENC_HEADER) {
     if (g_sps_pps_buf) free(g_sps_pps_buf);
@@ -192,9 +192,9 @@ static void send_venc_frame_to_webrtc(const uint8_t* data, size_t size,
   /* Only send video data if we have an active WebRTC connection */
   if (g_state != PEER_CONNECTION_COMPLETED && g_state != PEER_CONNECTION_CONNECTED) return;
 
-  /* I-frame: send SPS/PPS then I-frame as two separate video sends.
-   * WebRTC/RTP (RFC 6184) handles NAL units independently — no need
-   * to concatenate SPS/PPS + I-frame into a single buffer.
+  /* I-frame: send parameter sets then I-frame as two separate video sends.
+   * WebRTC/RTP handles NAL units independently — no need
+   * to concatenate parameter sets + I-frame into a single buffer.
    * This avoids a per-I-frame malloc/free. */
   if (type == K_VENC_I_FRAME && g_sps_pps_buf && g_sps_pps_size > 0) {
     peer_connection_send_video(g_pc, g_sps_pps_buf, g_sps_pps_size, pts);
@@ -421,6 +421,7 @@ static void print_usage(const char* prog) {
   printf("  -p port       HTTP server port (default: 8080)\n");
   printf("  -s csi_num    CSI device number 0-2 (default: 2)\n");
   printf("  -c connector  Connector type: 605274512=LCD, 757006876=HDMI (default: LCD)\n");
+  printf("  -t type       Video encoder type: h264/h265 (default: h264)\n");
   printf("  -W width      VENC encode width (default: 1280)\n");
   printf("  -H height     VENC encode height (default: 720)\n");
   printf("  -b bitrate    VENC bitrate kbps (default: 2000)\n");
@@ -436,6 +437,7 @@ int main(int argc, char* argv[]) {
   k_u32 venc_width = 1280;
   k_u32 venc_height = 720;
   k_u32 venc_bitrate = 2000;
+  VencType venc_type = VENC_TYPE_H264;
 
   /* Parse command-line arguments */
   for (int i = 1; i < argc; i++) {
@@ -445,6 +447,16 @@ int main(int argc, char* argv[]) {
       csi_num = (k_u32)atoi(argv[++i]);
     } else if (strcmp(argv[i], "-c") == 0 && (i + 1) < argc) {
       connector_type = (k_connector_type)atoi(argv[++i]);
+    } else if (strcmp(argv[i], "-t") == 0 && (i + 1) < argc) {
+      i++;
+      if (strcmp(argv[i], "h265") == 0) {
+        venc_type = VENC_TYPE_H265;
+      } else if (strcmp(argv[i], "h264") == 0) {
+        venc_type = VENC_TYPE_H264;
+      } else {
+        print_usage(argv[0]);
+        return 1;
+      }
     } else if (strcmp(argv[i], "-W") == 0 && (i + 1) < argc) {
       venc_width = (k_u32)atoi(argv[++i]);
     } else if (strcmp(argv[i], "-H") == 0 && (i + 1) < argc) {
@@ -455,6 +467,16 @@ int main(int argc, char* argv[]) {
       print_usage(argv[0]);
       return 1;
     }
+  }
+
+  /* Validate parameter ranges */
+  if (venc_width < 64 || venc_width > 3840 || venc_height < 64 || venc_height > 2160) {
+    printf("Error: resolution out of range (64-3840 x 64-2160), got %ux%u\n", venc_width, venc_height);
+    return 1;
+  }
+  if (venc_bitrate < 100 || venc_bitrate > 20000) {
+    printf("Error: bitrate out of range (100-20000 kbps), got %u\n", venc_bitrate);
+    return 1;
   }
 
   /* Install SIGINT handler for clean shutdown (Ctrl+C) */
@@ -470,6 +492,7 @@ int main(int argc, char* argv[]) {
     .venc_width = venc_width,
     .venc_height = venc_height,
     .venc_bitrate_kbps = venc_bitrate,
+    .venc_type = venc_type,
   };
 
   if (mpp_pipeline_init(&pipeline_config) != 0) {
@@ -484,11 +507,11 @@ int main(int argc, char* argv[]) {
   }
 
   /* ── Initialize WebRTC (libpeer) ──
-   * Video-only configuration: H.264 codec, no audio, no DataChannel.
+   * Video-only configuration: H.264/H.265 codec, no audio, no DataChannel.
    * DataChannel was intentionally removed — this demo only streams video. */
   PeerConfiguration config = {
       .datachannel = DATA_CHANNEL_NONE,
-      .video_codec = CODEC_H264,
+      .video_codec = venc_type == VENC_TYPE_H265 ? CODEC_H265 : CODEC_H264,
       .audio_codec = CODEC_NONE};
 
   peer_init();
@@ -514,7 +537,8 @@ int main(int argc, char* argv[]) {
   printf("  libpeer LAN Camera Demo\n");
   printf("========================================\n");
   printf("  CSI: %u, Connector: %d\n", csi_num, connector_type);
-  printf("  Encode: %ux%u @ %ukbps H264\n", venc_width, venc_height, venc_bitrate);
+  printf("  Encode: %ux%u @ %ukbps %s\n", venc_width, venc_height, venc_bitrate,
+         venc_type_name(venc_type));
   printf("  Open in browser:\n");
   printf("  http://%s:%d\n", local_ip, port);
   printf("========================================\n\n");

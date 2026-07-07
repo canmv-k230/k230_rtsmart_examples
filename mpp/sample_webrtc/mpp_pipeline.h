@@ -25,6 +25,17 @@
 /** Max NAL units per VENC frame (SPS+PPS+slice slices) */
 #define VENC_MAX_PACK_CNT   (5)
 
+/** Video encoder type */
+typedef enum {
+  VENC_TYPE_H264 = 0,
+  VENC_TYPE_H265,
+} VencType;
+
+/** Get encoder type name string for printing */
+static inline const char* venc_type_name(VencType t) {
+  return t == VENC_TYPE_H265 ? "H265" : "H264";
+}
+
 /**
  * MPP Pipeline configuration.
  * Passed to mpp_pipeline_init() to configure camera, display, and encoder.
@@ -35,6 +46,7 @@ typedef struct {
   k_u32 venc_width;                 /**< VENC encode width in pixels (e.g. 1280) */
   k_u32 venc_height;                /**< VENC encode height in pixels (e.g. 720) */
   k_u32 venc_bitrate_kbps;          /**< VENC target bitrate in kbps (e.g. 2000) */
+  VencType venc_type;               /**< VENC encode type: H.264 or H.265 (default H.264) */
 } MppPipelineConfig;
 
 /**
@@ -60,11 +72,18 @@ int mpp_pipeline_start(void);
 
 /**
  * Get VENC channel ID for stream polling.
- * Use this with kd_mpi_venc_get_stream() to read encoded H.264 frames.
+ * Use this with kd_mpi_venc_get_stream() to read encoded frames.
  *
  * @return VENC channel ID
  */
 k_u32 mpp_pipeline_get_venc_chn(void);
+
+/**
+ * Get the encoder type configured at init time.
+ *
+ * @return Encoder type (VENC_TYPE_H264 or VENC_TYPE_H265)
+ */
+VencType mpp_pipeline_get_venc_type(void);
 
 /**
  * Stop and deinitialize the MPP pipeline.

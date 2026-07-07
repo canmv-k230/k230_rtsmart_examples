@@ -82,6 +82,7 @@ static k_u32 g_display_height = 0;  /* Actual display panel height (after rotati
 
 static int g_pipeline_initialized = 0;  /* 1 after mpp_pipeline_init succeeds */
 static int g_pipeline_started = 0;      /* 1 after mpp_pipeline_start succeeds */
+static VencType g_venc_type = VENC_TYPE_H264;  /* Encoder type (stored from config) */
 
 /* ── VB (Video Buffer) ───────────────────────────────────────────── */
 
@@ -411,7 +412,7 @@ static k_u32 venc_create_pool(k_u32 width, k_u32 height) {
  * @param bitrate_kbps   Target bitrate in kbps (CBR mode)
  * @return 0 on success, -1 on failure
  */
-static int venc_init(k_u32 chn_id, k_u32 width, k_u32 height, k_u32 bitrate_kbps) {
+static int venc_init(k_u32 chn_id, k_u32 width, k_u32 height, k_u32 bitrate_kbps, VencType venc_type) {
   k_venc_chn_attr chn_attr;
   k_s32 ret;
 
@@ -423,7 +424,7 @@ static int venc_init(k_u32 chn_id, k_u32 width, k_u32 height, k_u32 bitrate_kbps
   }
   kd_mpi_venc_attach_vb_pool(chn_id, g_venc_attach_pool_id);
 
-  /* Configure H.264 CBR encoding */
+  /* Configure H.264/H.265 CBR encoding */
   memset(&chn_attr, 0, sizeof(chn_attr));
   chn_attr.venc_attr.pic_width = width;
   chn_attr.venc_attr.pic_height = height;
@@ -431,8 +432,14 @@ static int venc_init(k_u32 chn_id, k_u32 width, k_u32 height, k_u32 bitrate_kbps
   chn_attr.rc_attr.cbr.src_frame_rate = 30;         /* Input framerate */
   chn_attr.rc_attr.cbr.dst_frame_rate = 30;         /* Output framerate */
   chn_attr.rc_attr.cbr.bit_rate = bitrate_kbps;     /* Target bitrate */
-  chn_attr.venc_attr.type = K_PT_H264;              /* H.264 codec */
-  chn_attr.venc_attr.profile = VENC_PROFILE_H264_MAIN;  /* Main profile */
+
+  if (venc_type == VENC_TYPE_H265) {
+    chn_attr.venc_attr.type = K_PT_H265;               /* H.265 codec */
+    chn_attr.venc_attr.profile = VENC_PROFILE_H265_MAIN;  /* Main profile */
+  } else {
+    chn_attr.venc_attr.type = K_PT_H264;               /* H.264 codec */
+    chn_attr.venc_attr.profile = VENC_PROFILE_H264_MAIN;  /* Main profile */
+  }
 
   ret = kd_mpi_venc_create_chn(chn_id, &chn_attr);
   if (ret != K_SUCCESS) {
@@ -457,7 +464,8 @@ static int venc_init(k_u32 chn_id, k_u32 width, k_u32 height, k_u32 bitrate_kbps
     return -1;
   }
 
-  printf("[MPP] VENC: chn=%d %ux%u H264 CBR %ukbps\n", chn_id, width, height, bitrate_kbps);
+  printf("[MPP] VENC: chn=%d %ux%u %s CBR %ukbps\n", chn_id, width, height,
+         venc_type_name(venc_type), bitrate_kbps);
   return 0;
 }
 
@@ -589,7 +597,8 @@ int mpp_pipeline_init(const MppPipelineConfig* config) {
                    config->venc_width, config->venc_height);
   if (ret != 0) { layer_exit(g_vo_layer); connector_exit(); vb_exit(); return ret; }
 
-  /* 5. VENC channel allocation + H.264 encoder init */
+  /* 5. VENC channel allocation + H.264/H.265 encoder init */
+  g_venc_type = config->venc_type;
   ret = kd_mpi_venc_request_chn(&g_venc_chn);
   if (ret != 0) {
     printf("[MPP] VENC request_chn failed, ret=%d\n", ret);
@@ -597,7 +606,7 @@ int mpp_pipeline_init(const MppPipelineConfig* config) {
     return ret;
   }
 
-  ret = venc_init(g_venc_chn, config->venc_width, config->venc_height, config->venc_bitrate_kbps);
+  ret = venc_init(g_venc_chn, config->venc_width, config->venc_height, config->venc_bitrate_kbps, config->venc_type);
   if (ret != 0) {
     kd_mpi_venc_release_chn(g_venc_chn);
     vicap_exit(g_vicap_dev); layer_exit(g_vo_layer); connector_exit(); vb_exit();
@@ -659,12 +668,17 @@ int mpp_pipeline_start(void) {
   }
 
   g_pipeline_started = 1;
-  printf("[MPP] Pipeline started: camera capture + LCD/HDMI display + H264 encode\n");
+  printf("[MPP] Pipeline started: camera capture + LCD/HDMI display + %s encode\n",
+         venc_type_name(g_venc_type));
   return 0;
 }
 
 k_u32 mpp_pipeline_get_venc_chn(void) {
   return g_venc_chn;
+}
+
+VencType mpp_pipeline_get_venc_type(void) {
+  return g_venc_type;
 }
 
 /**
