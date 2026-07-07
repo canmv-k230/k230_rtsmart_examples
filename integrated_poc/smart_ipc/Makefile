@@ -32,19 +32,40 @@ OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN) $(ASSETS_INSTALL)))
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/libmpp.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/libopencv.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/libnncase.mk
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/librtsmart_hal.mk
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/lib3rdparty.mk
+
+# libpeer library paths (WebRTC support)
+LIBPEER_SRC := $(SDK_RTSMART_SRC_DIR)/libs/3rd-party/libpeer/src
+LIBPEER_LIB_DIR := $(SDK_RTSMART_BUILD_DIR)/libs/3rd-party/lib
+LIBPEER_3RD_PARTY_LIB_DIR := $(SDK_RTSMART_SRC_DIR)/libs/3rd-party/libpeer/3rd-party/lib
+
+# libpeer static libraries (direct path to avoid SDK global mbedtls conflict)
+LIBPEER_LIBS := $(LIBPEER_LIB_DIR)/libpeer.a
+LIBPEER_LIBS += $(LIBPEER_LIB_DIR)/libcjson.a
+LIBPEER_LIBS += $(LIBPEER_3RD_PARTY_LIB_DIR)/libmbedcrypto.a
+LIBPEER_LIBS += $(LIBPEER_3RD_PARTY_LIB_DIR)/libmbedx509.a
+LIBPEER_LIBS += $(LIBPEER_3RD_PARTY_LIB_DIR)/libmbedtls.a
+LIBPEER_LIBS += $(LIBPEER_3RD_PARTY_LIB_DIR)/libsrtp2.a
+LIBPEER_LIBS += $(LIBPEER_3RD_PARTY_LIB_DIR)/libusrsctp.a
 
 # Compiler flags
 C_CXX_FLAGS := -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os
 C_CXX_FLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
+C_CXX_FLAGS += -I$(LIBPEER_SRC)
 C_CXX_FLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
 C_CXX_FLAGS += -I./face_detection
 
 CFLAGS 		:= $(C_CXX_FLAGS) -std=gnu99
-CXX_FLAGS 	:= $(C_CXX_FLAGS) -std=c++20 
+CXX_FLAGS 	:= $(C_CXX_FLAGS) -std=c++20
 
 # Linker flags
+# libpeer libs (with newer mbedtls) MUST come before SDK LIB_LDFLAGS (older mbedtls)
+# so the linker resolves mbedtls symbols from libpeer's version first.
 LDFLAGS := -T $(SDK_RTSMART_SRC_DIR)/libs/mk/link.lds --static -Wl,--gc-sections
+LDFLAGS += -Wl,--start-group $(LIBPEER_LIBS) -Wl,--end-group
 LDFLAGS += $(LIB_LDFLAGS)
+LDFLAGS += -lpthread
 
 # Phony targets
 .PHONY: all clean distclean

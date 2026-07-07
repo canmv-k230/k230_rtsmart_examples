@@ -8,14 +8,34 @@
 #include <thread>
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
 
-MySmartIPC::MySmartIPC() : rtsp_port_(8554) {}
+/* Streaming mode specific headers */
+#include "rtsp_server.h"   /* RTSP */
+#include "http_server.h"   /* WebRTC signaling */
+#include "web_page.h"      /* WebRTC embedded page */
+
+/* Global instance for C-style HTTP callback (no userdata in http_server API) */
+static MySmartIPC* g_smart_ipc_instance = nullptr;
+
+/* C-linkage wrapper so http_server_start gets a proper C function pointer.
+ * OnHttpRequest is a C++ static member and may not be safely passed as a C callback. */
+extern "C" void http_request_handler(const char* method, const char* path,
+                                      const char* body, int body_len,
+                                      http_response_t* response) {
+    MySmartIPC::OnHttpRequest(method, path, body, body_len, response);
+}
+
+MySmartIPC::MySmartIPC() : port_(8554) {}
 
 void MySmartIPC::OnAEncData(k_u32 chn_id, k_u8* pdata, size_t size, k_u64 time_stamp) {
-    // 仅在RTSP就绪且整体启动后才推流
-    if (started_ && rtsp_ready_) {
-        rtsp_server_.SendAudioData(stream_url_, (const uint8_t*)pdata, size, time_stamp);
+    if (!started_ || !streaming_ready_) return;
+
+    if (streaming_mode_ == StreamingMode::kRtsp) {
+        auto* srv = static_cast<KdRtspServer*>(rtsp_server_);
+        if (srv) srv->SendAudioData(stream_url_, (const uint8_t*)pdata, size, time_stamp);
     }
+    /* WebRTC mode: no audio support in this demo */
 }
 
 static k_u64 get_ticks() {
@@ -27,9 +47,41 @@ static k_u64 get_ticks() {
 }
 
 void MySmartIPC::OnVEncData(k_u32 chn_id, void *data, size_t size, k_venc_pack_type type, uint64_t timestamp) {
-    // 仅在RTSP就绪且整体启动后才推流
-    if (started_ && rtsp_ready_) {
-        rtsp_server_.SendVideoData(stream_url_, (const uint8_t*)data, size, timestamp);
+    if (!started_ || !streaming_ready_) return;
+
+    if (streaming_mode_ == StreamingMode::kRtsp) {
+        /* ── RTSP path ── */
+        auto* srv = static_cast<KdRtspServer*>(rtsp_server_);
+        if (srv) srv->SendVideoData(stream_url_, (const uint8_t*)data, size, timestamp);
+
+    } else {
+        /* ── WebRTC path ── */
+        /* Mark in-use BEFORE the state check so the reconnect path (GET /offer)
+         * sees us and waits. If we checked state first, close() could happen
+         * between the check and setting the flag — the drain would miss us. */
+        venc_in_pc_ = 1;
+        if (!webrtc_pc_ || (webrtc_state_ != PEER_CONNECTION_COMPLETED && webrtc_state_ != PEER_CONNECTION_CONNECTED)) {
+            venc_in_pc_ = 0;
+            return;
+        }
+
+        if (type == K_VENC_HEADER) {
+            /* Cache SPS/PPS for prepending to I-frames */
+            if (sps_pps_buf_) free(sps_pps_buf_);
+            sps_pps_buf_ = (uint8_t*)malloc(size);
+            if (sps_pps_buf_) {
+                memcpy(sps_pps_buf_, data, size);
+                sps_pps_size_ = size;
+            }
+            venc_in_pc_ = 0;
+            return;
+        }
+        /* Prepend SPS/PPS before every I-frame */
+        if (type == K_VENC_I_FRAME && sps_pps_buf_ && sps_pps_size_ > 0) {
+            peer_connection_send_video(webrtc_pc_, sps_pps_buf_, sps_pps_size_, timestamp);
+        }
+        peer_connection_send_video(webrtc_pc_, (const uint8_t*)data, size, timestamp);
+        venc_in_pc_ = 0;
     }
 }
 
@@ -85,50 +137,39 @@ void MySmartIPC::OnAIFrameData(k_u32 chn_id, k_video_frame_info* frame_info) {
 
 /**
  * @brief 获取指定网络接口的IP地址（IPv4）
- * @param ifname 网络接口名称（如"eth0"、"wlan0"）
- * @param ip_str 输出缓冲区（至少16字节，用于存储"xxx.xxx.xxx.xxx"）
- * @param str_len 输出缓冲区长度（建议传入16）
- * @return 0：成功；-1：失败
  */
 int get_interface_ip(const char *ifname, char *ip_str, int str_len) {
     int sock_get_ip;
     struct sockaddr_in *sin;
     struct ifreq ifr_ip;
 
-    // 参数合法性校验
     if (ifname == NULL || ip_str == NULL || str_len < 16) {
         printf("Invalid parameters for get_interface_ip\n");
         return -1;
     }
 
-    // 创建socket（用于ioctl调用，无需实际连接）
     if ((sock_get_ip = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
         printf("Failed to create socket for getting IP\n");
         return -1;
     }
 
-    // 初始化接口请求结构体
     memset(&ifr_ip, 0, sizeof(ifr_ip));
-    strncpy(ifr_ip.ifr_name, ifname, sizeof(ifr_ip.ifr_name) - 1); // 避免越界
+    strncpy(ifr_ip.ifr_name, ifname, sizeof(ifr_ip.ifr_name) - 1);
 
-    // 获取接口IP地址
     if (ioctl(sock_get_ip, SIOCGIFADDR, &ifr_ip) < 0) {
         printf("ioctl(SIOCGIFADDR) failed for interface %s\n", ifname);
         close(sock_get_ip);
         return -1;
     }
 
-    // 提取IP地址并转换为字符串
     sin = (struct sockaddr_in *)&ifr_ip.ifr_addr;
-    strncpy(ip_str, inet_ntoa(sin->sin_addr), str_len - 1); // 确保不越界
-    ip_str[str_len - 1] = '\0'; // 手动添加字符串结束符
+    strncpy(ip_str, inet_ntoa(sin->sin_addr), str_len - 1);
+    ip_str[str_len - 1] = '\0';
 
-    // 清理资源
     close(sock_get_ip);
     return 0;
 }
 
-// 带重试机制的IP获取（直到获取有效IP或超时）
 static int get_valid_ip_with_retry(const char *ifname, char *ip_str, int str_len,
                            int max_retry, int interval_ms) {
     if (ifname == NULL || ip_str == NULL || str_len < 16 || max_retry <= 0 || interval_ms <= 0) {
@@ -137,52 +178,41 @@ static int get_valid_ip_with_retry(const char *ifname, char *ip_str, int str_len
 
     for (int i = 0; i < max_retry; i++) {
         if (get_interface_ip(ifname, ip_str, str_len) == 0) {
-            // 检查是否为有效IP（非0.0.0.0）
             if (strcmp(ip_str, "0.0.0.0") != 0) {
-                return 0; // 成功获取有效IP
+                return 0;
             }
         }
-
-        // 未获取到有效IP，等待重试
         printf("IP is 0.0.0.0, retrying (%d/%d)...\n", i + 1, max_retry);
-        usleep(interval_ms * 1000); // 毫秒转微秒
+        usleep(interval_ms * 1000);
     }
-
-    return -1; // 达到最大重试次数仍未获取有效IP
+    return -1;
 }
 
-// 辅助函数：替换RTSP URL中的IP地址
 static char* replace_rtsp_ip(const char* original_url, const char* new_ip, char* new_url, int new_url_len) {
     if (original_url == NULL || new_ip == NULL || new_url == NULL || new_url_len <= 0) {
         return NULL;
     }
 
-    // 检查原始URL是否以"rtsp://"开头
     const char* rtsp_prefix = "rtsp://";
     size_t prefix_len = strlen(rtsp_prefix);
     if (strncmp(original_url, rtsp_prefix, prefix_len) != 0) {
-        return NULL; // 不是合法的RTSP URL
+        return NULL;
     }
 
-    // 定位原始IP的起始位置（跳过"rtsp://"）
     const char* ip_start = original_url + prefix_len;
-    // 定位原始IP的结束位置（寻找第一个 ':' 或 '/'，即端口或路径的分隔符）
     const char* ip_end = strpbrk(ip_start, ":/");
     if (ip_end == NULL) {
-        ip_end = original_url + strlen(original_url); // 若没有分隔符，IP到URL末尾
+        ip_end = original_url + strlen(original_url);
     }
 
-    // 计算各部分长度
-    size_t ip_len = ip_end - ip_start;          // 原始IP的长度
-    size_t suffix_len = strlen(ip_end);         // IP后面的部分（端口+路径等）
-    size_t new_ip_len = strlen(new_ip);         // 新IP的长度
+    size_t ip_len = ip_end - ip_start;
+    size_t suffix_len = strlen(ip_end);
+    size_t new_ip_len = strlen(new_ip);
 
-    // 检查新URL缓冲区是否足够（前缀 + 新IP + 后缀 + 结束符）
     if (prefix_len + new_ip_len + suffix_len + 1 > new_url_len) {
-        return NULL; // 缓冲区不足
+        return NULL;
     }
 
-    // 拼接新URL：rtsp:// + 新IP + 后缀
     strncpy(new_url, rtsp_prefix, prefix_len);
     new_url[prefix_len] = '\0';
 
@@ -192,24 +222,23 @@ static char* replace_rtsp_ip(const char* original_url, const char* new_ip, char*
     return new_url;
 }
 
-// RTSP线程主函数：包含初始化、启动和循环等待
-void MySmartIPC::RtspThreadMain() {
-    const int RETRY_INTERVAL_MS = 3000; // 重试间隔1秒
-    rtsp_ready_ = false;
+/* ── RTSP thread ─────────────────────────────────────────────────────── */
 
-    // 线程循环：直到收到停止信号
-    while (rtsp_running_) {
-        // 初始化RTSP服务器
-        if (rtsp_server_.Init(rtsp_port_, nullptr) < 0) {
+void MySmartIPC::RtspThreadMain() {
+    const int RETRY_INTERVAL_MS = 3000;
+    streaming_ready_ = false;
+
+    auto* srv = new KdRtspServer();
+    rtsp_server_ = srv;
+
+    while (streaming_running_) {
+        if (srv->Init(port_, nullptr) < 0) {
             printf("RTSP initialization failed, retrying in %d milliseconds...\n", RETRY_INTERVAL_MS);
             std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_INTERVAL_MS));
             continue;
         }
-        else{
-            printf("rtsp server init ok\n");
-        }
+        printf("rtsp server init ok\n");
 
-        // 配置会话属性
         SessionAttr session_attr;
         session_attr.with_audio = true;
         session_attr.with_audio_backchannel = false;
@@ -221,29 +250,24 @@ void MySmartIPC::RtspThreadMain() {
             session_attr.video_type = VideoType::kVideoTypeH265;
         } else {
             printf("Unsupported video codec type, retrying in %d milliseconds...\n", RETRY_INTERVAL_MS);
-            rtsp_server_.DeInit();
+            srv->DeInit();
             std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_INTERVAL_MS));
             continue;
         }
 
-        // 创建RTSP会话
-        if (rtsp_server_.CreateSession(stream_url_, session_attr) < 0) {
+        if (srv->CreateSession(stream_url_, session_attr) < 0) {
             printf("RTSP session creation failed, retrying in %d milliseconds...\n", RETRY_INTERVAL_MS);
-            rtsp_server_.DeInit();
+            srv->DeInit();
             std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_INTERVAL_MS));
             continue;
         }
 
-        // 启动RTSP服务
-        rtsp_server_.Start();
-        rtsp_ready_ = true; // 标记RTSP就绪
+        srv->Start();
+        streaming_ready_ = true;
 
-        //获取rtsp 地址
         char ip[16];
         if (get_valid_ip_with_retry("u0", ip, sizeof(ip), 10, 1000) == 0) {
-
-            // 获取原始RTSP URL
-            const char* original_rtsp_url = rtsp_server_.GetRtspUrl(stream_url_);
+            const char* original_rtsp_url = srv->GetRtspUrl(stream_url_);
             if (original_rtsp_url == NULL) {
                 printf("Failed to get original RTSP URL\n");
             } else {
@@ -256,32 +280,222 @@ void MySmartIPC::RtspThreadMain() {
             }
         } else {
             printf("Failed to get local IP address\n");
-            // 若IP获取失败，直接输出原始URL
-            printf("RTSP service started successfully: %s\n", rtsp_server_.GetRtspUrl(stream_url_));
+            printf("RTSP service started successfully: %s\n", srv->GetRtspUrl(stream_url_));
         }
 
-        // 等待停止信号（循环检测，避免阻塞线程退出）
-        while (rtsp_running_ && started_) {
+        while (streaming_running_ && started_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        // 停止RTSP服务
-        rtsp_server_.Stop();
-        rtsp_server_.DeInit();
-        rtsp_ready_ = false;
+        srv->Stop();
+        srv->DeInit();
+        streaming_ready_ = false;
         printf("RTSP service stopped\n");
 
-        // 如果是临时停止（不是销毁），等待重启信号
-        if (rtsp_running_) {
-            std::unique_lock<std::mutex> lock(rtsp_mutex_);
-            rtsp_cv_.wait(lock, [this]() { return !rtsp_running_ || started_; });
+        if (streaming_running_) {
+            std::unique_lock<std::mutex> lock(streaming_mutex_);
+            streaming_cv_.wait(lock, [this]() { return !streaming_running_ || started_; });
         }
     }
 
+    delete srv;
+    rtsp_server_ = nullptr;
     printf("RTSP thread exited\n");
 }
 
-int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream_url, int port) {
+/* ── WebRTC HTTP signaling handler ─────────────────────────────────── */
+
+void MySmartIPC::OnHttpRequest(const char* method, const char* path,
+                               const char* body, int body_len,
+                               http_response_t* response) {
+    extern MySmartIPC* g_smart_ipc_instance;
+
+    if (strcmp(method, "GET") == 0 && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) {
+        response->status = 200;
+        response->content_type = "text/html; charset=utf-8";
+        response->body = WEB_PAGE_HTML;
+        response->body_len = strlen(WEB_PAGE_HTML);
+
+    } else if (strcmp(method, "GET") == 0 && strcmp(path, "/offer") == 0) {
+        auto* ipc = g_smart_ipc_instance;
+        if (!ipc) {
+            response->status = 500;
+            response->content_type = "text/plain";
+            response->body = "No IPC instance";
+            response->body_len = strlen(response->body);
+            return;
+        }
+
+        /* Close existing connection before new offer.
+         * Drain: wait for both worker threads to exit webrtc_pc_ internals.
+         * close() sets pc->state=CLOSED so no new loop/send_video calls
+         * will enter the dtls_srtp code path, but a call already past the
+         * state check may still be using srtp_out. Wait until both
+         * in-use flags are 0 — guaranteed within ~1ms. */
+        if (ipc->webrtc_state_ == PEER_CONNECTION_COMPLETED || ipc->webrtc_state_ == PEER_CONNECTION_CONNECTED) {
+            peer_connection_close(ipc->webrtc_pc_);
+            ipc->webrtc_state_ = PEER_CONNECTION_CLOSED;
+            while (ipc->peer_in_pc_ || ipc->venc_in_pc_) {
+                usleep(1000);
+            }
+        }
+
+        ipc->offer_ready_ = 0;
+        if (ipc->offer_sdp_) {
+            free(ipc->offer_sdp_);
+            ipc->offer_sdp_ = nullptr;
+        }
+
+        peer_connection_create_offer(ipc->webrtc_pc_);
+
+        pthread_mutex_lock(&ipc->offer_mutex_);
+        while (!ipc->offer_ready_ && ipc->streaming_running_) {
+            pthread_cond_wait(&ipc->offer_cond_, &ipc->offer_mutex_);
+        }
+
+        if (ipc->offer_sdp_) {
+            response->status = 200;
+            response->content_type = "application/sdp";
+            response->body = ipc->offer_sdp_;
+            response->body_len = strlen(ipc->offer_sdp_);
+        } else {
+            response->status = 500;
+            response->content_type = "text/plain";
+            response->body = "Failed to create offer";
+            response->body_len = strlen(response->body);
+        }
+        pthread_mutex_unlock(&ipc->offer_mutex_);
+
+    } else if (strcmp(method, "POST") == 0 && strcmp(path, "/answer") == 0) {
+        auto* ipc = g_smart_ipc_instance;
+        if (!ipc || !body || body_len <= 0) {
+            response->status = 400;
+            response->content_type = "text/plain";
+            response->body = "Missing SDP body";
+            response->body_len = strlen(response->body);
+            return;
+        }
+
+        char* answer_copy = (char*)calloc(1, body_len + 1);
+        memcpy(answer_copy, body, body_len);
+        answer_copy[body_len] = '\0';
+
+        peer_connection_set_remote_description(ipc->webrtc_pc_, answer_copy, SDP_TYPE_ANSWER);
+
+        response->status = 200;
+        response->content_type = "text/plain";
+        response->body = "OK";
+        response->body_len = strlen(response->body);
+
+        free(answer_copy);
+
+    } else {
+        response->status = 404;
+        response->content_type = "text/plain";
+        response->body = "Not Found";
+        response->body_len = strlen(response->body);
+    }
+}
+
+/* ── WebRTC thread: peer_connection_loop + HTTP signaling ──────────── */
+
+void MySmartIPC::WebRtcThreadMain() {
+    /* Initialize libpeer */
+    PeerConfiguration config;
+    config.datachannel = DATA_CHANNEL_NONE;
+    config.video_codec = (input_config_.video_type == KdMediaVideoType::kVideoTypeH265) ? CODEC_H265 : CODEC_H264;
+    config.audio_codec = CODEC_NONE;
+
+    peer_init();
+    webrtc_pc_ = peer_connection_create(&config);
+
+    /* Register callbacks — libpeer does NOT pass userdata, use g_smart_ipc_instance */
+    peer_connection_oniceconnectionstatechange(webrtc_pc_,
+        [](PeerConnectionState state, void* /*data*/) {
+            auto* ipc = g_smart_ipc_instance;
+            printf("[WebRTC] State: %s\n", peer_connection_state_to_string(state));
+            if (ipc) ipc->webrtc_state_ = state;
+        });
+
+    peer_connection_onicecandidate(webrtc_pc_,
+        [](char* sdp, void* /*data*/) {
+            auto* ipc = g_smart_ipc_instance;
+            if (!ipc) return;
+            pthread_mutex_lock(&ipc->offer_mutex_);
+            if (ipc->offer_sdp_) { free(ipc->offer_sdp_); ipc->offer_sdp_ = nullptr; }
+            ipc->offer_sdp_ = strdup(sdp);
+            ipc->offer_ready_ = 1;
+            pthread_cond_signal(&ipc->offer_cond_);
+            pthread_mutex_unlock(&ipc->offer_mutex_);
+        });
+
+    /* Set global instance for HTTP handler */
+    g_smart_ipc_instance = this;
+
+    /* Start peer_connection_loop in a separate thread */
+    webrtc_peer_thread_ = std::thread([this]() {
+        while (streaming_running_) {
+            peer_in_pc_ = 1;
+            peer_connection_loop(webrtc_pc_);
+            peer_in_pc_ = 0;
+            usleep(1000);
+        }
+    });
+
+    /* Start HTTP signaling server (blocks in accept loop until stopped) */
+    streaming_ready_ = true;
+
+    char webrtc_ip[16];
+    if (get_valid_ip_with_retry("u0", webrtc_ip, sizeof(webrtc_ip), 10, 1000) == 0) {
+        printf("[WebRTC] Open in browser: http://%s:%d\n", webrtc_ip, port_);
+    } else {
+        printf("[WebRTC] HTTP signaling server starting on port %d (IP unavailable)\n", port_);
+    }
+
+    http_server_start(port_, http_request_handler);
+
+    /* Wait until started_ becomes true (main.cpp calls Start() after Init()),
+     * then keep running until streaming_running_ becomes false or started_ drops. */
+    {
+        std::unique_lock<std::mutex> lock(streaming_mutex_);
+        streaming_cv_.wait(lock, [this]() { return started_ || !streaming_running_; });
+    }
+
+    while (streaming_running_ && started_) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    /* Stop */
+    streaming_ready_ = false;
+    streaming_running_ = false;
+    http_server_stop();
+
+    if (webrtc_peer_thread_.joinable()) {
+        webrtc_peer_thread_.join();
+    }
+
+    if (webrtc_pc_) {
+        peer_connection_destroy(webrtc_pc_);
+        webrtc_pc_ = nullptr;
+    }
+    peer_deinit();
+
+    if (sps_pps_buf_) {
+        free(sps_pps_buf_);
+        sps_pps_buf_ = nullptr;
+    }
+    if (offer_sdp_) {
+        free(offer_sdp_);
+        offer_sdp_ = nullptr;
+    }
+
+    printf("[WebRTC] Thread exited\n");
+}
+
+/* ── Init / DeInit / Start / Stop ──────────────────────────────────── */
+
+int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream_url,
+                     StreamingMode mode, int port) {
     // 初始化媒体部分
     feature_config_.enable_video_encoder = config.enable_video_encoding;
     feature_config_.on_venc_data = this;
@@ -298,7 +512,8 @@ int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream
     // 保存配置
     input_config_ = config;
     stream_url_ = stream_url;
-    rtsp_port_ = port;
+    streaming_mode_ = mode;
+    port_ = port;
 
     // 初始化AI分析
     if (_ai_analyse_init() != 0) {
@@ -306,9 +521,13 @@ int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream
         return -1;
     }
 
-    // 启动RTSP线程（此时仅初始化线程，不启动服务）
-    rtsp_running_ = true;
-    rtsp_thread_ = std::thread(&MySmartIPC::RtspThreadMain, this);
+    // 启动流媒体线程（二选一）
+    streaming_running_ = true;
+    if (streaming_mode_ == StreamingMode::kRtsp) {
+        streaming_thread_ = std::thread(&MySmartIPC::RtspThreadMain, this);
+    } else {
+        streaming_thread_ = std::thread(&MySmartIPC::WebRtcThreadMain, this);
+    }
 
     return 0;
 }
@@ -316,11 +535,11 @@ int MySmartIPC::Init(const KdMediaInputConfig &config, const std::string &stream
 int MySmartIPC::DeInit() {
     Stop();
 
-    // 停止RTSP线程
-    rtsp_running_ = false;
-    rtsp_cv_.notify_one(); // 唤醒可能等待的线程
-    if (rtsp_thread_.joinable()) {
-        rtsp_thread_.join();
+    // 停止流媒体线程
+    streaming_running_ = false;
+    streaming_cv_.notify_one();
+    if (streaming_thread_.joinable()) {
+        streaming_thread_.join();
     }
 
     // 清理媒体资源
@@ -348,8 +567,8 @@ int MySmartIPC::Start() {
     media_.enable_media_features();
     started_ = true;
 
-    // 通知RTSP线程可以启动服务
-    rtsp_cv_.notify_one();
+    // 通知流媒体线程可以启动服务
+    streaming_cv_.notify_one();
     return 0;
 }
 
@@ -360,8 +579,8 @@ int MySmartIPC::Stop() {
     started_ = false;
     media_.disable_media_features();
 
-    // 通知RTSP线程停止服务
-    rtsp_cv_.notify_one();
+    // 通知流媒体线程停止服务
+    streaming_cv_.notify_one();
     return 0;
 }
 

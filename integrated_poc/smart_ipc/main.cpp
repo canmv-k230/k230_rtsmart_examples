@@ -17,7 +17,7 @@ static void sigHandler(int sig_no) {
 }
 
 static void Usage() {
-    std::cout << "Usage: ./smart_ipc.elf [-H] [-S <sensor type>] [-V <enable_audio_capture>] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>] [-D <data_source>]" << std::endl;
+    std::cout << "Usage: ./smart_ipc.elf [-H] [-S <sensor type>] [-V <enable_audio_capture>] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>] [-D <data_source>] [-M <streaming_mode>] [-P <port>]" << std::endl;
     std::cout << "-H: display this help message" << std::endl;
     std::cout << "-S: the sensor type, default auto-detect" << std::endl;
     std::cout << "-V: enable audio capture, default 1" << std::endl;
@@ -37,13 +37,15 @@ static void Usage() {
     std::cout << "-E: enable video output, default 1" << std::endl;
     std::cout << "-F: enable AI analysis, default 1" << std::endl;
     std::cout << "-G: enable video encoding, default 1" << std::endl;
+    std::cout << "-M: streaming mode (0:RTSP(default), 1:WebRTC)" << std::endl;
+    std::cout << "-P: port (RTSP default 8554, WebRTC default 8080)" << std::endl;
     exit(-1);
 }
 
-int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
+int parse_config(int argc, char *argv[], KdMediaInputConfig &config, StreamingMode &mode, int &port) {
     int result;
     opterr = 0;
-    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:K:T:N:E:F:G:S:V:D:")) != -1) {
+    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:K:T:N:E:F:G:S:V:D:M:P:")) != -1) {
         switch(result) {
         case 'H' : {
             Usage(); break;
@@ -63,7 +65,7 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
         case 't': {
             std::string s = optarg;
             if (s == "h264") config.video_type = KdMediaVideoType::kVideoTypeH264;
-            else if (s == "h265") config.video_type = KdMediaVideoType::kVideoTypeH264;
+            else if (s == "h265") config.video_type = KdMediaVideoType::kVideoTypeH265;
             else Usage();
             break;
         }
@@ -111,21 +113,9 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
                 config.osd_height = 1080;
                 config.vo_width = 1920;
                 config.vo_height = 1080;
-            }else {
+            } else {
                 Usage();
             }
-            break;
-        }
-        case 'O': {
-            int n = atoi(optarg);
-            if (n < 0) Usage();
-            config.osd_width = n;
-            break;
-        }
-        case 'P': {
-            int n = atoi(optarg);
-            if (n < 0) Usage();
-            config.osd_height = n;
             break;
         }
         case 'A': {
@@ -186,6 +176,19 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
             config.enable_capture_audio = n;
             break;
         }
+        case 'M': {
+            int n = atoi(optarg);
+            if (n == 0) mode = StreamingMode::kRtsp;
+            else if (n == 1) mode = StreamingMode::kWebRtc;
+            else Usage();
+            break;
+        }
+        case 'P': {
+            int n = atoi(optarg);
+            if (n < 0) Usage();
+            port = n;
+            break;
+        }
 
         default: Usage(); break;
         }
@@ -197,7 +200,6 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
     } else {
         printf("Sensor type: %d\n", config.sensor_type);
     }
-    printf("Sensor type: %d\n", config.sensor_type);
     printf("Audio capture enabled: %d\n", config.enable_capture_audio);
     printf("Audio sample rate: %d\n", config.audio_samplerate);
     printf("Audio channel count: %d\n", config.audio_channel_cnt);
@@ -219,6 +221,8 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
     printf("Enable AI analysis: %d\n", config.enable_ai_analysis);
     printf("Enable video encoding: %d\n", config.enable_video_encoding);
     printf("Video encoder data source: %s\n", (config.venc_data_source_type == DATA_SOURCE_SENSOR_CHANNEL) ? "Sensor Channel" : "VO WBC");
+    printf("Streaming mode: %s\n", (mode == StreamingMode::kRtsp) ? "RTSP" : "WebRTC");
+    printf("Port: %d\n", port);
     printf("\n");
     return 0;
 }
@@ -230,17 +234,25 @@ int main(int argc, char *argv[]) {
     g_exit_flag.store(false);
 
     KdMediaInputConfig config;
-    parse_config(argc, argv, config);
+    StreamingMode mode = StreamingMode::kRtsp;
+    int port = 8554;
+    parse_config(argc, argv, config, mode, port);
+
+    /* Auto-select default port based on mode if user didn't specify */
+    if (mode == StreamingMode::kWebRtc && port == 8554) {
+        port = 8080;  /* WebRTC default is 8080 */
+    }
 
     MySmartIPC *smartIPC = new MySmartIPC();
-    if (!smartIPC || smartIPC->Init(config) < 0) {
+    if (!smartIPC || smartIPC->Init(config, "test", mode, port) < 0) {
         std::cout << "SmartIPC Init failed." << std::endl;
         smartIPC->DeInit();
         return -1;
     }
 
     smartIPC->Start();
-    printf("SmartIPC started.\n");
+    printf("SmartIPC started (%s mode, port %d).\n",
+           (mode == StreamingMode::kRtsp) ? "RTSP" : "WebRTC", port);
     delete st;
 
     while (!g_exit_flag) {

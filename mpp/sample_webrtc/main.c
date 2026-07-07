@@ -80,30 +80,34 @@ static volatile int g_exit_requested = 0;
 /**
  * g_pc: The single PeerConnection instance.
  *
- * ⚠ KNOWN RACE CONDITION: g_pc is accessed from multiple threads
- * without a mutex:
- *   - peer_connection_task: calls peer_connection_loop(g_pc) continuously
- *   - on_http_request: calls peer_connection_close/create_offer/set_remote
- *   - venc_stream_task: calls peer_connection_send_video via send_venc_frame_to_webrtc
+ * Drain mechanism: Before close+create_offer, the HTTP thread waits
+ * until both worker threads have exited g_pc internals (in-use flags
+ * are 0). close() sets pc->state=CLOSED so the next loop/send_video
+ * call skips, but a call already past the state check may still be
+ * using SRTP/DTLS internals. The drain guarantees no one is inside
+ * g_pc before we destroy and rebuild it.
  *
- * This is safe in practice because:
- *   - peer_connection_close() and create_offer() are only called from GET /offer,
- *     which is sequential (single HTTP thread, one request at a time)
- *   - Video sending only happens when g_state is CONNECTED/COMPLETED
- *   - The close happens before the new offer, so there's a natural ordering
- *
- * A proper fix would use a signaling state machine with mutex protection.
+ * Flags are volatile because they are written by worker threads and
+ * read by the HTTP thread. This is not a mutex — there remains a
+ * tiny window between setting the flag and entering pc internals —
+ * but the drain eliminates the long window (close → create_offer
+ * happens while another thread is mid-call), which is the one that
+ * causes use-after-free crashes.
  */
 PeerConnection* g_pc = NULL;
+
+/** In-use flags: set to 1 while a worker thread is inside g_pc internals,
+ *  cleared when it exits. The HTTP thread drains (busy-waits) on these
+ *  after peer_connection_close() before calling create_offer(). */
+static volatile int g_peer_in_pc = 0;
+static volatile int g_venc_in_pc = 0;
 
 /**
  * g_state: Current ICE connection state.
  *
- * ⚠ KNOWN DATA RACE: Written from peer_connection_task (via
- * onconnectionstatechange callback), read from http_server thread
- * (in on_http_request) and venc_stream_task (in send_venc_frame_to_webrtc).
- * Marked volatile as a minimal safety measure. A proper fix would
- * use atomic operations or a mutex.
+ * Written from peer_connection_task (via onconnectionstatechange callback),
+ * read from http_server thread and venc_stream_task.
+ * Marked volatile as a minimal safety measure.
  */
 static volatile PeerConnectionState g_state = PEER_CONNECTION_CLOSED;
 
@@ -189,8 +193,15 @@ static void send_venc_frame_to_webrtc(const uint8_t* data, size_t size,
     return;
   }
 
-  /* Only send video data if we have an active WebRTC connection */
-  if (g_state != PEER_CONNECTION_COMPLETED && g_state != PEER_CONNECTION_CONNECTED) return;
+  /* Only send video data if we have an active WebRTC connection.
+   * Mark in-use BEFORE the state check so the reconnect path (GET /offer)
+   * sees us and waits. If we checked state first, close() could happen
+   * between the check and setting the flag — the drain would miss us. */
+  g_venc_in_pc = 1;
+  if (g_state != PEER_CONNECTION_COMPLETED && g_state != PEER_CONNECTION_CONNECTED) {
+    g_venc_in_pc = 0;
+    return;
+  }
 
   /* I-frame: send parameter sets then I-frame as two separate video sends.
    * WebRTC/RTP handles NAL units independently — no need
@@ -202,6 +213,7 @@ static void send_venc_frame_to_webrtc(const uint8_t* data, size_t size,
 
   /* P-frame (or I-frame with failed SPS/PPS concat): send as-is */
   peer_connection_send_video(g_pc, data, size, pts);
+  g_venc_in_pc = 0;
 }
 
 /* ── Network utilities ───────────────────────────────────────────── */
@@ -245,7 +257,9 @@ static void get_local_ip(char* buf, int buf_len) {
  *  and SRTP packet processing. Must be called frequently. */
 static void* peer_connection_task(void* data) {
   while (!g_interrupted) {
+    g_peer_in_pc = 1;
     peer_connection_loop(g_pc);
+    g_peer_in_pc = 0;
     usleep(1000);  /* ~1ms tick — balances responsiveness vs CPU usage */
   }
   pthread_exit(NULL);
@@ -340,13 +354,17 @@ static void on_http_request(const char* method, const char* path,
     /* Close any existing peer connection before creating a new offer.
      * This allows the browser to reconnect without refreshing the page.
      *
-     * ⚠ NOTE: peer_connection_close() is called while peer_connection_task
-     * may still be running peer_connection_loop(). This is safe because
-     * libpeer handles this internally (close sets a flag that loop checks),
-     * but it's architecturally fragile. */
+     * After close(), drain: wait for both worker threads to exit g_pc
+     * internals. close() sets pc->state=CLOSED so no new loop/send_video
+     * calls will enter the dtls_srtp code path, but a call already past
+     * the state check may still be using srtp_out. Wait until both
+     * in-use flags are 0 — guaranteed within ~1ms. */
     if (g_state == PEER_CONNECTION_COMPLETED || g_state == PEER_CONNECTION_CONNECTED) {
       peer_connection_close(g_pc);
       g_state = PEER_CONNECTION_CLOSED;
+      while (g_peer_in_pc || g_venc_in_pc) {
+        usleep(1000);
+      }
     }
 
     /* Reset offer state for new ICE gathering cycle */
