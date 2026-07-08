@@ -2,6 +2,7 @@ if RTT_ENABLE_BUILD_INTEGRATED_EXAMPLES
     config RTT_INTEGRATED_EXAMPLES_SMART_IPC
         bool "Smart IPC examples"
         default y
+        select RTSMART_3RD_PARTY_ENABLE_LIBPEER
     config RTT_INTEGRATED_EXAMPLES_MULTSOURCE_AI_ANALYZER
         bool "Multisource AI Analyzer"
         default n
