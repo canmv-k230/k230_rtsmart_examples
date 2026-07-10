@@ -23,6 +23,7 @@ OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
 
 # Library configuration
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/libmpp.mk
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/librtsmart_hal.mk
 
 # Compiler flags
 C_CXX_FLAGS := -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os
