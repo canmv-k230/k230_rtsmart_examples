@@ -1,0 +1,31 @@
+menuconfig RTSMART_XIAOZHI_MCP_LIGHT
+    bool "Enable XiaoZhi GPIO light MCP tool"
+    default y if BOARD_K230_CANMV_01STUDIO
+    default n
+    help
+        Advertise self.light.get_state and self.light.set_state MCP tools for
+        a board GPIO light.
+        Disable this option when the board has no light connected. The tool
+        is not registered when this option is disabled or the GPIO cannot be
+        initialized.
+
+if RTSMART_XIAOZHI_MCP_LIGHT
+
+    config RTSMART_XIAOZHI_MCP_LIGHT_GPIO
+        int "XiaoZhi light GPIO pin"
+        default 52 if BOARD_K230_CANMV_01STUDIO
+        default -1
+        range -1 71
+        help
+            GPIO number connected to the light. Set this to -1 when the
+            board has no controllable light.
+
+    config RTSMART_XIAOZHI_MCP_LIGHT_ON_VALUE
+        int "GPIO output value when the light is on"
+        default 1
+        range 0 1
+        help
+            GPIO output value that turns the light on. The other value is
+            used for off. The 01Studio board uses GPIO52 and value 1.
+
+endif

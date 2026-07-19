@@ -11,6 +11,7 @@ subdirs-$(CONFIG_RTSMART_LIBS_MINIHTTP_ENABLE_SAMPLES) += minihttp/minihttp_basi
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_TUYALINKSDK_SAMPLES) += tuya/tuya_basic
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_CJSON_SAMPLES) += cjson/cjson_basic
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_LIBWEBSOCKETS_SAMPLES) += libwebsockets/ws_server libwebsockets/ws_client libwebsockets/ws_poll_test
+subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_XIAOZHI_SAMPLES) += xiaozhi
 
 .PHONY: all clean distclean
 
