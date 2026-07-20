@@ -19,10 +19,11 @@ OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
 
 # Library configuration
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/lib3rdparty.mk
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/librtsmart_hal.mk
 
 # Compiler flags
 CFLAGS := -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os
-CFLAGS += -I. $(LIB_CFLAGS) -I$(lib3rd_party_inc_dir)/tuya -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
+CFLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
 CFLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
 CFLAGS += -std=gnu99
 
