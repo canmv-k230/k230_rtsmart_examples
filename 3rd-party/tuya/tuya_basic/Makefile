@@ -18,7 +18,7 @@ DEPS      := $(OBJS:.o=.d)
 OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
 
 # Library configuration
-include $(SDK_RTSMART_SRC_DIR)/libs/mk/lib3rdparty.mk
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/libtuya.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/librtsmart_hal.mk
 
 # Compiler flags
@@ -27,13 +27,9 @@ CFLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/au
 CFLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
 CFLAGS += -std=gnu99
 
-# Tuya explicit libs (keep for clarity/ordering)
-TUYA_LIBS := -ltuya_iot_core -lmbedtls -lmbedx509 -lmbedcrypto -lmbedtls_port
-
 # Linker flags
 LDFLAGS := -T $(SDK_RTSMART_SRC_DIR)/libs/mk/link.lds --static -Wl,--gc-sections
 LDFLAGS += $(LIB_LDFLAGS)
-LDFLAGS += $(TUYA_LIBS)
 
 # Phony targets
 .PHONY: all clean distclean
