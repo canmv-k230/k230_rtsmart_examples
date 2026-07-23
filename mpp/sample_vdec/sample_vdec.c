@@ -89,7 +89,7 @@ typedef struct
 } sample_vdec_conf_t;
 
 static sample_vdec_conf_t g_vdec_conf[VDEC_MAX_CHN_NUMS];
-static k_connector_type g_connector_type = HX8377_V2_MIPI_4LAN_1080X1920_30FPS;
+static k_connector_type g_connector_type = LT9611_MIPI_4LAN_1920X1080_60FPS; /* lt9611_1080p60, run `list_connector` to see all supported types */
 
 static inline void CHECK_RET(k_s32 ret, const char *func, const int line)
 {
@@ -455,9 +455,9 @@ static void sample_vdec_unbind_vo(k_u32 chn_id)
 
 static void show_help()
 {
-    printf("Usage: ./sample_vdec.elf -i test.265 -type 0\n");
+    printf("Usage: ./sample_vdec.elf -i test.265 -type %u\n", LT9611_MIPI_4LAN_1920X1080_60FPS);
     printf("-i: input file name\n");
-    printf("-type: vo type,see vo doc, e.g. LCD(20), HDMI(101) \n");
+    printf("-type: vo connector type, run `list_connector` to see the supported types, default: %u (lt9611_1080p60)\n", LT9611_MIPI_4LAN_1920X1080_60FPS);
 }
 
 int main(int argc, char *argv[])

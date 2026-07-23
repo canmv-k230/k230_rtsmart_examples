@@ -93,6 +93,18 @@ class MyRtspServer : public IOnAEncData, public IOnVEncData {
             {
                 timestamp_video_ = get_timestamp_ticket();
             }
+            // Pass SPS/PPS header from MPP hardware encoder to rtsp_pusher,
+            // then open the pusher (if not already) so SPS/PPS is available for SDP.
+            if (type == K_VENC_HEADER)
+            {
+                rtsp_pusher_.PushVideoHeader((const uint8_t*)data, size);
+                if (!pusher_opened_)
+                {
+                    rtsp_pusher_.Open();
+                    pusher_opened_ = true;
+                }
+                return;
+            }
             if (type == K_VENC_I_FRAME)
             {
                 char nalu_type = ((char*)data)[4];
@@ -146,7 +158,9 @@ class MyRtspServer : public IOnAEncData, public IOnVEncData {
 
     int Start() {
         if(started_) return 0;
-        rtsp_pusher_.Open();
+        // Start encoder first to get SPS/PPS header (K_VENC_HEADER).
+        // The rtsp_pusher will be opened in OnVEncData when the first
+        // K_VENC_HEADER arrives, ensuring SPS/PPS is available for SDP.
         media_.StartAiAEnc();
         media_.StartVcapVEnc();
         started_ = true;
@@ -155,6 +169,7 @@ class MyRtspServer : public IOnAEncData, public IOnVEncData {
     int Stop() {
         if (!started_) return 0;
         rtsp_pusher_.Close();
+        pusher_opened_ = false;
         started_ = false;
         media_.StopVcapVEnc();
         media_.StopAiAEnc();
@@ -167,6 +182,7 @@ class MyRtspServer : public IOnAEncData, public IOnVEncData {
     KdMedia media_;
     std::string stream_url_;
     std::atomic<bool> started_{false};
+    std::atomic<bool> pusher_opened_{false};
     uint8_t g711_buffer_backchannel[320];
     size_t backchannel_data_size = 0;
     uint64_t timestamp_backchanel;

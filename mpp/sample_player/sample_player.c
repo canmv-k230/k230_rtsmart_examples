@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
     signal(SIGINT, sig_handler);
 
     if (argc < 3) {
-        printf("Usage: ./%s <*.mp4> <type(connect type,see vo doc), e.g. LCD(20), HDMI(101)> \n", argv[0]);
+        printf("Usage: ./%s <*.mp4> <type(vo connector type, run `list_connector` to see the supported types)>\n", argv[0]);
         return 0;
     }
 

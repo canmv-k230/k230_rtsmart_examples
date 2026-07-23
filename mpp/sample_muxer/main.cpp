@@ -70,6 +70,7 @@ public:
         {
         if (video_stream_count_ % 30 == 0)
             printf("recv count:%d, chn:%d, len:%d\n", video_stream_count_, 0, size);
+        video_stream_count_++;
 
         k_mp4_frame_data_s frame_data;
         memset(&frame_data, 0, sizeof(frame_data));
@@ -78,28 +79,10 @@ public:
         frame_data.data_length = size;
         frame_data.time_stamp = first_time_stamp - first_frame_time_stamp_;
 
-        if (!get_idr_) {
-            memcpy(save_idr_ + save_size_, frame_data.data, frame_data.data_length);
-            save_size_ += frame_data.data_length;
-            first_time_stamp_ = first_time_stamp - first_frame_time_stamp_;
-        }
-
-        video_stream_count_++;
-        if (video_stream_count_ == 2) {
-            get_idr_ = 1;
-            memset(&frame_data, 0, sizeof(frame_data));
-            frame_data.codec_id = _get_mp4_codec_type(config_.video_type);
-            frame_data.data =  save_idr_;
-            frame_data.data_length = save_size_;
-            frame_data.time_stamp = first_time_stamp_;
-        }
-
-        if (get_idr_) {
-            k_u32 ret = kd_mp4_write_frame(mp4_muxer_, video_track_handle_, &frame_data);
-            if (ret < 0) {
-                printf("mp4 write video frame failed.\n");
-                return ;
-            }
+        k_u32 ret = kd_mp4_write_frame(mp4_muxer_, video_track_handle_, &frame_data);
+        if (ret < 0) {
+            printf("mp4 write video frame failed.\n");
+            return ;
         }
 
         }
@@ -182,6 +165,7 @@ protected:
         video_track_info.time_scale = 1000;
         video_track_info.video_info.width = config.venc_width;
         video_track_info.video_info.height = config.venc_height;
+        video_track_info.video_info.codec_id = _get_mp4_codec_type(config.video_type);
         ret = kd_mp4_create_track(mp4_muxer_, &video_track_handle_, &video_track_info);
         if (ret < 0)
         {
@@ -253,13 +237,9 @@ private:
     std::atomic<bool> started_{false};
     std::atomic<bool> first_save_idr_frame_{false};
     KdMediaInputConfig config_;
-    uint8_t save_idr_[1920 * 1080 * 3 / 2];
     uint32_t video_header_len_{0};
 
     uint32_t video_stream_count_{0};
-    bool  get_idr_{false};
-    uint32_t save_size_{0};
-    uint64_t first_time_stamp_{0};
 
     std::mutex frame_muxer_mutex_;
 

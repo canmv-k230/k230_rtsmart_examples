@@ -141,7 +141,7 @@ int main(int argc, char *argv[]) {
 
     if (argc < 2) {
         printf("Usage: ./sample_rtspclient <rtsp_url> <out_type>\n");
-        printf("        out_type: vo type, see vo doc, e.g. LCD(20), HDMI(101)\n");
+        printf("        out_type: vo connector type, run `list_connector` to see the supported types\n");
         return 0;
     }
     std::string url = argv[1];
