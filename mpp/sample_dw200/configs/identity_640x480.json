@@ -1,0 +1,36 @@
+{
+  "input 0": {
+    "enabled": 1,
+    "file": "input_640x480_yuv420sp.bin",
+    "width": 640,
+    "height": 480,
+    "format": "YUV420SP",
+    "yuvbit": 0
+  },
+  "output 0": {
+    "enabled": 1,
+    "width": 640,
+    "height": 480,
+    "format": "YUV420SP",
+    "yuvbit": 0
+  },
+  "dewarpMode": "LENS_CORRECTION",
+  "camera_matrix": [
+    420.0, 0.0, 319.5,
+    0.0, 420.0, 239.5,
+    0.0, 0.0, 1.0
+  ],
+  "distortion_coeff": [
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0
+  ],
+  "scale": {
+    "roix": 0,
+    "roiy": 0,
+    "factor": 1.0
+  },
+  "rotation": 0,
+  "hflip": 0,
+  "vflip": 0,
+  "bypass": 0
+}

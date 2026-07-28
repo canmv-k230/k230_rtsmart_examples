@@ -1,0 +1,18 @@
+{
+  "input 1": {
+    "enabled": 1,
+    "file": "input_640x480_yuv420sp.bin",
+    "width": 640,
+    "height": 480,
+    "format": "YUV420SP",
+    "yuvbit": 0,
+    "channel": 5
+  },
+  "output 1": {
+    "enabled": 1,
+    "width": 640,
+    "height": 480,
+    "format": "YUV420SP",
+    "yuvbit": 0
+  }
+}

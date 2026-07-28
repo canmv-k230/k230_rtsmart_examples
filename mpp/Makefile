@@ -2,10 +2,13 @@ include ../mkenv.mk
 
 subdirs-y :=
 
+subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_AHD_SENSOR)      += sample_ahd_sensor
+subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_AHD_MIPI_SENSOR) += sample_ahd_mipi_sensor
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_AUDIO)           += sample_audio
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_CIPHER)          += sample_cipher/sample_aes sample_cipher/sample_hash sample_cipher/sample_hwhash sample_cipher/sample_pufs
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_CSC)             += sample_csc
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_DEMUXER)         += sample_demuxer
+subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_DW200)           += sample_dw200
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_GSDMA)           += sample_gsdma
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_LOG)             += sample_log
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_MMZ)             += sample_mmz
@@ -29,6 +32,7 @@ subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VO_VIDEO)        += sample_vo_video
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VO_WBC_DUMP)     += sample_vo_wbc_dump
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_FFT_DISPLAY)     += sample_fft_display
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VICAP)     		+= sample_vicap_sensor
+subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_VICAP_AE)        += sample_vicap_ae
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_WEBRTC)    		+= sample_webrtc
 
 .PHONY: all clean distclean

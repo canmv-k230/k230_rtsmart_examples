@@ -1,5 +1,21 @@
 if RTT_ENABLE_MPP_EXAMPLES
 
+  config RTSMART_MPP_ENABLE_SAMPLE_AHD_SENSOR
+      bool "Enable Build sample_ahd_sensor"
+      default n
+      depends on MPP_ENABLE_SENSOR_XS9950
+      help
+        One-channel XS9950 AHD capture, dewarp, and full-screen display demo
+        with a selectable CSI input and connector modes.
+
+  config RTSMART_MPP_ENABLE_SAMPLE_AHD_MIPI_SENSOR
+      bool "Enable Build sample_ahd_mipi_sensor"
+      default n
+      depends on MPP_ENABLE_SENSOR_XS9950
+      help
+        Preview one MIPI sensor and one XS9950 MCM sensor with independent
+        CSI selections.
+
   config RTT_ENABLE_MPP_EXAMPLES_AUDIO
       bool "Enable Build sample_audio"
       default n
@@ -17,6 +33,13 @@ if RTT_ENABLE_MPP_EXAMPLES
       default n
       help
         MP4 Demuxer: Extract raw bitstreams from MP4 containers.
+
+  config RTSMART_MPP_ENABLE_SAMPLE_DW200
+      bool "Enable Build sample_dw200"
+      default n
+      select RTSMART_3RD_PARTY_ENABLE_CJSON
+      help
+        DW200 dewarp and scaler example driven by a JSON configuration file.
 
   config RTSMART_MPP_ENABLE_SAMPLE_FFT_DISPLAY
       bool "Enable Build sample_fft_display"
@@ -130,6 +153,13 @@ if RTT_ENABLE_MPP_EXAMPLES
       default n
       help
         Vicap Bind to Display and Dump to File
+
+  config RTSMART_MPP_ENABLE_SAMPLE_VICAP_AE
+      bool "Enable Build sample_vicap_ae"
+      default n
+      help
+        Preview a selectable image sensor and move an auto-exposure ROI over
+        the complete image while drawing the active ROI on the display.
 
   config RTSMART_MPP_ENABLE_SAMPLE_VO_MIX_ORDER
       bool "Enable Build sample_vo_mix_order"

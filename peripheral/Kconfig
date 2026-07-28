@@ -35,6 +35,14 @@ if RTT_ENABLE_PERIPHERAL_EXAMPLES
         bool "Enable Build i2c_ssd1306"
         default y
 
+    config RTSMART_PERIPHERAL_ENABLE_I2C_SLAVE
+        bool "Enable Build i2c_slave"
+        default y
+        help
+            Build the I2C controller master/slave loopback test. One I2C
+            controller must be configured in slave mode in the RT-Smart
+            kernel configuration.
+
     config RTSMART_PERIPHERAL_ENABLE_NETMGMT
         bool "Enable Build netmgmt"
         default y
