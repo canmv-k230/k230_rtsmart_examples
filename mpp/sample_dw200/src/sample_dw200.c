@@ -38,7 +38,6 @@
 
 #include "dewarp_map.h"
 #include "dw200_config.h"
-#include "k_dewarp_ioctl.h"
 #include "mpi_dewarp_api.h"
 #include "mpi_sys_api.h"
 #include "mpi_vb_api.h"
@@ -93,7 +92,8 @@
 #define VSE_ERROR_IRQ_FLAG 0x80000000U
 #define VSE_IRQ_ENABLE_MASK 0x7007U
 #define VB_MAX_POOL_COUNT 64U
-#define DW200_DEVICE_PATH "/dev/" DW_DEV_NAME
+#define DW200_DEVICE_PATH "/dev/vivdw200"
+#define DW200_COMMAND_BUFFER_CAPACITY 1024U
 #define DW200_COMMAND_NOP 0x18000000ULL
 #define DW200_COMMAND_END 0x1000011aULL
 #define CHECK_ERROR(expression)                                          \
@@ -140,6 +140,15 @@ struct command_line_options {
 struct managed_output_map {
     unsigned int sample_output;
     unsigned int driver_output;
+};
+
+/* Raw driver commands exercised by --api legacy and --api vdev. */
+enum dw200_driver_command {
+    DW200_IOCTL_LEGACY_SETUP = 0x113,
+    DW200_IOCTL_LEGACY_LOAD,
+    DW200_IOCTL_VDEV_SETUP,
+    DW200_IOCTL_VDEV_LOAD,
+    DW200_IOCTL_VDEV_DUMP_PARAMS,
 };
 
 enum {
@@ -1342,11 +1351,11 @@ static int print_driver_version(int fd)
 
 static int dump_vdev_commands(int fd, const char* output_directory)
 {
-    union k_dewarp_command* commands = calloc(DW_COMMAND_BUFFER_LEN, sizeof(*commands));
+    uint64_t* commands = calloc(DW200_COMMAND_BUFFER_CAPACITY, sizeof(*commands));
     if (commands == NULL) {
         return -1;
     }
-    if (call_driver_ioctl(fd, K_DWVIOC_DUMP_PARAMS, commands, "K_DWVIOC_DUMP_PARAMS") < 0) {
+    if (call_driver_ioctl(fd, DW200_IOCTL_VDEV_DUMP_PARAMS, commands, "K_DWVIOC_DUMP_PARAMS") < 0) {
         free(commands);
         return -1;
     }
@@ -1361,15 +1370,15 @@ static int dump_vdev_commands(int fd, const char* output_directory)
     }
 
     bool found_end = false;
-    for (unsigned int i = 0; i < DW_COMMAND_BUFFER_LEN; i++) {
-        if (commands[i].value == DW200_COMMAND_END) {
+    for (unsigned int i = 0; i < DW200_COMMAND_BUFFER_CAPACITY; i++) {
+        if (commands[i] == DW200_COMMAND_END) {
             found_end = true;
             break;
         }
-        if (commands[i].value == DW200_COMMAND_NOP) {
+        if (commands[i] == DW200_COMMAND_NOP) {
             continue;
         }
-        fprintf(file, "0x%08x, 0x%08x\n", commands[i].bytes.addr, commands[i].bytes.value);
+        fprintf(file, "0x%08x, 0x%08x\n", (uint32_t)(commands[i] & UINT16_MAX), (uint32_t)(commands[i] >> 32));
     }
     fclose(file);
     free(commands);
@@ -1415,7 +1424,7 @@ static int run_managed_api(enum driver_api api, const struct dw200_parameters* p
         goto cleanup;
     }
 
-    int setup_command = api == DRIVER_API_LEGACY ? K_DWIOC_SETUP : K_DWVIOC_SETUP;
+    int setup_command = api == DRIVER_API_LEGACY ? DW200_IOCTL_LEGACY_SETUP : DW200_IOCTL_VDEV_SETUP;
     const char* setup_name = api == DRIVER_API_LEGACY ? "K_DWIOC_SETUP" : "K_DWVIOC_SETUP";
     if (call_driver_ioctl(fd, setup_command, &settings, setup_name) < 0) {
         goto cleanup;
@@ -1424,7 +1433,7 @@ static int run_managed_api(enum driver_api api, const struct dw200_parameters* p
         goto cleanup;
     }
 
-    int load_command = api == DRIVER_API_LEGACY ? K_DWIOC_LOAD : K_DWVIOC_LOAD;
+    int load_command = api == DRIVER_API_LEGACY ? DW200_IOCTL_LEGACY_LOAD : DW200_IOCTL_VDEV_LOAD;
     const char* load_name = api == DRIVER_API_LEGACY ? "K_DWIOC_LOAD" : "K_DWVIOC_LOAD";
     for (unsigned int frame = 0; frame < frame_count; frame++) {
         pr_info("%s frame %u/%u", driver_api_name(api), frame + 1, frame_count);

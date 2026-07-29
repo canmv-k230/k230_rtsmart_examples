@@ -22,13 +22,12 @@ OBJS := $(C_OBJS) $(CXX_OBJS)
 DEPS := $(OBJS:.o=.d)
 OBJ_DIRS := $(sort $(dir $(OBJS) $(BIN) $(CONFIG_INSTALL) $(IDENTITY_CONFIG_INSTALL) $(VSE_DMA_CONFIG_INSTALL) $(INPUT_INSTALL)))
 
+include $(SDK_RTSMART_SRC_DIR)/libs/mk/lib3rdparty.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/libmpp.mk
 
-CJSON_INSTALL_DIR := $(SDK_RTSMART_BUILD_DIR)/libs/3rd-party
 COMMON_FLAGS := -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os
-COMMON_FLAGS += -Iinclude -I$(CJSON_INSTALL_DIR)/include/cJSON
-COMMON_FLAGS += $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include
-COMMON_FLAGS += -include "generated/autoconf.h"
+COMMON_FLAGS += -Iinclude $(LIB_CFLAGS)
+COMMON_FLAGS += -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
 COMMON_FLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
 CFLAGS := $(COMMON_FLAGS) -std=gnu99
 CXXFLAGS := $(COMMON_FLAGS) -std=c++20
