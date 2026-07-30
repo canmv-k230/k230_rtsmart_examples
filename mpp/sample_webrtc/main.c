@@ -439,10 +439,10 @@ static void print_usage(const char* prog) {
   printf("  -p port       HTTP server port (default: 8080)\n");
   printf("  -s csi_num    CSI device number 0-2 (default: 2)\n");
   printf("  -c connector  Connector type: 605274512=LCD, 757006876=HDMI (default: LCD)\n");
-  printf("  -t type       Video encoder type: h264/h265 (default: h264)\n");
+  printf("  -t type       Video encoder type: h264/h265 (default: h265)\n");
   printf("  -W width      VENC encode width (default: 1280)\n");
   printf("  -H height     VENC encode height (default: 720)\n");
-  printf("  -b bitrate    VENC bitrate kbps (default: 2000)\n");
+  printf("  -b bitrate    VENC bitrate kbps (default: 512)\n");
 }
 
 /* ── Main ────────────────────────────────────────────────────────── */
@@ -454,8 +454,8 @@ int main(int argc, char* argv[]) {
   k_connector_type connector_type = ST7701_V1_MIPI_2LAN_480X800_30FPS;
   k_u32 venc_width = 1280;
   k_u32 venc_height = 720;
-  k_u32 venc_bitrate = 2000;
-  VencType venc_type = VENC_TYPE_H264;
+  k_u32 venc_bitrate = 512;
+  VencType venc_type = VENC_TYPE_H265;
 
   /* Parse command-line arguments */
   for (int i = 1; i < argc; i++) {
@@ -502,7 +502,7 @@ int main(int argc, char* argv[]) {
 
   /* ── Initialize MPP pipeline ──
    * Sets up: VB pools → Display connector → VO layer →
- *          VICAP (CHN0→VO display, CHN1→VENC encode) → VENC H.264
+ *          VICAP (CHN0→VO display, CHN1→VENC encode) → VENC H.264/H.265
  * Binds: VICAP-CHN0 → VO, VICAP-CHN1 → VENC */
   MppPipelineConfig pipeline_config = {
     .csi_num = csi_num,

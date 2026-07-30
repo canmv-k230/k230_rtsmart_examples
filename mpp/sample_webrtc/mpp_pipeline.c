@@ -82,7 +82,7 @@ static k_u32 g_display_height = 0;  /* Actual display panel height (after rotati
 
 static int g_pipeline_initialized = 0;  /* 1 after mpp_pipeline_init succeeds */
 static int g_pipeline_started = 0;      /* 1 after mpp_pipeline_start succeeds */
-static VencType g_venc_type = VENC_TYPE_H264;  /* Encoder type (stored from config) */
+static VencType g_venc_type = VENC_TYPE_H265;  /* Encoder type (stored from config) */
 
 /* ── VB (Video Buffer) ───────────────────────────────────────────── */
 

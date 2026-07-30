@@ -3,7 +3,7 @@
  * @brief K230 MPP video pipeline interface for WebRTC demo
  *
  * Manages the hardware video pipeline:
- *   Camera (VICAP) → Display (VO) + Encode (VENC H.264)
+ *   Camera (VICAP) → Display (VO) + Encode (VENC H.264/H.265)
  *
  * Usage:
  *   1. mpp_pipeline_init()  — set up all hardware blocks
@@ -45,8 +45,8 @@ typedef struct {
   k_connector_type connector_type;  /**< Display connector type (LCD or HDMI) */
   k_u32 venc_width;                 /**< VENC encode width in pixels (e.g. 1280) */
   k_u32 venc_height;                /**< VENC encode height in pixels (e.g. 720) */
-  k_u32 venc_bitrate_kbps;          /**< VENC target bitrate in kbps (e.g. 2000) */
-  VencType venc_type;               /**< VENC encode type: H.264 or H.265 (default H.264) */
+  k_u32 venc_bitrate_kbps;          /**< VENC target bitrate in kbps (e.g. 512) */
+  VencType venc_type;               /**< VENC encode type: H.264 or H.265 (default H.265) */
 } MppPipelineConfig;
 
 /**
@@ -64,7 +64,7 @@ int mpp_pipeline_init(const MppPipelineConfig* config);
 
 /**
  * Start VICAP streaming and VENC encoding.
- * After this, encoded H.264 frames can be polled via kd_mpi_venc_get_stream().
+ * After this, encoded H.264/H.265 frames can be polled via kd_mpi_venc_get_stream().
  *
  * @return 0 on success, negative on failure
  */
