@@ -138,7 +138,14 @@ static void test_wlan_ap()
     CHECK_OK(netmgmt_wlan_ap_get_country(&country), "Get country");
     printf("  Country: %d\n", country);
 
-    CHECK_OK(netmgmt_wlan_ap_set_country(86), "Set country to 86");
+    int original_country = country;
+    CHECK_OK(netmgmt_wlan_ap_set_country(original_country), "Set current country");
+    country = -1;
+    CHECK_OK(netmgmt_wlan_ap_get_country(&country), "Read country after setting");
+    if (country != original_country) {
+        FAIL("Country readback mismatch");
+        return;
+    }
 
     STEP("WLAN AP: STA List + Disconnect");
 
