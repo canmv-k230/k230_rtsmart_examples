@@ -48,6 +48,11 @@ if RTT_ENABLE_3RD_PARTY_EXAMPLES
         default n
         depends on RTSMART_3RD_PARTY_ENABLE_LIBWEBSOCKETS
 
+    config RTSMART_3RD_PARTY_ENABLE_NIMBLE_SAMPLES
+        bool "Enable Build NimBLE Sample Programs"
+        default n
+        depends on RTSMART_3RD_PARTY_ENABLE_NIMBLE
+
     menuconfig RTSMART_3RD_PARTY_ENABLE_XIAOZHI_SAMPLES
         bool "Enable Build xiaozhi Sample Programs"
         default n
