@@ -15,7 +15,7 @@ all:
 	@rm -rf $(BUILD_OUT)
 	@mkdir -p $(RTT_3RD_PARTY_OPENBLAS_ELF_INSTALL_PATH)
 
-	./build_app.sh || exit $?
+	./build_app.sh
 	if [ -d $(BUILD_OUT) ]; then \
 		cp -r $(BUILD_OUT)/* $(RTT_3RD_PARTY_OPENBLAS_ELF_INSTALL_PATH); \
 	fi

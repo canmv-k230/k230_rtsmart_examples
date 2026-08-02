@@ -19,7 +19,7 @@ ifeq ($(CONFIG_RTSMART_3RD_PARTY_ENABLE_OPENBLAS_SAMPLES),y)
 	@rm -rf $(BUILD_OUT)
 	@mkdir -p $(RTT_3RD_PARTY_OPENCV_ELF_INSTALL_PATH)
 
-	./build_app.sh || exit $?
+	./build_app.sh
 	if [ -d $(BUILD_OUT) ]; then \
 		echo "Copying $(BUILD_OUT) to $(RTT_3RD_PARTY_OPENCV_ELF_INSTALL_PATH)"; \
 		cp -r $(BUILD_OUT)/* $(RTT_3RD_PARTY_OPENCV_ELF_INSTALL_PATH); \

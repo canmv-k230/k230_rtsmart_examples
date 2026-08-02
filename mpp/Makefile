@@ -45,14 +45,14 @@ ifneq ($(strip $(subdirs-y)),)
 
 $(subdirs-y):
 	@echo "[BUILD] examples mpp $@"
-	@$(MAKE) -C $@ all || exit $?;
+	@$(MAKE) -C $@ all
 endif
 
 clean:
 	@if [ -n "$(subdirs-y)" ]; then \
 		for dir in $(subdirs-y); do \
 			echo "[CLEAN] examples mpp $$dir"; \
-			$(MAKE) -C $$dir clean || exit $?; \
+			$(MAKE) -C $$dir clean || exit $$?; \
 		done; \
 	fi
 
@@ -60,6 +60,6 @@ distclean:
 	@if [ -n "$(subdirs-y)" ]; then \
 		for dir in $(subdirs-y); do \
 			echo "[DISTCLEAN] examples mpp $$dir"; \
-			$(MAKE) -C $$dir distclean || exit $?; \
+			$(MAKE) -C $$dir distclean || exit $$?; \
 		done; \
 	fi

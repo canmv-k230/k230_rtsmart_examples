@@ -19,7 +19,7 @@ ifeq ($(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_YOLO),y)
 	@rm -rf $(BUILD_OUT)
 	@mkdir -p $(RTT_AI_EXAMPLES_YOLO_ELF_INSTALL_PATH)
 
-	./build_app.sh || exit $?
+	./build_app.sh
 	if [ -d $(BUILD_OUT) ]; then \
 		echo "Copying $(BUILD_OUT) to $(RTT_AI_EXAMPLES_YOLO_ELF_INSTALL_PATH)"; \
 		cp -r $(BUILD_OUT)/* $(RTT_AI_EXAMPLES_YOLO_ELF_INSTALL_PATH); \

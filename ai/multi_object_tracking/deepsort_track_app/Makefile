@@ -20,7 +20,7 @@ ifeq ($(CONFIG_RTSMART_DEEPSORT_TRACK_ALGORITHM),y)
 	@rm -rf $(BUILD_OUT)
 	@mkdir -p $(RTT_MOT_DEEPSORT_TRACK_ELF_INSTALL_PATH)
 
-	./build_app.sh || exit $?
+	./build_app.sh
 	if [ -d $(BUILD_OUT) ]; then \
 		echo "Copying $(BUILD_OUT) to $(RTT_MOT_DEEPSORT_TRACK_ELF_INSTALL_PATH)"; \
 		cp -r $(BUILD_OUT)/* $(RTT_MOT_DEEPSORT_TRACK_ELF_INSTALL_PATH); \

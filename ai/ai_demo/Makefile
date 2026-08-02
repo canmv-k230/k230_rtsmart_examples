@@ -76,7 +76,7 @@ ifeq ($(CONFIG_RTSMART_AI_EXAMPLES_ENABLE_AI_DEMO),y)
 
 	@$(foreach dir,$(dirs), \
 		echo "Building in directory: $(dir)"; \
-		./build_app.sh $(dir) || exit $?;\
+		./build_app.sh $(dir) || exit $$?;\
 		if [ -d $(BUILD_OUT) ]; then \
 			echo "Copying $(BUILD_OUT) to $(RTT_AI_EXAMPLES_AI_DEMO_ELF_INSTALL_PATH)"; \
 			cp -r $(BUILD_OUT)/* $(RTT_AI_EXAMPLES_AI_DEMO_ELF_INSTALL_PATH); \

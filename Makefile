@@ -24,14 +24,14 @@ ifneq ($(strip $(subdirs-y)),)
 
 $(subdirs-y):
 	@echo "[BUILD] examples $@"
-	@$(MAKE) -C $@ all || exit $?;
+	@$(MAKE) -C $@ all
 endif
 
 clean:
 	@if [ -n "$(subdirs-y)" ]; then \
 		for dir in $(subdirs-y); do \
 			echo "[CLEAN] examples $$dir"; \
-			$(MAKE) -C $$dir clean|| exit $?; \
+			$(MAKE) -C $$dir clean|| exit $$?; \
 		done; \
 	fi
 	@rm -rf $(SDK_RTSMART_SRC_DIR)/examples/elf/
@@ -40,6 +40,6 @@ distclean: clean
 	@if [ -n "$(subdirs-y)" ]; then \
 		for dir in $(subdirs-y); do \
 			echo "[DISTCLEAN] examples $$dir"; \
-			$(MAKE) -C $$dir distclean|| exit $?; \
+			$(MAKE) -C $$dir distclean|| exit $$?; \
 		done; \
 	fi
