@@ -55,10 +55,18 @@ static void test_pmu_signal_handler(int signo)
 static void test_pmu_print_usage(const char *prog)
 {
     printf("Usage:\n");
-    printf("  %s [listen [cleanup_ms]]\n", prog);
+    printf("  %s listen [cleanup_ms]\n", prog);
     printf("  %s powercycle <shutdown_after_s> <poweron_after_s>\n", prog);
     printf("  %s cancel\n", prog);
-    printf("  poweron_after_s is counted after shutdown\n");
+    printf("  %s wakeup_level\n", prog);
+    printf("\n");
+    printf("Commands:\n");
+    printf("  listen       Listen for long-press shutdown requests\n");
+    printf("  powercycle   Schedule RTC shutdown and power-on\n");
+    printf("  cancel       Cancel a pending RTC power cycle\n");
+    printf("  wakeup_level Read the configured shutdown wakeup pad level\n");
+    printf("\n");
+    printf("poweron_after_s is counted after shutdown\n");
     printf("\n");
     printf("Examples:\n");
     printf("  %s listen 1000\n", prog);
@@ -86,7 +94,7 @@ static int test_pmu_prepare(struct test_pmu_context *ctx)
     if (test_pmu_open_instance(&ctx->pmu) < 0)
         return -1;
 
-    if (drv_pmu_register_notify(ctx->pmu, 0) < 0) {
+    if (drv_pmu_key_register_notify(ctx->pmu, 0) < 0) {
         fprintf(stderr, "register PMU notify failed\n");
         return -1;
     }
@@ -95,7 +103,7 @@ static int test_pmu_prepare(struct test_pmu_context *ctx)
     printf("  pid        : %d\n", getpid());
     printf("  signal     : SIGUSR1 (HAL managed)\n");
     printf("  cleanup_ms : %d\n", ctx->cleanup_ms);
-    printf("Waiting for PMU long-press/release shutdown events...\n");
+    printf("Waiting for PMU shutdown requests; driver waits for key release before shutdown\n");
 
     return 0;
 }
@@ -147,15 +155,14 @@ static void test_pmu_do_cleanup(struct test_pmu_context *ctx)
     }
 
     ctx->cleanup_done = true;
-    printf("[test_pmu] cleanup done, wait key release before ACK\n");
+    printf("[test_pmu] cleanup done, confirm shutdown\n");
 }
 
-static int test_pmu_handle_event(struct test_pmu_context *ctx)
+static int test_pmu_handle_shutdown_request(struct test_pmu_context *ctx)
 {
-    drv_pmu_event_t event;
     int ret;
 
-    ret = drv_pmu_wait_event(ctx->pmu, &event, -1);
+    ret = drv_pmu_key_wait_shutdown(ctx->pmu, -1);
     if (ret < 0) {
         fprintf(stderr, "wait PMU event failed\n");
         return -1;
@@ -163,25 +170,9 @@ static int test_pmu_handle_event(struct test_pmu_context *ctx)
     if (ret > 0)
         return 0;
 
-    event &= DRV_PMU_EVENT_LONG_PRESS | DRV_PMU_EVENT_KEY_RELEASE;
-    if (event == 0U)
-        return 0;
-
-    printf("[test_pmu] got event=0x%x\n", event);
-
-    if (drv_pmu_event_has_long_press(event))
-        test_pmu_do_cleanup(ctx);
-
-    if (!drv_pmu_event_has_key_release(event))
-        return 0;
-
-    if (!ctx->cleanup_done) {
-        printf("[test_pmu] release arrived before cleanup, do cleanup now\n");
-        test_pmu_do_cleanup(ctx);
-    }
-
-    printf("[test_pmu] key released, send shutdown ACK\n");
-    if (drv_pmu_ack_shutdown(ctx->pmu) < 0) {
+    test_pmu_do_cleanup(ctx);
+    printf("[test_pmu] shutdown request received, send confirmation\n");
+    if (drv_pmu_key_confirm_shutdown(ctx->pmu) < 0) {
         fprintf(stderr, "PMU shutdown ACK failed\n");
         return -1;
     }
@@ -205,7 +196,7 @@ static int test_pmu_run_listener(int cleanup_ms)
         goto out;
 
     while (!g_test_pmu_stop) {
-        if (test_pmu_handle_event(&ctx) < 0)
+        if (test_pmu_handle_shutdown_request(&ctx) < 0)
             break;
     }
 
@@ -226,8 +217,8 @@ static int test_pmu_run_power_cycle(uint32_t shutdown_after_s,
     if (test_pmu_open_instance(&pmu) < 0)
         goto out;
 
-    if (drv_pmu_schedule_power_cycle(pmu, shutdown_after_s,
-                                     poweron_after_s) < 0) {
+    if (drv_pmu_rtc_schedule_power_cycle(pmu, shutdown_after_s,
+                                         poweron_after_s) < 0) {
         fprintf(stderr, "schedule PMU power cycle failed\n");
         goto out;
     }
@@ -249,7 +240,7 @@ static int test_pmu_run_cancel(void)
     if (test_pmu_open_instance(&pmu) < 0)
         goto out;
 
-    if (drv_pmu_cancel_power_cycle(pmu) < 0) {
+    if (drv_pmu_rtc_cancel_power_cycle(pmu) < 0) {
         fprintf(stderr, "cancel PMU power cycle failed\n");
         goto out;
     }
@@ -262,21 +253,34 @@ out:
     return ret;
 }
 
-static int test_pmu_run_default_listener(int argc, char **argv)
+static int test_pmu_run_wakeup_level(void)
 {
-    uint32_t cleanup_ms = TEST_PMU_DEFAULT_CLEANUP_MS;
+    drv_pmu_inst_t *pmu = NULL;
+    int level;
+    int ret = 1;
 
-    if (argc > 2) {
-        test_pmu_print_usage(argv[0]);
-        return 1;
+    if (test_pmu_install_signal_handlers() < 0)
+        goto out;
+
+    if (test_pmu_open_instance(&pmu) < 0)
+        goto out;
+
+    printf("[test_pmu] reading shutdown wakeup pad level, press Ctrl+C to exit\n");
+    while (!g_test_pmu_stop) {
+        if (drv_pmu_wakeup_pad_get_level(pmu, &level) < 0) {
+            fprintf(stderr, "read PMU wakeup pad level failed\n");
+            goto out;
+        }
+
+        printf("[test_pmu] shutdown wakeup pad level: %d\n", level);
+        sleep(1);
     }
 
-    if ((argc == 2) && (test_pmu_parse_u32(argv[1], &cleanup_ms) < 0)) {
-        fprintf(stderr, "invalid cleanup_ms: %s\n", argv[1]);
-        return 1;
-    }
+    ret = 0;
 
-    return test_pmu_run_listener((int)cleanup_ms);
+out:
+    drv_pmu_inst_destroy(&pmu);
+    return ret;
 }
 
 static int test_pmu_run_listen_cmd(int argc, char **argv)
@@ -318,10 +322,11 @@ static int test_pmu_run_powercycle_cmd(int argc, char **argv)
 int main(int argc, char **argv)
 {
     const char *cmd;
-    uint32_t cleanup_ms;
 
-    if (argc <= 1)
-        return test_pmu_run_default_listener(argc, argv);
+    if (argc == 1) {
+        test_pmu_print_usage(argv[0]);
+        return 0;
+    }
 
     cmd = argv[1];
     if (strcmp(cmd, "listen") == 0)
@@ -333,8 +338,8 @@ int main(int argc, char **argv)
     if ((strcmp(cmd, "cancel") == 0) && (argc == 2))
         return test_pmu_run_cancel();
 
-    if ((argc == 2) && (test_pmu_parse_u32(cmd, &cleanup_ms) == 0))
-        return test_pmu_run_listener((int)cleanup_ms);
+    if ((strcmp(cmd, "wakeup_level") == 0) && (argc == 2))
+        return test_pmu_run_wakeup_level();
 
     test_pmu_print_usage(argv[0]);
     return 1;
