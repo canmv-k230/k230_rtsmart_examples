@@ -183,12 +183,15 @@ static void peripheral_on_sync(void)
 
 int main(int argc, char **argv)
 {
-    const char *hci_device = argc > 1 ? argv[1] : "/dev/hci0";
+    const char *user_hci_path = argc > 1 ? argv[1] : NULL;
+    const char *selected_hci_path;
     int result;
 
-    result = rtsmart_nimble_hci_set_device(hci_device);
+    result = rtsmart_nimble_hci_set_device(user_hci_path);
     if (result != 0) {
-        fprintf(stderr, "Invalid HCI device %s: %d\n", hci_device, result);
+        fprintf(stderr, "Invalid HCI device %s: %d\n",
+                user_hci_path ? user_hci_path : "(auto)",
+                result);
         return 1;
     }
 
@@ -213,7 +216,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    printf("NimBLE peripheral using %s\n", hci_device);
+    /* NULL is expected when transport initialization found no usable HCI node. */
+    selected_hci_path = rtsmart_nimble_hci_get_device();
+    printf("NimBLE peripheral using %s\n",
+           selected_hci_path ? selected_hci_path : "(no HCI controller)");
     nimble_port_run();
     return 0;
 }
