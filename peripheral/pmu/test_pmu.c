@@ -31,6 +31,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "drv_pmu.h"
 
@@ -58,13 +59,15 @@ static void test_pmu_print_usage(const char *prog)
     printf("  %s listen [cleanup_ms]\n", prog);
     printf("  %s powercycle <shutdown_after_s> <poweron_after_s>\n", prog);
     printf("  %s cancel\n", prog);
-    printf("  %s wakeup_level\n", prog);
+    printf("  %s wakeup_level <pad>\n", prog);
+    printf("  %s wakeup_source\n", prog);
     printf("\n");
     printf("Commands:\n");
     printf("  listen       Listen for long-press shutdown requests\n");
     printf("  powercycle   Schedule RTC shutdown and power-on\n");
     printf("  cancel       Cancel a pending RTC power cycle\n");
-    printf("  wakeup_level Read the configured shutdown wakeup pad level\n");
+    printf("  wakeup_level Read one configured shutdown wakeup pad level\n");
+    printf("  wakeup_source Read one configured shutdown wakeup source name\n");
     printf("\n");
     printf("poweron_after_s is counted after shutdown\n");
     printf("\n");
@@ -253,7 +256,7 @@ out:
     return ret;
 }
 
-static int test_pmu_run_wakeup_level(void)
+static int test_pmu_run_wakeup_level(uint32_t pad)
 {
     drv_pmu_inst_t *pmu = NULL;
     int level;
@@ -267,12 +270,14 @@ static int test_pmu_run_wakeup_level(void)
 
     printf("[test_pmu] reading shutdown wakeup pad level, press Ctrl+C to exit\n");
     while (!g_test_pmu_stop) {
-        if (drv_pmu_wakeup_pad_get_level(pmu, &level) < 0) {
-            fprintf(stderr, "read PMU wakeup pad level failed\n");
+        if (drv_pmu_wakeup_pad_get_level(pmu, pad, &level) < 0) {
+            fprintf(stderr, "read PMU PAD%u wakeup level failed: %s\n",
+                    pad, strerror(errno));
+            fprintf(stderr, "check that PAD%u is enabled in the kernel Kconfig and that the new kernel image is flashed\n", pad);
             goto out;
         }
 
-        printf("[test_pmu] shutdown wakeup pad level: %d\n", level);
+        printf("[test_pmu] PAD%u shutdown wakeup level: %d\n", pad, level);
         sleep(1);
     }
 
@@ -281,6 +286,34 @@ static int test_pmu_run_wakeup_level(void)
 out:
     drv_pmu_inst_destroy(&pmu);
     return ret;
+}
+
+static int test_pmu_run_wakeup_source(void)
+{
+    drv_pmu_inst_t *pmu = NULL;
+    char source[64];
+    int ret = 1;
+
+    if (test_pmu_open_instance(&pmu) < 0)
+        goto out;
+    if (drv_pmu_wakeup_source_get(pmu, source, sizeof(source)) < 0) {
+        fprintf(stderr, "read PMU wakeup source failed: %s\n",
+                strerror(errno));
+        fprintf(stderr, "run it after the board was woken by RTC, the long-press key, or a configured PAD\n");
+        goto out;
+    }
+    printf("[test_pmu] wakeup source: %s\n", source);
+    ret = 0;
+out:
+    drv_pmu_inst_destroy(&pmu);
+    return ret;
+}
+
+static int test_pmu_parse_pad(const char *text, uint32_t *pad)
+{
+    if (test_pmu_parse_u32(text, pad) < 0 || *pad < 65U || *pad > 69U)
+        return -1;
+    return 0;
 }
 
 static int test_pmu_run_listen_cmd(int argc, char **argv)
@@ -316,6 +349,13 @@ static int test_pmu_run_powercycle_cmd(int argc, char **argv)
         return 1;
     }
 
+    if ((shutdown_after_s < DRV_PMU_POWER_CYCLE_MIN_DELAY_S) ||
+        (poweron_after_s < DRV_PMU_POWER_CYCLE_MIN_DELAY_S)) {
+        fprintf(stderr, "powercycle delays must both be at least %u seconds\n",
+                DRV_PMU_POWER_CYCLE_MIN_DELAY_S);
+        return 1;
+    }
+
     return test_pmu_run_power_cycle(shutdown_after_s, poweron_after_s);
 }
 
@@ -338,8 +378,15 @@ int main(int argc, char **argv)
     if ((strcmp(cmd, "cancel") == 0) && (argc == 2))
         return test_pmu_run_cancel();
 
-    if ((strcmp(cmd, "wakeup_level") == 0) && (argc == 2))
-        return test_pmu_run_wakeup_level();
+    if ((strcmp(cmd, "wakeup_level") == 0) && (argc == 3)) {
+        uint32_t pad;
+        if (test_pmu_parse_pad(argv[2], &pad) < 0)
+            return 1;
+        return test_pmu_run_wakeup_level(pad);
+    }
+
+    if ((strcmp(cmd, "wakeup_source") == 0) && (argc == 2))
+        return test_pmu_run_wakeup_source();
 
     test_pmu_print_usage(argv[0]);
     return 1;

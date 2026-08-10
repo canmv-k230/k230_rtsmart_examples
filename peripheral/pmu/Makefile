@@ -36,6 +36,7 @@ CXX_FLAGS 	:= $(C_CXX_FLAGS) -std=c++20
 # Linker flags
 LDFLAGS := -T $(SDK_RTSMART_SRC_DIR)/libs/mk/link.lds --static -Wl,--gc-sections
 LDFLAGS += $(LIB_LDFLAGS)
+LIB_DEPS := $(wildcard $(RTSMART_HAL_LIB_INSTALL_PATH)/lib*.a)
 
 # Phony targets
 .PHONY: all clean distclean
@@ -44,9 +45,9 @@ all: $(BIN)
 	@$(ECHO) [BUILD] examples peripheral $(DIR) done.
 
 # Rule to link the final ELF - Order-only dependency on directory
-$(BIN): $(OBJS) | $(OBJ_DIRS)
+$(BIN): $(OBJS) $(LIB_DEPS) | $(OBJ_DIRS)
 	@echo "[LD] $@"
-	$(Q)$(CXX) $(CFLAGS) $^ $(LDFLAGS) -o $@
+	$(Q)$(CXX) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
 	$(Q)$(STRIP) $@
 
 # Rule for C objects - Order-only dependency on directory
