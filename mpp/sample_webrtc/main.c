@@ -43,9 +43,11 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -166,6 +168,63 @@ static void signal_handler(int sig) {
   g_exit_requested = 1;
 }
 
+/** Replace mDNS host candidates with the HTTP client's IPv4 address.
+ *
+ * Browsers may hide their LAN address behind a .local mDNS name. libpeer
+ * cannot resolve that name, but the signaling server already knows the
+ * browser's address from the accepted TCP connection. Only the candidate
+ * address field is changed; ICE credentials and candidate ports are kept.
+ */
+static int replace_mdns_candidates(char* sdp, size_t capacity, const char* client_ip) {
+  static const char candidate_prefix[] = "a=candidate:";
+  const size_t client_ip_len = client_ip ? strlen(client_ip) : 0;
+  char* line = sdp;
+  int replaced = 0;
+
+  if (!sdp || !client_ip_len) return 0;
+
+  while (*line) {
+    char* line_end = strstr(line, "\r\n");
+    if (!line_end) line_end = line + strlen(line);
+
+    if ((size_t)(line_end - line) > sizeof(candidate_prefix) - 1 &&
+        strncmp(line, candidate_prefix, sizeof(candidate_prefix) - 1) == 0) {
+      char* address_start = line;
+
+      /* Skip foundation, component, transport, and priority fields. */
+      for (int field = 0; field < 4 && address_start < line_end; field++) {
+        address_start = memchr(address_start, ' ', line_end - address_start);
+        if (!address_start) break;
+        while (address_start < line_end && *address_start == ' ') address_start++;
+      }
+
+      if (address_start && address_start < line_end) {
+        char* address_end = memchr(address_start, ' ', line_end - address_start);
+        if (!address_end) address_end = line_end;
+
+        size_t address_len = address_end - address_start;
+        if (address_len > 6 && strncasecmp(address_end - 6, ".local", 6) == 0) {
+          size_t sdp_len = strlen(sdp);
+          size_t tail_len = sdp_len - (address_end - sdp) + 1;
+          size_t new_sdp_len = sdp_len - address_len + client_ip_len;
+
+          if (new_sdp_len + 1 > capacity) return -1;
+
+          memmove(address_start + client_ip_len, address_end, tail_len);
+          memcpy(address_start, client_ip, client_ip_len);
+          line_end += (ptrdiff_t)client_ip_len - (ptrdiff_t)address_len;
+          replaced++;
+        }
+      }
+    }
+
+    if (!*line_end) break;
+    line = line_end + 2;
+  }
+
+  return replaced;
+}
+
 /* ── Frame sending logic ─────────────────────────────────────────── */
 
 /**
@@ -219,13 +278,10 @@ static void send_venc_frame_to_webrtc(const uint8_t* data, size_t size,
 /* ── Network utilities ───────────────────────────────────────────── */
 
 /**
- * Get the first non-loopback IPv4 address from common network interfaces.
- * Tries common RT-Smart interface names: u0, e0, eth0, en0, w0, wlan0.
+ * Get the IPv4 address selected by RT-Smart's current default route.
  * Falls back to "0.0.0.0" if no IP is found.
  */
 static void get_local_ip(char* buf, int buf_len) {
-  static const char* ifnames[] = {"u0", "e0", "eth0", "en0", "w0", "wlan0", NULL};
-
   snprintf(buf, buf_len, "0.0.0.0");
 
   int sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -234,16 +290,11 @@ static void get_local_ip(char* buf, int buf_len) {
   }
 
   struct ifreq ifr;
-  for (int i = 0; ifnames[i] != NULL; i++) {
-    memset(&ifr, 0, sizeof(ifr));
-    strncpy(ifr.ifr_name, ifnames[i], sizeof(ifr.ifr_name) - 1);
-
-    if (ioctl(sock, SIOCGIFADDR, &ifr) == 0) {
-      struct sockaddr_in* sin = (struct sockaddr_in*)&ifr.ifr_addr;
-      if (sin->sin_addr.s_addr != htonl(INADDR_ANY)) {
-        inet_ntop(AF_INET, &sin->sin_addr, buf, buf_len);
-        break;
-      }
+  memset(&ifr, 0, sizeof(ifr));
+  if (ioctl(sock, SIOCGIFADDR, &ifr) == 0) {
+    struct sockaddr_in* sin = (struct sockaddr_in*)&ifr.ifr_addr;
+    if (sin->sin_addr.s_addr != htonl(INADDR_ANY)) {
+      inet_ntop(AF_INET, &sin->sin_addr, buf, buf_len);
     }
   }
 
@@ -340,6 +391,7 @@ static void* venc_stream_task(void* data) {
  */
 static void on_http_request(const char* method, const char* path,
                             const char* body, int body_len,
+                            const char* client_ip,
                             http_response_t* response) {
 
   /* ── Serve web page ── */
@@ -359,7 +411,7 @@ static void on_http_request(const char* method, const char* path,
      * calls will enter the dtls_srtp code path, but a call already past
      * the state check may still be using srtp_out. Wait until both
      * in-use flags are 0 — guaranteed within ~1ms. */
-    if (g_state == PEER_CONNECTION_COMPLETED || g_state == PEER_CONNECTION_CONNECTED) {
+    if (g_state != PEER_CONNECTION_CLOSED) {
       peer_connection_close(g_pc);
       g_state = PEER_CONNECTION_CLOSED;
       while (g_peer_in_pc || g_venc_in_pc) {
@@ -407,12 +459,45 @@ static void on_http_request(const char* method, const char* path,
       return;
     }
 
-    /* Null-terminate the answer SDP for libpeer.
+    /* Null-terminate the answer SDP for libpeer and leave enough room to
+     * replace short mDNS hostnames with an IPv4 address if necessary.
      * body is not guaranteed to be null-terminated (it points into
      * the receive buffer at the start of the body section). */
-    char* answer_copy = (char*)calloc(1, body_len + 1);
+    size_t candidate_count = 0;
+    const char* candidate = body;
+    const char* body_end = body + body_len;
+    while (candidate < body_end &&
+           (candidate = strstr(candidate, "a=candidate:")) != NULL &&
+           candidate < body_end) {
+      candidate_count++;
+      candidate += strlen("a=candidate:");
+    }
+
+    size_t answer_capacity = body_len + candidate_count * INET_ADDRSTRLEN + 1;
+    char* answer_copy = (char*)calloc(1, answer_capacity);
+    if (!answer_copy) {
+      response->status = 500;
+      response->content_type = "text/plain";
+      response->body = "Out of memory";
+      response->body_len = strlen(response->body);
+      return;
+    }
     memcpy(answer_copy, body, body_len);
     answer_copy[body_len] = '\0';
+
+    int mdns_replaced = replace_mdns_candidates(answer_copy, answer_capacity, client_ip);
+    if (mdns_replaced < 0) {
+      free(answer_copy);
+      response->status = 500;
+      response->content_type = "text/plain";
+      response->body = "Failed to process SDP";
+      response->body_len = strlen(response->body);
+      return;
+    }
+    if (mdns_replaced > 0) {
+      printf("Replaced %d mDNS ICE candidate(s) with HTTP client IP %s\n",
+             mdns_replaced, client_ip);
+    }
 
     peer_connection_set_remote_description(g_pc, answer_copy, SDP_TYPE_ANSWER);
 

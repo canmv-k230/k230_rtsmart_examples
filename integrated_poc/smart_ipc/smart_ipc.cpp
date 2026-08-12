@@ -132,57 +132,57 @@ void MySmartIPC::OnAIFrameData(k_u32 chn_id, k_video_frame_info* frame_info) {
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <net/if.h>
 #include <sys/ioctl.h>
 
 /**
- * @brief 获取指定网络接口的IP地址（IPv4）
+ * @brief Get the IPv4 address selected by RT-Smart's default route.
  */
-int get_interface_ip(const char *ifname, char *ip_str, int str_len) {
+static int get_default_ip(char *ip_str, int str_len) {
     int sock_get_ip;
     struct sockaddr_in *sin;
     struct ifreq ifr_ip;
 
-    if (ifname == NULL || ip_str == NULL || str_len < 16) {
-        printf("Invalid parameters for get_interface_ip\n");
+    if (ip_str == NULL || str_len < 16) {
+        printf("Invalid parameters for get_default_ip\n");
         return -1;
     }
 
-    if ((sock_get_ip = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+    if ((sock_get_ip = socket(AF_INET, SOCK_DGRAM, 0)) == -1) {
         printf("Failed to create socket for getting IP\n");
         return -1;
     }
 
     memset(&ifr_ip, 0, sizeof(ifr_ip));
-    strncpy(ifr_ip.ifr_name, ifname, sizeof(ifr_ip.ifr_name) - 1);
 
     if (ioctl(sock_get_ip, SIOCGIFADDR, &ifr_ip) < 0) {
-        printf("ioctl(SIOCGIFADDR) failed for interface %s\n", ifname);
+        printf("Failed to get the default-route IP address\n");
         close(sock_get_ip);
         return -1;
     }
 
     sin = (struct sockaddr_in *)&ifr_ip.ifr_addr;
-    strncpy(ip_str, inet_ntoa(sin->sin_addr), str_len - 1);
-    ip_str[str_len - 1] = '\0';
+    if (sin->sin_addr.s_addr == htonl(INADDR_ANY) ||
+        inet_ntop(AF_INET, &sin->sin_addr, ip_str, str_len) == NULL) {
+        close(sock_get_ip);
+        return -1;
+    }
 
     close(sock_get_ip);
     return 0;
 }
 
-static int get_valid_ip_with_retry(const char *ifname, char *ip_str, int str_len,
+static int get_valid_ip_with_retry(char *ip_str, int str_len,
                            int max_retry, int interval_ms) {
-    if (ifname == NULL || ip_str == NULL || str_len < 16 || max_retry <= 0 || interval_ms <= 0) {
+    if (ip_str == NULL || str_len < 16 || max_retry <= 0 || interval_ms <= 0) {
         return -1;
     }
 
     for (int i = 0; i < max_retry; i++) {
-        if (get_interface_ip(ifname, ip_str, str_len) == 0) {
-            if (strcmp(ip_str, "0.0.0.0") != 0) {
-                return 0;
-            }
+        if (get_default_ip(ip_str, str_len) == 0) {
+            return 0;
         }
-        printf("IP is 0.0.0.0, retrying (%d/%d)...\n", i + 1, max_retry);
+        printf("Default route has no IPv4 address, retrying (%d/%d)...\n",
+               i + 1, max_retry);
         usleep(interval_ms * 1000);
     }
     return -1;
@@ -266,7 +266,7 @@ void MySmartIPC::RtspThreadMain() {
         streaming_ready_ = true;
 
         char ip[16];
-        if (get_valid_ip_with_retry("u0", ip, sizeof(ip), 10, 1000) == 0) {
+        if (get_valid_ip_with_retry(ip, sizeof(ip), 10, 1000) == 0) {
             const char* original_rtsp_url = srv->GetRtspUrl(stream_url_);
             if (original_rtsp_url == NULL) {
                 printf("Failed to get original RTSP URL\n");
@@ -446,7 +446,7 @@ void MySmartIPC::WebRtcThreadMain() {
     streaming_ready_ = true;
 
     char webrtc_ip[16];
-    if (get_valid_ip_with_retry("u0", webrtc_ip, sizeof(webrtc_ip), 10, 1000) == 0) {
+    if (get_valid_ip_with_retry(webrtc_ip, sizeof(webrtc_ip), 10, 1000) == 0) {
         printf("[WebRTC] Open in browser: http://%s:%d\n", webrtc_ip, port_);
     } else {
         printf("[WebRTC] HTTP signaling server starting on port %d (IP unavailable)\n", port_);

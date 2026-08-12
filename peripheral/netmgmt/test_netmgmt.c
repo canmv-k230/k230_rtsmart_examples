@@ -35,7 +35,7 @@ static void test_utils()
     STEP("UTILS: Default Device + Ifconfig + Probe");
 
     char dev[32] = { 0 };
-    CHECK_OK(netmgmt_utils_set_defeault_dev("w0"), "Set default device");
+    CHECK_OK(netmgmt_utils_set_defeault_dev("wlan0"), "Set default device");
     CHECK_OK(netmgmt_utils_get_defeault_dev(dev), "Get default device");
     printf("  Default device: %s\n", dev);
 

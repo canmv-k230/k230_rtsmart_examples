@@ -8,7 +8,7 @@ K230 RT-Smart 上的 WebRTC 局域网摄像头 Demo。板载摄像头采集 → 
 - LCD / HDMI 本地预览
 - 浏览器一键连接，自带 Web UI
 - SDP offer/answer 信令（HTTP）
-- mDNS 隐私检测与提示
+- 自动处理浏览器 mDNS 隐私候选地址
 
 ## 快速开始
 
@@ -58,13 +58,7 @@ sample_webrtc.elf -t h264 -s 2 -c 605274512 -b 3000
 
 ### mDNS 隐私保护
 
-Chrome/Edge 默认启用 mDNS 隐私保护，会隐藏本地 IP 导致 WebRTC 连接失败。页面会自动检测并提示。
-
-修复方式（任选其一）：
-
-1. 地址栏输入 `chrome://flags/#enable-webrtc-hide-local-ips-with-mdns` → 设为 **Disabled** → 重启
-2. 启动参数加 `--disable-features=WebRtcHideLocalIpsWithMdns`
-3. 使用 Firefox（默认未启用 mDNS）
+Chrome/Edge 可以保持默认的 mDNS 隐私保护设置。信令服务器会使用 HTTP 连接的客户端地址解析浏览器的 `.local` ICE 候选地址，无需修改浏览器 flags 或启动参数。
 
 ### H.265 浏览器兼容性
 

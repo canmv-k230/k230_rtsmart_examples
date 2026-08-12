@@ -316,8 +316,12 @@ static void* server_thread(void* data) {
       if (strcmp(method, "OPTIONS") == 0) {
         handle_options(client_fd);
       } else if (g_handler) {
+        char client_ip[INET_ADDRSTRLEN] = {0};
         http_response_t response = {200, "text/plain", "OK", 2};
-        g_handler(method, path, body, body_len, &response);
+        if (!inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip))) {
+          client_ip[0] = '\0';
+        }
+        g_handler(method, path, body, body_len, client_ip, &response);
         send_response(client_fd, &response);
       }
     }

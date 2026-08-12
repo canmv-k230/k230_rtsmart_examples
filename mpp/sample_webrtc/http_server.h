@@ -30,10 +30,12 @@ typedef struct {
  * @param path      URL path ("/", "/offer", "/answer")
  * @param body      Request body (may be NULL for GET requests)
  * @param body_len  Request body length in bytes
+ * @param client_ip IPv4 address of the connected HTTP client
  * @param response  Output: handler fills this with the response
  */
 typedef void (*http_request_handler_t)(const char* method, const char* path,
                                        const char* body, int body_len,
+                                       const char* client_ip,
                                        http_response_t* response);
 
 /**
