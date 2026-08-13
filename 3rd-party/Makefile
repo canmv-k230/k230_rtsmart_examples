@@ -13,6 +13,7 @@ subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_CJSON_SAMPLES) += cjson/cjson_basic
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_LIBWEBSOCKETS_SAMPLES) += libwebsockets/ws_server libwebsockets/ws_client libwebsockets/ws_poll_test
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_XIAOZHI_SAMPLES) += xiaozhi
 subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_NIMBLE_SAMPLES) += nimble/ble_peripheral
+subdirs-$(CONFIG_RTSMART_3RD_PARTY_ENABLE_IPERF3) += iperf
 
 .PHONY: all clean distclean
 

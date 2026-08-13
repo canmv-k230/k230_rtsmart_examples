@@ -53,6 +53,14 @@ if RTT_ENABLE_3RD_PARTY_EXAMPLES
         default n
         depends on RTSMART_3RD_PARTY_ENABLE_NIMBLE
 
+    config RTSMART_3RD_PARTY_ENABLE_IPERF3
+        bool "Enable Build iperf3"
+        default n
+        help
+            Build the upstream iperf3 command-line program for RT-Smart.
+            The iperf source repository must be checked out in the iperf/iperf
+            directory by the SDK repo manifest.
+
     menuconfig RTSMART_3RD_PARTY_ENABLE_XIAOZHI_SAMPLES
         bool "Enable Build xiaozhi Sample Programs"
         default n

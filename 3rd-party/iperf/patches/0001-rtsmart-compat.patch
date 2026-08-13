@@ -1,0 +1,86 @@
+diff --git a/src/iperf_api.c b/src/iperf_api.c
+index ebf7678..2f854ff 100644
+--- a/src/iperf_api.c
++++ b/src/iperf_api.c
+@@ -3461 +3461 @@ iperf_defaults(struct iperf_test *testp)
+-    testp->settings->domain = AF_UNSPEC;
++    testp->settings->domain = AF_INET;
+@@ -3481 +3481 @@ iperf_defaults(struct iperf_test *testp)
+-    testp->settings->connect_timeout = -1;
++    testp->settings->connect_timeout = 5000;
+@@ -4943 +4943 @@ iperf_free_stream(struct iperf_stream *sp)
+-    munmap(sp->buffer, sp->test->settings->blksize);
++    free(sp->buffer);
+@@ -4968,22 +4967,0 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
+-    char template[1024];
+-    if (test->tmp_template) {
+-        snprintf(template, sizeof(template) / sizeof(char), "%s", test->tmp_template);
+-    } else {
+-        //find the system temporary dir *unix, windows, cygwin support
+-        char* tempdir = getenv("TMPDIR");
+-        if (tempdir == 0){
+-            tempdir = getenv("TEMP");
+-        }
+-        if (tempdir == 0){
+-            tempdir = getenv("TMP");
+-        }
+-        if (tempdir == 0){
+-#if defined(__ANDROID__)
+-            tempdir = "/data/local/tmp";
+-#else
+-            tempdir = "/tmp";
+-#endif
+-        }
+-        snprintf(template, sizeof(template) / sizeof(char), "%s/iperf3.XXXXXX", tempdir);
+-    }
+-
+@@ -5011,9 +4988,0 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
+-    sp->buffer_fd = mkstemp(template);
+-    if (sp->buffer_fd == -1) {
+-        i_errno = IECREATESTREAM;
+-        goto err_exit_free_result;
+-    }
+-    if (unlink(template) < 0) {
+-        i_errno = IECREATESTREAM;
+-        goto err_exit_close_buffer;
+-    }
+@@ -5027,6 +4996,3 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
+-    if (ftruncate(sp->buffer_fd, size) < 0) {
+-        i_errno = IECREATESTREAM;
+-        goto err_exit_close_buffer;
+-    }
+-    sp->buffer = (char *) mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, sp->buffer_fd, 0);
+-    if (sp->buffer == MAP_FAILED) {
++    sp->buffer_fd = -1;
++    sp->buffer = (char *) malloc(size);
++    if (sp->buffer == NULL) {
+@@ -5034 +5000 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
+-        goto err_exit_close_buffer;
++        goto err_exit_free_result;
+@@ -5048 +5014 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
+-            goto err_exit_munmap_buffer;
++            goto err_exit_free_buffer;
+@@ -5075,4 +5041,2 @@ err_exit_close_diskfile:
+-err_exit_munmap_buffer:
+-    munmap(sp->buffer, sp->test->settings->blksize);
+-err_exit_close_buffer:
+-    close(sp->buffer_fd);
++err_exit_free_buffer:
++    free(sp->buffer);
+@@ -5331,2 +5295,2 @@ iperf_got_sigend(struct iperf_test *test, int sig)
+-    if (test->role == 'c' ||
+-      (test->role == 's' && test->state == TEST_RUNNING)) {
++    if ((test->role == 'c' || test->role == 's') &&
++      test->state == TEST_RUNNING) {
+diff --git a/src/tcp_info.c b/src/tcp_info.c
+index 94f1588..4332b53 100644
+--- a/src/tcp_info.c
++++ b/src/tcp_info.c
+@@ -58,0 +59,7 @@
++/* RT-Smart uses lwIP and does not implement the Linux TCP_INFO ABI. */
++#ifdef RTSMART
++#undef TCP_INFO
++#undef TCP_MD5SIG
++#undef TCP_REPAIR_ON
++#endif
++
