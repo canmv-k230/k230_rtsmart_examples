@@ -47,16 +47,6 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 
-#include <list>
-using namespace std;
-typedef struct
-{
-    k_audio_stream stream;
-    k_vb_blk_handle handle;
-} k_audio_sample;
-
-typedef std::list<k_audio_sample> AUDIO_STREAM_LIST;
-
 #include <unistd.h>
 #include "mpi_ai_api.h"
 #include "mpi_ao_api.h"
