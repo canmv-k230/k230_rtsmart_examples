@@ -1,4 +1,4 @@
-if RTT_ENABLE_MPP_EXAMPLES
+if RTSMART_ENABLE_MPP_EXAMPLES
 
   config RTSMART_MPP_ENABLE_SAMPLE_AHD_SENSOR
       bool "Enable Build sample_ahd_sensor"
@@ -16,7 +16,7 @@ if RTT_ENABLE_MPP_EXAMPLES
         Preview one MIPI sensor and one XS9950 MCM sensor with independent
         CSI selections.
 
-  config RTT_ENABLE_MPP_EXAMPLES_AUDIO
+  config RTSMART_MPP_ENABLE_SAMPLE_AUDIO
       bool "Enable Build sample_audio"
       default n
       help
@@ -149,7 +149,7 @@ if RTT_ENABLE_MPP_EXAMPLES
         Video Encoder: Hardware H.264/H.265/JPEG encoding to file.
 
   config RTSMART_MPP_ENABLE_SAMPLE_VICAP
-      bool "Enabel Build sample_vicap_sensor"
+      bool "Enable Build sample_vicap_sensor"
       default n
       help
         Vicap Bind to Display and Dump to File

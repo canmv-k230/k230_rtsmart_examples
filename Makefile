@@ -2,11 +2,11 @@ include mkenv.mk
 
 subdirs-y :=
 
-subdirs-$(CONFIG_RTT_ENABLE_3RD_PARTY_EXAMPLES) += 3rd-party
-subdirs-$(CONFIG_RTT_ENABLE_PERIPHERAL_EXAMPLES) += peripheral
-subdirs-$(CONFIG_RTT_ENABLE_MPP_EXAMPLES) += mpp
-subdirs-$(CONFIG_RTT_ENABLE_AI_EXAMPLES) += ai
-subdirs-$(CONFIG_RTT_ENABLE_BUILD_INTEGRATED_EXAMPLES) += integrated_poc
+subdirs-$(CONFIG_RTSMART_ENABLE_3RD_PARTY_EXAMPLES) += 3rd-party
+subdirs-$(CONFIG_RTSMART_ENABLE_PERIPHERAL_EXAMPLES) += peripheral
+subdirs-$(CONFIG_RTSMART_ENABLE_MPP_EXAMPLES) += mpp
+subdirs-$(CONFIG_RTSMART_ENABLE_AI_EXAMPLES) += ai
+subdirs-$(CONFIG_RTSMART_ENABLE_BUILD_INTEGRATED_EXAMPLES) += integrated_poc
 
 ELF_INSTALL_DIR := $(SDK_RTSMART_SRC_DIR)/examples/elf/
 

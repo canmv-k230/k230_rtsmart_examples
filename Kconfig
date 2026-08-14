@@ -1,48 +1,48 @@
-menuconfig RTT_ENABLE_BUILD_EXAMPLES
+menuconfig RTSMART_ENABLE_BUILD_EXAMPLES
     bool "RT-Smart UserSpace Examples Configuration"
     default n
     depends on !SDK_ENABLE_CANMV
 
-    if RTT_ENABLE_BUILD_EXAMPLES
+    if RTSMART_ENABLE_BUILD_EXAMPLES
 
-        menuconfig RTT_ENABLE_3RD_PARTY_EXAMPLES
+        menuconfig RTSMART_ENABLE_3RD_PARTY_EXAMPLES
             bool "Enable 3rd-party examples"
             default n
 
-            if RTT_ENABLE_3RD_PARTY_EXAMPLES
+            if RTSMART_ENABLE_3RD_PARTY_EXAMPLES
                 source "$(SDK_RTSMART_SRC_DIR)/examples/3rd-party/Kconfig"
             endif
 
-        menuconfig RTT_ENABLE_PERIPHERAL_EXAMPLES
+        menuconfig RTSMART_ENABLE_PERIPHERAL_EXAMPLES
             bool "Enable build peripheral examples"
             default n
 
-            if RTT_ENABLE_PERIPHERAL_EXAMPLES
+            if RTSMART_ENABLE_PERIPHERAL_EXAMPLES
                 source "$(SDK_RTSMART_SRC_DIR)/examples/peripheral/Kconfig"
             endif
 
-        menuconfig RTT_ENABLE_MPP_EXAMPLES
+        menuconfig RTSMART_ENABLE_MPP_EXAMPLES
             bool "Enable MPP examples"
             default n
 
-            if RTT_ENABLE_MPP_EXAMPLES
+            if RTSMART_ENABLE_MPP_EXAMPLES
                 source "$(SDK_RTSMART_SRC_DIR)/examples/mpp/Kconfig"
             endif
 
-        menuconfig RTT_ENABLE_AI_EXAMPLES
+        menuconfig RTSMART_ENABLE_AI_EXAMPLES
             bool "Enable build ai examples"
             default n
 
-            if RTT_ENABLE_AI_EXAMPLES
+            if RTSMART_ENABLE_AI_EXAMPLES
                 source "$(SDK_RTSMART_SRC_DIR)/examples/ai/Kconfig"
             endif
 
 
-        menuconfig RTT_ENABLE_BUILD_INTEGRATED_EXAMPLES
+        menuconfig RTSMART_ENABLE_BUILD_INTEGRATED_EXAMPLES
             bool "Enable build integrated examples"
             default n
 
-            if RTT_ENABLE_BUILD_INTEGRATED_EXAMPLES
+            if RTSMART_ENABLE_BUILD_INTEGRATED_EXAMPLES
                 source "$(SDK_RTSMART_SRC_DIR)/examples/integrated_poc/Kconfig"
             endif
 

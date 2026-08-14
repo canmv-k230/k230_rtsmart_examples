@@ -1,4 +1,4 @@
-if RTT_ENABLE_AI_EXAMPLES
+if RTSMART_ENABLE_AI_EXAMPLES
 
     config RTSMART_AI_EXAMPLES_ENABLE_AI_DEMO
         bool "Enable Build AI Demo Programs"

@@ -5,7 +5,6 @@ subdirs-y :=
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_AHD_SENSOR)      += sample_ahd_sensor
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_AHD_MIPI_SENSOR) += sample_ahd_mipi_sensor
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_AUDIO)           += sample_audio
-subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_CIPHER)          += sample_cipher/sample_aes sample_cipher/sample_hash sample_cipher/sample_hwhash sample_cipher/sample_pufs
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_CSC)             += sample_csc
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_DEMUXER)         += sample_demuxer
 subdirs-$(CONFIG_RTSMART_MPP_ENABLE_SAMPLE_DW200)           += sample_dw200
