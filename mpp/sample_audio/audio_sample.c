@@ -25,504 +25,826 @@
 
 #include "audio_sample.h"
 
-#include <stdio.h>
-#include <pthread.h>
-#include <time.h>
-#include <string.h>
-
-#include "k_vb_comm.h"
-#include "k_video_comm.h"
-#include "k_sys_comm.h"
-#include "mpi_vb_api.h"
-#include "mpi_sys_api.h"
-#include "k_acodec_comm.h"
-
-#include <sys/select.h>
-
-/* According to earlier standards */
-#include <sys/time.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <stdlib.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/ioctl.h>
-
 #include <unistd.h>
+
+#include "audio_file.h"
+#include "audio_io.h"
+#include "audio_wav.h"
+#include "k_acodec_comm.h"
+#include "k_sys_comm.h"
+#include "k_vb_comm.h"
+#include "mpi_adec_api.h"
+#include "mpi_aenc_api.h"
 #include "mpi_ai_api.h"
 #include "mpi_ao_api.h"
-#include "mpi_aenc_api.h"
-#include "mpi_adec_api.h"
-#include "audio_save_file.h"
-#include "pcm_data.h"
+#include "mpi_sys_api.h"
+#include "mpi_vb_api.h"
 
-// pdm pin cfg
-#define AUDIO_PERSEC_DIV_NUM 25
+#define AUDIO_FRAMES_PER_SECOND 25
+#define AUDIO_QUEUE_FRAMES 25
+#define AUDIO_FRAME_TIMEOUT_MS 100
+#define AUDIO_RECORD_SECONDS 15
+#define AUDIO_BUFFER_COUNT 4
+#define AUDIO_MAX_SAMPLE_RATE 192000
+#define AUDIO_OUTPUT_PIPELINE_FRAMES 2
+#define AUDIO_DRAIN_POLL_US 10000
+#define AUDIO_FILE_RING_BLOCKS 32
+#define SAMPLE_OPERATION_STOPPED 1
 
-// 保存pcm相关宏控制参数
-#define ENABLE_SAVE_PCM 1
-#define SAVE_PCM_SECOND 15
-
-static volatile k_bool g_ao_test_start = K_FALSE;
-static volatile k_bool g_ai_to_ao_test_start = K_FALSE;
-static volatile k_bool g_ai_bind_ao_test_start = K_FALSE;
-static volatile k_bool g_aenc_test_start = K_FALSE;
-static volatile k_bool g_adec_test_start = K_FALSE;
-static volatile k_bool g_audio_overall_start = K_FALSE;
-static volatile k_bool g_enable_audio_codec = K_FALSE;
-
-static volatile uint32_t g_audioout_timestamp_end = 0;
-static volatile uint32_t g_audioout_timestamp_last = 0;
-static k_u32 g_audio_data_pool_id = VB_INVALID_HANDLE;
-
-static k_u32 audio_data_vb_create_pool()
+typedef struct
 {
-    k_u32 private_pool_id;
-    k_vb_pool_config pool_config;
-    memset(&pool_config, 0, sizeof(pool_config));
-    pool_config.blk_cnt = 4;
-    pool_config.blk_size = 48000*4*2;
-    pool_config.mode = VB_REMAP_MODE_NOCACHE;
-    private_pool_id = kd_mpi_vb_create_pool(&pool_config);
-    printf("%s poolid %d\n", __func__,private_pool_id);
+    k_vb_blk_handle handle;
+    k_u64 phys_addr;
+    void *virt_addr;
+    k_u32 size;
+} sample_audio_buffer;
 
-    return private_pool_id;
+typedef struct
+{
+    FILE *file;
+    long size;
+    long index;
+} sample_file_reader;
+
+typedef struct
+{
+    k_aenc_chn aenc_chn;
+    k_adec_chn adec_chn;
+    audio_io_writer *file_writer;
+    audio_io_reader *file_reader;
+    sample_audio_buffer *play_buffer;
+    k_u32 frame_size;
+    k_bool failed;
+} overall_thread_context;
+
+static k_bool g_exit_requested;
+static k_bool g_enable_audio_codec = K_FALSE;
+static k_bool g_vb_initialized = K_FALSE;
+static k_u32 g_audio_pool_id = VB_INVALID_POOLID;
+
+static void merge_result(k_s32 *result, k_s32 operation_result,
+                         const char *operation)
+{
+    if (operation_result != K_SUCCESS)
+    {
+        printf("%s failed\n", operation);
+        *result = K_FAILED;
+    }
 }
 
-static int _enable_audio3a(int ai_dev_num, int ai_channel,k_audio_bit_width bit_width,int enable_audio3a)
+static k_bool overall_failed(const overall_thread_context *context)
 {
-    if (bit_width != KD_AUDIO_BIT_WIDTH_16)
+    return __atomic_load_n(&context->failed, __ATOMIC_ACQUIRE);
+}
+
+static void set_overall_failed(overall_thread_context *context)
+{
+    __atomic_store_n(&context->failed, K_TRUE, __ATOMIC_RELEASE);
+}
+
+static k_bool exit_requested(void)
+{
+    return __atomic_load_n(&g_exit_requested, __ATOMIC_ACQUIRE);
+}
+
+static k_bool file_io_stop_requested(void *context)
+{
+    (void)context;
+    return exit_requested();
+}
+
+static k_bool overall_io_stop_requested(void *context)
+{
+    overall_thread_context *overall = context;
+
+    return exit_requested() || overall_failed(overall);
+}
+
+static k_s32 write_wav_data(void *context, const void *data, k_u32 size)
+{
+    return audio_wav_writer_write(context, data, size);
+}
+
+static k_s32 read_wav_data(void *context, void *data, k_u32 capacity,
+                           k_u32 *bytes_read)
+{
+    return audio_wav_reader_read(context, data, capacity, bytes_read);
+}
+
+static int sample_bytes(k_audio_bit_width bit_width)
+{
+    switch (bit_width)
     {
-        printf("audio3a only support 16bit\n");
+    case KD_AUDIO_BIT_WIDTH_16:
+        return 2;
+    case KD_AUDIO_BIT_WIDTH_24:
+        return 3;
+    case KD_AUDIO_BIT_WIDTH_32:
+        return 4;
+    default:
         return 0;
     }
+}
 
-    k_ai_vqe_enable vqe_enable;
-    memset(&vqe_enable, 0, sizeof(k_ai_vqe_enable));
-    if (enable_audio3a&0x1)
+static k_bool sample_rate_is_supported(k_u32 sample_rate)
+{
+    static const k_u32 rates[] = {
+        8000, 12000, 16000, 24000, 32000,
+        44100, 48000, 96000, 192000};
+
+    for (size_t index = 0; index < sizeof(rates) / sizeof(rates[0]); ++index)
     {
-        vqe_enable.ans_enable = K_TRUE;
-        printf("ans_enable\n");
+        if (sample_rate == rates[index])
+        {
+            return K_TRUE;
+        }
     }
-    if (enable_audio3a&0x2)
+    return K_FALSE;
+}
+
+static k_audio_bit_width bit_width_from_bits(int bits_per_sample)
+{
+    switch (bits_per_sample)
     {
-        vqe_enable.agc_enable = K_TRUE;
-        printf("agc_enable\n");
+    case 16:
+        return KD_AUDIO_BIT_WIDTH_16;
+    case 24:
+        return KD_AUDIO_BIT_WIDTH_24;
+    case 32:
+        return KD_AUDIO_BIT_WIDTH_32;
+    default:
+        return (k_audio_bit_width)-1;
     }
-    if (enable_audio3a&0x4)
+}
+
+static void wait_for_ao_drain(k_u32 frames_sent)
+{
+    k_u32 queued_frames = frames_sent < AUDIO_QUEUE_FRAMES
+                              ? frames_sent
+                              : AUDIO_QUEUE_FRAMES;
+    k_u32 remaining_us =
+        (queued_frames + AUDIO_OUTPUT_PIPELINE_FRAMES) *
+        1000000U / AUDIO_FRAMES_PER_SECOND;
+
+    while (remaining_us > 0 && !exit_requested())
     {
-        vqe_enable.aec_enable = K_TRUE;
-        printf("aec_enable\n");
+        k_u32 delay_us = remaining_us < AUDIO_DRAIN_POLL_US
+                             ? remaining_us
+                             : AUDIO_DRAIN_POLL_US;
+
+        usleep(delay_us);
+        remaining_us -= delay_us;
+    }
+}
+
+static void init_i2s_attr(k_aio_dev_attr *attr, k_bool input, k_u32 sample_rate,
+                          k_audio_bit_width bit_width, k_u32 channel_count,
+                          k_i2s_in_mono_channel mono_channel,
+                          k_i2s_work_mode i2s_mode)
+{
+    memset(attr, 0, sizeof(*attr));
+    attr->audio_type = input ? KD_AUDIO_INPUT_TYPE_I2S : KD_AUDIO_OUTPUT_TYPE_I2S;
+    attr->kd_audio_attr.i2s_attr.sample_rate = sample_rate;
+    attr->kd_audio_attr.i2s_attr.bit_width = bit_width;
+    attr->kd_audio_attr.i2s_attr.chn_cnt = 2;
+    attr->kd_audio_attr.i2s_attr.snd_mode = channel_count == 1
+                                               ? KD_AUDIO_SOUND_MODE_MONO
+                                               : KD_AUDIO_SOUND_MODE_STEREO;
+    attr->kd_audio_attr.i2s_attr.mono_channel = mono_channel;
+    attr->kd_audio_attr.i2s_attr.i2s_mode = i2s_mode;
+    attr->kd_audio_attr.i2s_attr.frame_num = AUDIO_QUEUE_FRAMES;
+    attr->kd_audio_attr.i2s_attr.point_num_per_frame =
+        sample_rate / AUDIO_FRAMES_PER_SECOND;
+    attr->kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec
+                                               ? K_AIO_I2STYPE_INNERCODEC
+                                               : K_AIO_I2STYPE_EXTERN;
+}
+
+static void init_pdm_attr(k_aio_dev_attr *attr, k_u32 sample_rate,
+                         k_audio_bit_width bit_width, k_u32 channel_count)
+{
+    memset(attr, 0, sizeof(*attr));
+    attr->audio_type = KD_AUDIO_INPUT_TYPE_PDM;
+    attr->kd_audio_attr.pdm_attr.sample_rate = sample_rate;
+    attr->kd_audio_attr.pdm_attr.bit_width = bit_width;
+    attr->kd_audio_attr.pdm_attr.chn_cnt = 4;
+    attr->kd_audio_attr.pdm_attr.snd_mode = channel_count == 1
+                                              ? KD_AUDIO_SOUND_MODE_MONO
+                                              : KD_AUDIO_SOUND_MODE_STEREO;
+    attr->kd_audio_attr.pdm_attr.frame_num = AUDIO_QUEUE_FRAMES;
+    attr->kd_audio_attr.pdm_attr.pdm_oversample = KD_AUDIO_PDM_INPUT_OVERSAMPLE_64;
+    attr->kd_audio_attr.pdm_attr.point_num_per_frame =
+        sample_rate / AUDIO_FRAMES_PER_SECOND;
+}
+
+static void init_codec_input_attr(k_aio_dev_attr *attr, k_audio_dev ai_dev,
+                                  k_u32 sample_rate,
+                                  k_audio_bit_width bit_width)
+{
+    if (ai_dev == 0)
+    {
+        init_i2s_attr(attr, K_TRUE, sample_rate, bit_width, 1,
+                      KD_I2S_IN_MONO_RIGHT_CHANNEL, K_STANDARD_MODE);
+    }
+    else
+    {
+        init_pdm_attr(attr, sample_rate, bit_width, 1);
+    }
+}
+
+static k_s32 enable_audio3a(k_audio_dev dev, k_ai_chn chn,
+                           k_audio_bit_width bit_width, k_u32 mask)
+{
+    k_ai_vqe_enable vqe;
+
+    if (mask == 0)
+    {
+        return K_SUCCESS;
+    }
+    if (bit_width != KD_AUDIO_BIT_WIDTH_16)
+    {
+        printf("audio3a only supports 16-bit audio\n");
+        return K_FAILED;
     }
 
-    if (K_SUCCESS != kd_mpi_ai_set_vqe_attr(ai_dev_num, ai_channel, vqe_enable))
+    memset(&vqe, 0, sizeof(vqe));
+    vqe.ans_enable = (mask & 0x1) != 0;
+    vqe.agc_enable = (mask & 0x2) != 0;
+    vqe.aec_enable = (mask & 0x4) != 0;
+    if (kd_mpi_ai_set_vqe_attr(dev, chn, vqe) != K_SUCCESS)
     {
         printf("kd_mpi_ai_set_vqe_attr failed\n");
         return K_FAILED;
     }
 
-    memset(&vqe_enable, 0, sizeof(k_ai_vqe_enable));
-    kd_mpi_ai_get_vqe_attr(0,0,&vqe_enable);
-    printf("========ans_enable:%d,agc_enable:%d,aec_enable:%d\n",vqe_enable.ans_enable,vqe_enable.agc_enable,vqe_enable.aec_enable);
-
-    return 0;
+    return K_SUCCESS;
 }
 
-static int _get_sample_Byte(k_audio_bit_width bit_width)
+static k_s32 start_ai(k_audio_dev dev, k_ai_chn chn,
+                      const k_aio_dev_attr *attr, k_u32 audio3a)
 {
-    if (bit_width == KD_AUDIO_BIT_WIDTH_16)
+    if (kd_mpi_ai_set_pub_attr(dev, attr) != K_SUCCESS)
     {
-        return 2;
+        printf("kd_mpi_ai_set_pub_attr failed\n");
+        return K_FAILED;
     }
-    else if (bit_width == KD_AUDIO_BIT_WIDTH_24)
+    if (kd_mpi_ai_enable(dev) != K_SUCCESS)
     {
-        return 3;
+        printf("kd_mpi_ai_enable failed\n");
+        return K_FAILED;
     }
-    else if (bit_width == KD_AUDIO_BIT_WIDTH_32)
+    if (enable_audio3a(dev, chn, attr->audio_type == KD_AUDIO_INPUT_TYPE_I2S
+                                    ? attr->kd_audio_attr.i2s_attr.bit_width
+                                    : attr->kd_audio_attr.pdm_attr.bit_width,
+                      audio3a) != K_SUCCESS ||
+        kd_mpi_ai_enable_chn(dev, chn) != K_SUCCESS)
     {
-        return 4;
-    }
-    return 0;
-}
-static k_audio_bit_width _get_sample_bitwidth(k_u32 bitpersample)
-{
-    if (16 == bitpersample)
-    {
-        return KD_AUDIO_BIT_WIDTH_16;
-    }
-    else if (24 == bitpersample)
-    {
-        return KD_AUDIO_BIT_WIDTH_24;
-    }
-    else if (32 == bitpersample)
-    {
-        return KD_AUDIO_BIT_WIDTH_32;
+        printf("kd_mpi_ai_enable_chn failed\n");
+        kd_mpi_ai_disable(dev);
+        return K_FAILED;
     }
 
-    return KD_AUDIO_BIT_WIDTH_32;
-}
-static void _test_timestamp(int sample_rate, int channel_count, k_audio_bit_width bit_width, k_u64 timestamp, k_u32 len)
-{
-    static k_s32 recv_size = 0;
-    static k_s32 total_sec = 0;
-    static k_u64 start_time = 0;
-    static k_bool bstart = K_TRUE;
-
-    recv_size += len;
-    if (recv_size >= sample_rate * _get_sample_Byte(bit_width) * channel_count)
-    {
-        if (bstart)
-        {
-            start_time = timestamp;
-            bstart = K_FALSE;
-        }
-
-        recv_size = 0;
-        printf("[%ds] timestamp %ld us,curpts:%ld\n", total_sec++, timestamp - start_time, timestamp);
-    }
+    return K_SUCCESS;
 }
 
-static void _test_aenc_timestamp(int sample_rate, int channel_count, k_audio_bit_width bit_width, k_u64 timestamp, k_u32 len)
+static k_s32 stop_ai(k_audio_dev dev, k_ai_chn chn)
 {
-    static k_s32 recv_size = 0;
-    static k_s32 total_sec = 0;
-    static k_u64 start_time = 0;
-    static k_bool bstart = K_TRUE;
+    k_s32 ret = K_SUCCESS;
 
-    recv_size += len;
-    if (recv_size >= sample_rate * _get_sample_Byte(bit_width) * channel_count / 2) // g711压缩率2倍
+    if (kd_mpi_ai_disable_chn(dev, chn) != K_SUCCESS)
     {
-        if (bstart)
-        {
-            start_time = timestamp;
-            bstart = K_FALSE;
-        }
-
-        recv_size = 0;
-        printf("[%ds] g711 stream timestamp %ld us,curpts:%ld\n", total_sec++, timestamp - start_time, timestamp);
+        printf("kd_mpi_ai_disable_chn failed\n");
+        ret = K_FAILED;
     }
-}
-
-static k_s32 _sample_vb_exit(void)
-{
-    k_s32 ret;
-    ret = kd_mpi_vb_exit();
-    if (ret)
-        printf("vb_exit failed ret:%d\n", ret);
+    if (kd_mpi_ai_disable(dev) != K_SUCCESS)
+    {
+        printf("kd_mpi_ai_disable failed\n");
+        ret = K_FAILED;
+    }
     return ret;
 }
 
-static void _test_ai_i2s_in_data(const char *filename, int dev_num, int channel, k_audio_bit_width bit_width, int sample_rate,int channel_count, int nTotal_Sec)
+static k_s32 start_ao(k_audio_dev dev, k_ao_chn chn,
+                      const k_aio_dev_attr *attr)
 {
-    k_audio_frame audio_frame;
-    int nSize = 0;
-    int nSec = 0;
-
-#if ENABLE_SAVE_PCM
-    audio_save_init(filename, sample_rate, channel_count, bit_width, SAVE_PCM_SECOND,g_audio_data_pool_id);
-#endif
-
-    while (1)
+    if (kd_mpi_ao_set_pub_attr(dev, attr) != K_SUCCESS)
     {
-        if (K_SUCCESS != kd_mpi_ai_get_frame(dev_num, channel, &audio_frame, 1000))
-        {
-            printf("=========kd_mpi_ai_get_frame timeout\n");
-            continue;
-        }
-
-        nSize += audio_frame.len;
-
-        if (bit_width == KD_AUDIO_BIT_WIDTH_16)
-        {
-#if ENABLE_SAVE_PCM
-            {
-                k_u8 *raw_data = (k_u8 *)kd_mpi_sys_mmap(audio_frame.phys_addr, audio_frame.len);
-
-                // printf("raw_data:%p , audio_frame.len:%d\n", raw_data, audio_frame.len);
-                if (0 != audio_save_pcm_memory(raw_data, audio_frame.len))
-                {
-                    kd_mpi_ai_release_frame(dev_num, channel, &audio_frame);
-                    break;
-                }
-            }
-#endif
-            _test_timestamp(sample_rate, channel_count, bit_width, audio_frame.time_stamp, audio_frame.len);
-        }
-        else if (bit_width == KD_AUDIO_BIT_WIDTH_24)
-        {
-#if ENABLE_SAVE_PCM
-            {
-                k_u8 *raw_data = (k_u8 *)kd_mpi_sys_mmap(audio_frame.phys_addr, audio_frame.len);
-                // printf("raw_data:%p , audio_frame.len:%d\n", raw_data, audio_frame.len);
-                if (0 != audio_save_pcm_memory(raw_data, audio_frame.len))
-                {
-                    kd_mpi_ai_release_frame(dev_num, channel, &audio_frame);
-                    break;
-                }
-            }
-#endif
-            _test_timestamp(sample_rate, channel_count, bit_width, audio_frame.time_stamp, audio_frame.len);
-        }
-        else if (bit_width == KD_AUDIO_BIT_WIDTH_32)
-        {
-#if ENABLE_SAVE_PCM
-            {
-                k_u8 *raw_data = (k_u8 *)kd_mpi_sys_mmap(audio_frame.phys_addr, audio_frame.len);
-                // printf("raw_data:%p , audio_frame.len:%d\n", raw_data, audio_frame.len);
-                if (0 != audio_save_pcm_memory(raw_data, audio_frame.len))
-                {
-                    kd_mpi_ai_release_frame(dev_num, channel, &audio_frame);
-                    break;
-                }
-            }
-#endif
-
-            _test_timestamp(sample_rate, channel_count, bit_width, audio_frame.time_stamp, audio_frame.len);
-        }
-
-        kd_mpi_ai_release_frame(dev_num, channel, &audio_frame);
-
-        if (nTotal_Sec > 0 && nSec >= nTotal_Sec)
-        {
-            printf("==========_test_ai_i2s_in_data return \n");
-            return;
-        }
-    }
-}
-
-static void _test_ai_pdm_in_data(const char *filename, int dev_num, int channel, k_audio_bit_width bit_width, k_u32 sample_rate, int channel_count, int nTotal_Sec)
-{
-    k_audio_frame audio_frame;
-    int nSize = 0;
-    int nSec = 0;
-
-#if ENABLE_SAVE_PCM
-    audio_save_init(filename, sample_rate, channel_count, bit_width, SAVE_PCM_SECOND,g_audio_data_pool_id);
-#endif
-
-    while (1)
-    {
-        if (K_SUCCESS != kd_mpi_ai_get_frame(dev_num, channel, &audio_frame, 1000))
-        {
-            printf("=========kd_mpi_ai_get_frame timeout\n");
-            continue;
-        }
-
-        nSize += audio_frame.len;
-
-#if ENABLE_SAVE_PCM
-        {
-            k_u8 *raw_data = (k_u8 *)kd_mpi_sys_mmap(audio_frame.phys_addr, audio_frame.len);
-            if (0 != audio_save_pcm_memory(raw_data, audio_frame.len))
-            {
-                kd_mpi_ai_release_frame(dev_num, channel, &audio_frame);
-                break;
-            }
-        }
-#endif
-        _test_timestamp(sample_rate, channel_count, bit_width, audio_frame.time_stamp, audio_frame.len);
-
-        kd_mpi_ai_release_frame(dev_num, channel, &audio_frame);
-
-        if (nTotal_Sec > 0 && nSec >= nTotal_Sec)
-        {
-            printf("==========_test_ai_pdm_in_data return \n");
-            return;
-        }
-    }
-}
-
-static void _test_ai_to_ao(int ai_dev_num, int ai_channel, int ao_dev_num, int ao_channel, int sample_rate, k_audio_bit_width bit_width)
-{
-    k_audio_frame audio_frame;
-    k_s32 ret = 0;
-    while (g_ai_to_ao_test_start)
-    {
-        ret = kd_mpi_ai_get_frame(ai_dev_num, ai_channel, &audio_frame, 1000);
-        if (K_SUCCESS != ret)
-        {
-            printf("=========kd_mpi_ai_get_frame timeout\n");
-            continue;
-        }
-
-        _test_timestamp(sample_rate, 2, bit_width, audio_frame.time_stamp, audio_frame.len);
-
-        ret = kd_mpi_ao_send_frame(ao_dev_num, ao_channel, &audio_frame, 0); // 尽快返回，防止阻塞kd_mpi_ai_get_frame
-        if (K_SUCCESS != ret)
-        {
-            printf("=======kd_mpi_ao_send_frame failed\n");
-        }
-
-        kd_mpi_ai_release_frame(ai_dev_num, ai_channel, &audio_frame);
-    }
-}
-
-static void _ai_bind_ao(int ai_dev_num, int ai_channel, int ao_dev_num, int ao_channel)
-{
-    k_mpp_chn ai_mpp_chn;
-    k_mpp_chn ao_mpp_chn;
-
-    ai_mpp_chn.mod_id = K_ID_AI;
-    ai_mpp_chn.dev_id = ai_dev_num;
-    ai_mpp_chn.chn_id = ai_channel;
-    ao_mpp_chn.mod_id = K_ID_AO;
-    ao_mpp_chn.dev_id = ao_dev_num;
-    ao_mpp_chn.chn_id = ao_channel;
-
-    kd_mpi_sys_bind(&ai_mpp_chn, &ao_mpp_chn);
-    while (g_ai_bind_ao_test_start)
-    {
-        sleep(1);
-    }
-
-    kd_mpi_sys_unbind(&ai_mpp_chn, &ao_mpp_chn);
-}
-static k_vb_blk_handle g_audio_handle;
-static k_s32 _get_audio_frame(k_audio_frame *audio_frame, int nSize)
-{
-    g_audio_handle = kd_mpi_vb_get_block(g_audio_data_pool_id, nSize, NULL);
-    if (g_audio_handle == VB_INVALID_HANDLE)
-    {
-        printf("%s get vb block error\n", __func__);
+        printf("kd_mpi_ao_set_pub_attr failed\n");
         return K_FAILED;
     }
-    audio_frame->len = nSize;
-    audio_frame->pool_id = kd_mpi_vb_handle_to_pool_id(g_audio_handle);
-    audio_frame->phys_addr = kd_mpi_vb_handle_to_phyaddr(g_audio_handle);
-    audio_frame->virt_addr = kd_mpi_sys_mmap(audio_frame->phys_addr, nSize);
-    printf("=======_get_audio_frame virt_addr:%p\n", audio_frame->virt_addr);
-
-    return K_SUCCESS;
-}
-
-static k_s32 _release_audio_frame()
-{
-    kd_mpi_vb_release_block(g_audio_handle);
-    return K_SUCCESS;
-}
-
-#if 0
-static void  test_get_ai_data()
-{
-
+    if (kd_mpi_ao_enable(dev) != K_SUCCESS)
     {
-        k_u32 pool_id = -1;
-
-        k_vb_blk_handle handle;
-        handle = kd_mpi_vb_get_block(pool_id, 44100 * 2 * 4 / 25, NULL);
-        printf("vb_get_block id:%d size:0x800 handle:%08x\n",
-               pool_id, handle);
-
+        printf("kd_mpi_ao_enable failed\n");
+        return K_FAILED;
+    }
+    if (kd_mpi_ao_enable_chn(dev, chn) != K_SUCCESS)
+    {
+        printf("kd_mpi_ao_enable_chn failed\n");
+        kd_mpi_ao_disable(dev);
+        return K_FAILED;
     }
 
+    return K_SUCCESS;
+}
 
+static k_s32 stop_ao(k_audio_dev dev, k_ao_chn chn)
+{
+    k_s32 ret = K_SUCCESS;
 
-    printf("========%s  111\n", __FUNCTION__);
-    int nRet;
-    k_s32 AiFd;
-
-    fd_set read_fds;
-    struct timeval TimeoutVal;
-
-    FD_ZERO(&read_fds);
-    AiFd = kd_mpi_ai_get_fd(100, 200);
-    printf("=========kd_mpi_ai_get_fd get fd:%dsh \n", AiFd);
-    FD_SET(AiFd, &read_fds);
-
-    k_audio_frame audio_frame;
-    //int nCount = 0;
-    while (1)
+    if (kd_mpi_ao_disable_chn(dev, chn) != K_SUCCESS)
     {
-        TimeoutVal.tv_sec = 1;
-        TimeoutVal.tv_usec = 0;
+        printf("kd_mpi_ao_disable_chn failed\n");
+        ret = K_FAILED;
+    }
+    if (kd_mpi_ao_disable(dev) != K_SUCCESS)
+    {
+        printf("kd_mpi_ao_disable failed\n");
+        ret = K_FAILED;
+    }
+    return ret;
+}
 
-        FD_ZERO(&read_fds);
-        FD_SET(AiFd, &read_fds);
+static k_mpp_chn make_mpp_channel(k_mod_id module, k_s32 dev, k_s32 chn)
+{
+    k_mpp_chn channel;
 
-        nRet = select(AiFd + 1, &read_fds, NULL, NULL, &TimeoutVal);
-        if (nRet < 0)
+    channel.mod_id = module;
+    channel.dev_id = dev;
+    channel.chn_id = chn;
+    return channel;
+}
+
+static k_s32 allocate_audio_buffer(sample_audio_buffer *buffer, k_u32 size)
+{
+    memset(buffer, 0, sizeof(*buffer));
+    buffer->handle = VB_INVALID_HANDLE;
+    buffer->size = size;
+    buffer->handle = kd_mpi_vb_get_block(g_audio_pool_id, size, NULL);
+    if (buffer->handle == VB_INVALID_HANDLE)
+    {
+        printf("get audio VB block (%u bytes) failed\n", size);
+        return K_FAILED;
+    }
+
+    buffer->phys_addr = kd_mpi_vb_handle_to_phyaddr(buffer->handle);
+    buffer->virt_addr = kd_mpi_sys_mmap(buffer->phys_addr, size);
+    if (buffer->virt_addr == NULL)
+    {
+        kd_mpi_vb_release_block(buffer->handle);
+        buffer->handle = VB_INVALID_HANDLE;
+        return K_FAILED;
+    }
+
+    return K_SUCCESS;
+}
+
+static k_s32 release_audio_buffer(sample_audio_buffer *buffer)
+{
+    k_s32 ret = K_SUCCESS;
+
+    if (buffer->virt_addr != NULL)
+    {
+        if (kd_mpi_sys_munmap(buffer->virt_addr, buffer->size) != K_SUCCESS)
+        {
+            printf("audio buffer munmap failed\n");
+            ret = K_FAILED;
+        }
+    }
+    if (buffer->handle != VB_INVALID_HANDLE)
+    {
+        if (kd_mpi_vb_release_block(buffer->handle) != K_SUCCESS)
+        {
+            printf("audio VB block release failed\n");
+            ret = K_FAILED;
+        }
+    }
+    memset(buffer, 0, sizeof(*buffer));
+    buffer->handle = VB_INVALID_HANDLE;
+    return ret;
+}
+
+static void init_audio_frame(k_audio_frame *frame,
+                             const sample_audio_buffer *buffer)
+{
+    memset(frame, 0, sizeof(*frame));
+    frame->len = buffer->size;
+    frame->pool_id = kd_mpi_vb_handle_to_pool_id(buffer->handle);
+    frame->phys_addr = buffer->phys_addr;
+    frame->virt_addr = buffer->virt_addr;
+}
+
+static void init_audio_stream(k_audio_stream *stream,
+                              const sample_audio_buffer *buffer)
+{
+    memset(stream, 0, sizeof(*stream));
+    stream->len = buffer->size;
+    stream->phys_addr = buffer->phys_addr;
+    stream->stream = buffer->virt_addr;
+}
+
+static k_s32 open_looping_file(sample_file_reader *reader, const char *filename)
+{
+    if (reader == NULL || filename == NULL)
+    {
+        return K_FAILED;
+    }
+    memset(reader, 0, sizeof(*reader));
+    reader->file = fopen(filename, "rb");
+    if (reader->file == NULL || fseek(reader->file, 0, SEEK_END) != 0)
+    {
+        printf("open input file %s failed\n", filename);
+        if (reader->file != NULL)
+        {
+            fclose(reader->file);
+            reader->file = NULL;
+        }
+        return K_FAILED;
+    }
+
+    reader->size = ftell(reader->file);
+    if (reader->size <= 0 || fseek(reader->file, 0, SEEK_SET) != 0)
+    {
+        printf("input file %s is empty or unreadable\n", filename);
+        fclose(reader->file);
+        reader->file = NULL;
+        return K_FAILED;
+    }
+
+    return K_SUCCESS;
+}
+
+static k_s32 close_looping_file(sample_file_reader *reader)
+{
+    k_s32 ret = K_SUCCESS;
+
+    if (reader->file != NULL)
+    {
+        if (fclose(reader->file) != 0)
+        {
+            ret = K_FAILED;
+        }
+    }
+    memset(reader, 0, sizeof(*reader));
+    return ret;
+}
+
+static k_s32 read_looping_file(sample_file_reader *reader, void *data, k_u32 size)
+{
+    k_u8 *output = data;
+    size_t left = size;
+
+    if (reader->file == NULL || data == NULL || size == 0)
+    {
+        return K_FAILED;
+    }
+
+    while (left > 0)
+    {
+        size_t available = reader->size - reader->index;
+        size_t chunk_size = left < available ? left : available;
+
+        if (fread(output, 1, chunk_size, reader->file) != chunk_size)
+        {
+            return K_FAILED;
+        }
+
+        output += chunk_size;
+        left -= chunk_size;
+        reader->index += chunk_size;
+        if (reader->index == reader->size)
+        {
+            if (fseek(reader->file, 0, SEEK_SET) != 0)
+            {
+                return K_FAILED;
+            }
+            reader->index = 0;
+        }
+    }
+
+    return K_SUCCESS;
+}
+
+static k_s32 read_looping_data(void *context, void *data, k_u32 capacity,
+                               k_u32 *bytes_read)
+{
+    if (read_looping_file(context, data, capacity) != K_SUCCESS)
+    {
+        return K_FAILED;
+    }
+    *bytes_read = capacity;
+    return K_SUCCESS;
+}
+
+static k_s32 write_file_data(void *context, const void *data, k_u32 size)
+{
+    FILE *file = context;
+
+    return fwrite(data, 1, size, file) == size ? K_SUCCESS : K_FAILED;
+}
+
+static k_s32 queue_audio_stream(audio_io_writer *writer,
+                                const k_audio_stream *stream)
+{
+    k_u8 *data = kd_mpi_sys_mmap(stream->phys_addr, stream->len);
+    k_s32 ret;
+
+    if (data == NULL)
+    {
+        return K_FAILED;
+    }
+    ret = audio_io_writer_push(writer, data, stream->len);
+    if (kd_mpi_sys_munmap(data, stream->len) != K_SUCCESS)
+    {
+        ret = K_FAILED;
+    }
+    return ret;
+}
+
+static k_s32 send_adec_stream(k_adec_chn chn, k_audio_stream *stream,
+                              k_bool block, const k_bool *local_stop)
+{
+    int retries = 0;
+
+    while (!exit_requested() &&
+           (local_stop == NULL ||
+            !__atomic_load_n(local_stop, __ATOMIC_ACQUIRE)))
+    {
+        if (kd_mpi_adec_send_stream(chn, stream, block) == K_SUCCESS)
+        {
+            return K_SUCCESS;
+        }
+        if (++retries >= 100)
+        {
+            return K_FAILED;
+        }
+        usleep(10000);
+    }
+
+    return SAMPLE_OPERATION_STOPPED;
+}
+
+static void init_aenc_attr(k_aenc_chn_attr *attr, k_payload_type type,
+                           k_u32 sample_rate, k_u32 channels)
+{
+    memset(attr, 0, sizeof(*attr));
+    attr->type = type;
+    attr->buf_size = AUDIO_FRAMES_PER_SECOND;
+    attr->point_num_per_frame = sample_rate / AUDIO_FRAMES_PER_SECOND;
+    attr->sample_rate = sample_rate;
+    attr->channels = channels;
+    if (type == K_PT_OPUS)
+    {
+        attr->bitrate = 16000;
+    }
+}
+
+static void init_adec_attr(k_adec_chn_attr *attr, k_payload_type type,
+                           k_u32 sample_rate, k_u32 channels)
+{
+    memset(attr, 0, sizeof(*attr));
+    attr->type = type;
+    attr->buf_size = AUDIO_FRAMES_PER_SECOND;
+    attr->point_num_per_frame = sample_rate / AUDIO_FRAMES_PER_SECOND;
+    attr->sample_rate = sample_rate;
+    attr->channels = channels;
+}
+
+static k_s32 record_ai_frames(const char *filename, k_audio_dev dev, k_ai_chn chn,
+                              const k_aio_dev_attr *attr,
+                              k_audio_bit_width bit_width, k_u32 sample_rate,
+                              k_u32 channel_count, k_u32 audio3a)
+{
+    audio_wav_format format;
+    audio_wav_writer *writer = NULL;
+    audio_io_writer *file_writer = NULL;
+    k_u32 target_data_size;
+    k_u32 byte_rate;
+    k_u32 expected_frame_size;
+    k_u32 captured_size = 0;
+    k_u32 expected_sequence = 0;
+    k_u64 target_size;
+    k_u64 written_size = 0;
+    int bytes_per_sample;
+    k_s32 ret = K_FAILED;
+    k_bool ai_started = K_FALSE;
+    k_bool sequence_started = K_FALSE;
+
+    bytes_per_sample = sample_bytes(bit_width);
+    if (bytes_per_sample == 0)
+    {
+        goto cleanup;
+    }
+    format.channel_count = channel_count;
+    format.sample_rate = sample_rate;
+    format.bits_per_sample = bytes_per_sample * 8;
+    if (audio_wav_format_byte_rate(&format, &byte_rate) != K_SUCCESS ||
+        audio_wav_format_frame_size(&format, AUDIO_FRAMES_PER_SECOND,
+                                    &expected_frame_size) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    target_size = (k_u64)byte_rate * AUDIO_RECORD_SECONDS;
+    if (target_size > AUDIO_WAV_MAX_DATA_SIZE)
+    {
+        goto cleanup;
+    }
+    target_data_size = (k_u32)target_size;
+    if (audio_wav_writer_open(&writer, filename, &format) != K_SUCCESS)
+    {
+        printf("open output WAV %s failed\n", filename);
+        goto cleanup;
+    }
+    printf("recording to %s\n", audio_wav_writer_path(writer));
+    if (audio_io_writer_create(&file_writer, expected_frame_size,
+                               AUDIO_FILE_RING_BLOCKS, write_wav_data, writer,
+                               file_io_stop_requested, NULL) != K_SUCCESS)
+    {
+        printf("start WAV writer failed\n");
+        goto cleanup;
+    }
+    if (start_ai(dev, chn, attr, audio3a) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ai_started = K_TRUE;
+    ret = K_SUCCESS;
+
+    while (!exit_requested())
+    {
+        k_audio_frame frame;
+        k_u8 *data;
+        k_u32 remaining;
+        k_u32 write_size;
+
+        if (kd_mpi_ai_get_frame(dev, chn, &frame, AUDIO_FRAME_TIMEOUT_MS) != K_SUCCESS)
+        {
+            continue;
+        }
+        if (frame.len != expected_frame_size)
+        {
+            printf("unexpected AI frame size: %u (expected %u)\n",
+                   frame.len, expected_frame_size);
+            merge_result(&ret, kd_mpi_ai_release_frame(dev, chn, &frame),
+                         "kd_mpi_ai_release_frame");
+            ret = K_FAILED;
+            break;
+        }
+        if (sequence_started && frame.seq != expected_sequence)
+        {
+            printf("AI frame discontinuity: got %u (expected %u)\n",
+                   frame.seq, expected_sequence);
+            merge_result(&ret, kd_mpi_ai_release_frame(dev, chn, &frame),
+                         "kd_mpi_ai_release_frame");
+            ret = K_FAILED;
+            break;
+        }
+        sequence_started = K_TRUE;
+        expected_sequence = frame.seq + 1U;
+        data = kd_mpi_sys_mmap(frame.phys_addr, frame.len);
+        if (data == NULL)
+        {
+            merge_result(&ret, kd_mpi_ai_release_frame(dev, chn, &frame),
+                         "kd_mpi_ai_release_frame");
+            ret = K_FAILED;
+            break;
+        }
+
+        remaining = target_data_size - captured_size;
+        write_size = frame.len < remaining ? frame.len : remaining;
+        k_s32 push_result = audio_io_writer_push(file_writer, data, write_size);
+        if (push_result == K_SUCCESS)
+        {
+            captured_size += write_size;
+        }
+        else if (push_result != AUDIO_IO_STOPPED)
+        {
+            ret = K_FAILED;
+        }
+        merge_result(&ret, kd_mpi_sys_munmap(data, frame.len),
+                     "kd_mpi_sys_munmap");
+        merge_result(&ret, kd_mpi_ai_release_frame(dev, chn, &frame),
+                     "kd_mpi_ai_release_frame");
+        if (captured_size == target_data_size ||
+            push_result == AUDIO_IO_STOPPED)
         {
             break;
         }
-        else if (0 == nRet)
+        if (ret != K_SUCCESS)
         {
-            printf("%s: get ai frame select time out\n", __FUNCTION__);
-            continue;
+            break;
         }
+    }
 
-        if (FD_ISSET(AiFd, &read_fds))
+cleanup:
+    if (ai_started)
+    {
+        merge_result(&ret, stop_ai(dev, chn), "stop AI");
+    }
+    if (file_writer != NULL)
+    {
+        merge_result(&ret,
+                     audio_io_writer_finish(&file_writer, &written_size),
+                     "finish WAV writer");
+        if (written_size != captured_size)
         {
-            nRet = kd_mpi_ai_get_frame(100, 200, &audio_frame, 0);
-
-
-            //printf("[%d]=========kd_mpi_ai_get_frame:%d\n",nCount++,nRet);
-            if (nRet == K_SUCCESS)
-            {
-                //          printf("=========phys_addr:0x%x,virt_addr:0x%x\n",audio_frame.phys_addr,audio_frame.virt_addr);
-
-                k_u8 *pVirtualAddr = (k_u8 *)kd_mpi_sys_mmap(audio_frame.phys_addr, audio_frame.len);
-                printf("=========%d_%d_%d_%d\n", pVirtualAddr[0], pVirtualAddr[1], pVirtualAddr[2], pVirtualAddr[3]);
-                kd_mpi_sys_munmap(pVirtualAddr, audio_frame.len);
-
-                // printf("=========%d_%d_%d_%d\n",pData[0],pData[1],pData[2],pData[3]);
-                kd_mpi_ai_release_frame(100, 200, &audio_frame);
-            }
+            printf("WAV writer byte mismatch: captured %u, wrote %llu\n",
+                   captured_size, (unsigned long long)written_size);
+            ret = K_FAILED;
         }
-
     }
-}
-#endif
-
-static k_bool g_vb_init = K_FALSE;
-k_s32 audio_sample_vb_init(k_bool enable_cache, k_u32 sample_rate)
-{
-    if (g_vb_init)
+    if (writer != NULL && audio_wav_writer_data_size(writer) == 0)
     {
-        return K_SUCCESS;
-    }
-    k_s32 ret;
-    k_vb_config config;
-
-    memset(&config, 0, sizeof(config));
-    config.max_pool_cnt = 64;
-
-    ret = kd_mpi_vb_set_config(&config);
-    if (ret)
-    {
-        printf("vb_set_config failed ret:%d\n", ret);
-        return ret;
+        merge_result(&ret, audio_wav_writer_discard(&writer),
+                     "discard empty WAV output");
     }
     else
     {
-        printf("vb_set_config ok\n");
+        merge_result(&ret, audio_wav_writer_close(&writer),
+                     "close WAV output");
     }
-
-    ret = kd_mpi_vb_init();
-
-    if (ret)
-        printf("vb_init failed ret:%d\n", ret);
-    else
-        g_vb_init = K_TRUE;
-
-    g_audio_data_pool_id = audio_data_vb_create_pool();
-
     return ret;
 }
 
-k_s32 audio_sample_vb_destroy()
+void audio_sample_reset(void)
 {
-    if (!g_vb_init)
+    __atomic_store_n(&g_exit_requested, K_FALSE, __ATOMIC_RELEASE);
+}
+
+k_s32 audio_sample_exit(void)
+{
+    __atomic_store_n(&g_exit_requested, K_TRUE, __ATOMIC_RELEASE);
+    return K_SUCCESS;
+}
+
+k_s32 audio_sample_vb_init(void)
+{
+    k_vb_config config;
+    k_vb_pool_config pool_config;
+    k_u32 block_size;
+
+    if (g_vb_initialized)
     {
+        return K_SUCCESS;
+    }
+    memset(&config, 0, sizeof(config));
+    config.max_pool_cnt = 64;
+    if (kd_mpi_vb_set_config(&config) != K_SUCCESS ||
+        kd_mpi_vb_init() != K_SUCCESS)
+    {
+        printf("VB initialization failed\n");
         return K_FAILED;
     }
-    g_vb_init = K_FALSE;
+    g_vb_initialized = K_TRUE;
 
-    if(g_audio_data_pool_id != VB_INVALID_HANDLE)
+    block_size = (AUDIO_MAX_SAMPLE_RATE / AUDIO_FRAMES_PER_SECOND) * 4 * 2;
+    memset(&pool_config, 0, sizeof(pool_config));
+    pool_config.blk_cnt = AUDIO_BUFFER_COUNT;
+    pool_config.blk_size = VB_ALIGN_UP(block_size, 4096);
+    pool_config.mode = VB_REMAP_MODE_NOCACHE;
+    g_audio_pool_id = kd_mpi_vb_create_pool(&pool_config);
+    if (g_audio_pool_id == VB_INVALID_POOLID)
     {
-        kd_mpi_vb_destory_pool(g_audio_data_pool_id);
-        g_audio_data_pool_id = VB_INVALID_HANDLE;
+        printf("audio VB pool creation failed\n");
+        if (kd_mpi_vb_exit() != K_SUCCESS)
+        {
+            printf("VB exit failed after pool creation failure\n");
+        }
+        g_vb_initialized = K_FALSE;
+        return K_FAILED;
     }
 
-    return _sample_vb_exit();
+    return K_SUCCESS;
+}
+
+k_s32 audio_sample_vb_destroy(void)
+{
+    k_s32 ret = K_SUCCESS;
+
+    if (!g_vb_initialized)
+    {
+        return K_SUCCESS;
+    }
+    if (g_audio_pool_id != VB_INVALID_POOLID)
+    {
+        if (kd_mpi_vb_destory_pool(g_audio_pool_id) != K_SUCCESS)
+        {
+            printf("audio VB pool destruction failed\n");
+            ret = K_FAILED;
+        }
+        g_audio_pool_id = VB_INVALID_POOLID;
+    }
+    if (kd_mpi_vb_exit() != K_SUCCESS)
+    {
+        printf("VB exit failed\n");
+        ret = K_FAILED;
+    }
+    g_vb_initialized = K_FALSE;
+    return ret;
 }
 
 k_s32 audio_sample_enable_audio_codec(k_bool enable_audio_codec)
@@ -530,1659 +852,1350 @@ k_s32 audio_sample_enable_audio_codec(k_bool enable_audio_codec)
     g_enable_audio_codec = enable_audio_codec;
     return K_SUCCESS;
 }
-k_s32 audio_sample_get_ai_i2s_data(const char *filename, k_audio_bit_width bit_width, k_u32 sample_rate,k_u32 channel_count,k_i2s_in_mono_channel  mono_channel, k_i2s_work_mode i2s_work_mode, k_u32 enable_audio3a)
+
+k_s32 audio_sample_get_ai_i2s_data(const char *filename,
+                                   k_audio_bit_width bit_width,
+                                   k_u32 sample_rate, k_u32 channel_count,
+                                   k_i2s_in_mono_channel mono_channel,
+                                   k_i2s_work_mode i2s_work_mode,
+                                   k_u32 enable_audio3a)
 {
-    k_aio_dev_attr aio_dev_attr;
-    aio_dev_attr.audio_type = KD_AUDIO_INPUT_TYPE_I2S;
-    aio_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    aio_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    aio_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    aio_dev_attr.kd_audio_attr.i2s_attr.snd_mode = (1 == channel_count) ? KD_AUDIO_SOUND_MODE_MONO : KD_AUDIO_SOUND_MODE_STEREO;
-    if(1 == channel_count)
-    {
-        aio_dev_attr.kd_audio_attr.i2s_attr.mono_channel = mono_channel;
-    }
-    aio_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    aio_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    aio_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = sample_rate / aio_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    aio_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-    if (K_SUCCESS != kd_mpi_ai_set_pub_attr(0, &aio_dev_attr))
-    {
-        printf("kd_mpi_ai_set_pub_attr failed\n");
-        return K_FAILED;
-    }
+    k_aio_dev_attr attr;
 
-    kd_mpi_ai_enable(0);
-    _enable_audio3a(0, 0, bit_width, enable_audio3a);
-
-    kd_mpi_ai_enable_chn(0, 0);
-    // kd_mpi_ai_enable_chn(0,1);
-
-    _test_ai_i2s_in_data(filename, 0, 0, bit_width, sample_rate, channel_count,-1);
-
-    // exit
-    kd_mpi_ai_disable_chn(0, 0);
-    kd_mpi_ai_disable(0);
-    return K_SUCCESS;
+    init_i2s_attr(&attr, K_TRUE, sample_rate, bit_width, channel_count,
+                  mono_channel, i2s_work_mode);
+    return record_ai_frames(filename, 0, 0, &attr, bit_width, sample_rate,
+                            channel_count, enable_audio3a);
 }
 
-k_s32 audio_sample_get_ai_pdm_data(const char *filename, k_audio_bit_width bit_width, k_u32 sample_rate, k_u32 channel_count)
+k_s32 audio_sample_get_ai_pdm_data(const char *filename,
+                                   k_audio_bit_width bit_width,
+                                   k_u32 sample_rate, k_u32 channel_count,
+                                   k_u32 enable_audio3a)
 {
-    k_aio_dev_attr aio_dev_attr;
-    aio_dev_attr.audio_type = KD_AUDIO_INPUT_TYPE_PDM;
-    aio_dev_attr.kd_audio_attr.pdm_attr.sample_rate = sample_rate;
-    aio_dev_attr.kd_audio_attr.pdm_attr.bit_width = bit_width;
-    aio_dev_attr.kd_audio_attr.pdm_attr.chn_cnt = 4; // max pdm channel
-    aio_dev_attr.kd_audio_attr.pdm_attr.snd_mode = (1 == channel_count) ? KD_AUDIO_SOUND_MODE_MONO : KD_AUDIO_SOUND_MODE_STEREO;
-    aio_dev_attr.kd_audio_attr.pdm_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    aio_dev_attr.kd_audio_attr.pdm_attr.pdm_oversample = KD_AUDIO_PDM_INPUT_OVERSAMPLE_64;
-    aio_dev_attr.kd_audio_attr.pdm_attr.point_num_per_frame = sample_rate / aio_dev_attr.kd_audio_attr.pdm_attr.frame_num;
+    k_aio_dev_attr attr;
 
-    if (K_SUCCESS != kd_mpi_ai_set_pub_attr(1, &aio_dev_attr))
-    {
-        printf("kd_mpi_ai_set_pub_attr failed\n");
-        return K_FAILED;
-    }
-#if 0
-    int channel_total = 1;
-    int rec_channel = 0;
-#else
-    int channel_total = 1;
-    int rec_channel = 0;
-#endif
-
-    kd_mpi_ai_enable(1);
-    for (int i = 0; i < channel_total; i++)
-    {
-        kd_mpi_ai_enable_chn(1, i);
-    }
-
-    _test_ai_pdm_in_data(filename, 1, rec_channel, bit_width, sample_rate, channel_count, -1);
-
-    // exit
-    for (int i = channel_total - 1; i >= 0; i--)
-    {
-        kd_mpi_ai_disable_chn(1, i);
-    }
-
-    kd_mpi_ai_disable(1);
-
-    return K_SUCCESS;
+    init_pdm_attr(&attr, sample_rate, bit_width, channel_count);
+    return record_ai_frames(filename, 1, 0, &attr, bit_width, sample_rate,
+                            channel_count, enable_audio3a);
 }
 
-k_s32 audio_sample_send_ao_data(const char *filename, int nDev, int nChannel, int samplerate, k_audio_bit_width bit_width, k_i2s_work_mode i2s_work_mode)
+k_s32 audio_sample_send_ao_data(const char *filename, int dev, int chn,
+                                k_i2s_work_mode i2s_work_mode)
 {
-    int audio_channel = 0;
-    int audio_samplerate = 0;
-    int audio_bitpersample = 0;
-    if (0 != load_wav_info(filename, &audio_channel, &audio_samplerate, &audio_bitpersample))
+    audio_wav_reader *reader = NULL;
+    audio_io_reader *file_reader = NULL;
+    audio_wav_format format;
+    int bytes_per_sample;
+    k_audio_bit_width bit_width;
+    k_aio_dev_attr attr;
+    sample_audio_buffer buffer;
+    k_audio_frame frame;
+    k_bool buffer_allocated = K_FALSE;
+    k_bool ao_started = K_FALSE;
+    k_s32 ret = K_FAILED;
+    k_u32 byte_rate;
+    k_u32 frame_size;
+    k_u32 data_size;
+    k_u32 data_read = 0;
+    k_u32 frames_sent = 0;
+    k_bool reached_end = K_FALSE;
+    k_u64 duration_ms;
+
+    if (audio_wav_reader_open(&reader, filename) != K_SUCCESS ||
+        audio_wav_reader_get_format(reader, &format) != K_SUCCESS ||
+        audio_wav_reader_data_size(reader) == 0)
     {
-        return -1;
+        printf("open input WAV failed%s%s\n",
+               filename == NULL ? "" : ": ",
+               filename == NULL ? "" : filename);
+        goto cleanup;
+    }
+    data_size = audio_wav_reader_data_size(reader);
+    if (!sample_rate_is_supported(format.sample_rate))
+    {
+        printf("WAV sample rate %u is not supported by AO\n", format.sample_rate);
+        goto cleanup;
+    }
+    bit_width = bit_width_from_bits(format.bits_per_sample);
+    bytes_per_sample = sample_bytes(bit_width);
+    if (audio_wav_format_byte_rate(&format, &byte_rate) != K_SUCCESS ||
+        audio_wav_format_frame_size(&format, AUDIO_FRAMES_PER_SECOND,
+                                    &frame_size) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    duration_ms = (k_u64)data_size * 1000U / byte_rate;
+    printf("WAV: rate=%u bits=%u channels=%u byte-rate=%u frame-bytes=%u "
+           "duration=%llu.%03llu s\n",
+           format.sample_rate, format.bits_per_sample, format.channel_count,
+           byte_rate, frame_size, (unsigned long long)(duration_ms / 1000U),
+           (unsigned long long)(duration_ms % 1000U));
+    if (g_enable_audio_codec && bit_width == KD_AUDIO_BIT_WIDTH_32)
+    {
+        printf("the internal codec cannot play 32-bit WAV data\n");
+        goto cleanup;
+    }
+    if (bytes_per_sample == 0 ||
+        allocate_audio_buffer(&buffer, frame_size) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    buffer_allocated = K_TRUE;
+    init_audio_frame(&frame, &buffer);
+    if (audio_io_reader_create(&file_reader, frame_size,
+                               AUDIO_FILE_RING_BLOCKS, read_wav_data, reader,
+                               file_io_stop_requested, NULL) != K_SUCCESS)
+    {
+        printf("start WAV reader failed\n");
+        goto cleanup;
     }
 
-    if (audio_samplerate > samplerate) // Prevent blocks without corresponding sizes
-    {
-        printf("error,please input: -samplerate %d\n", audio_samplerate);
-        return -1;
-    }
-
-    k_audio_frame audio_frame;
-    if (32 == audio_bitpersample)
-    {
-        _get_audio_frame(&audio_frame, audio_samplerate * 4 * 2 / AUDIO_PERSEC_DIV_NUM);
-    }
-    else if (24 == audio_bitpersample)
-    {
-        _get_audio_frame(&audio_frame, audio_samplerate * 3 * 2 / AUDIO_PERSEC_DIV_NUM);
-    }
-    else if (16 == audio_bitpersample)
-    {
-        _get_audio_frame(&audio_frame, audio_samplerate * 2 * 2 / AUDIO_PERSEC_DIV_NUM);
-    }
-
-    k_u32 *pDataBuf = (k_u32 *)audio_frame.virt_addr;
-    memset(pDataBuf, 0, audio_frame.len);
-
-    k_aio_dev_attr ao_dev_attr;
-    memset(&ao_dev_attr,0,sizeof(ao_dev_attr));
-    ao_dev_attr.audio_type = KD_AUDIO_OUTPUT_TYPE_I2S;
-    ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate = audio_samplerate;
-    ao_dev_attr.kd_audio_attr.i2s_attr.bit_width = _get_sample_bitwidth(audio_bitpersample);
-    ao_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    ao_dev_attr.kd_audio_attr.i2s_attr.snd_mode = (1 == audio_channel) ? KD_AUDIO_SOUND_MODE_MONO : KD_AUDIO_SOUND_MODE_STEREO;
-    ao_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    ao_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ao_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
     if (!g_enable_audio_codec)
     {
-        printf("force the i2s_mode to right justified(tm8821)\n");
-        ao_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = K_RIGHT_JUSTIFYING_MODE; // tm8821 为i2s 右对齐
+        i2s_work_mode = K_RIGHT_JUSTIFYING_MODE;
     }
-    kd_mpi_ao_set_pub_attr(nDev, &ao_dev_attr);
-
-    kd_mpi_ao_enable(nDev);
-    kd_mpi_ao_enable_chn(nDev, nChannel);
-
-    static int nCount = 0;
-    k_s32 ret = 0;
-    g_ao_test_start = K_TRUE;
-
-    while (g_ao_test_start)
+    init_i2s_attr(&attr, K_FALSE, format.sample_rate, bit_width,
+                  format.channel_count,
+                  KD_I2S_IN_MONO_RIGHT_CHANNEL, i2s_work_mode);
+    if (start_ao(dev, chn, &attr) != K_SUCCESS)
     {
-        // 获取音频数据
-        get_pcm_data_from_file(pDataBuf, audio_frame.len / 4);
+        goto cleanup;
+    }
+    ao_started = K_TRUE;
+    ret = K_SUCCESS;
 
-#if 0
-        printf("====pcm data:0x%x_0x%x_0x%x_0x%x_0x%x_0x%x_0x%x_0x%x\n", \
-               pDataBuf[0], pDataBuf[1], pDataBuf[2], pDataBuf[3], \
-               pDataBuf[4], pDataBuf[5], pDataBuf[6], pDataBuf[7]
-              );
-#endif
+    while (!exit_requested())
+    {
+        k_u32 bytes_read = 0;
+        k_bool final_frame;
+        k_s32 read_result;
 
-        // 发送音频数据
-        ret = kd_mpi_ao_send_frame(nDev, nChannel, &audio_frame, 1000);
-        if (ret == 0)
+        read_result = audio_io_reader_pop(file_reader, frame.virt_addr,
+                                          frame.len, &bytes_read);
+        if (read_result == AUDIO_IO_END)
         {
-            nCount++;
+            reached_end = K_TRUE;
+            break;
+        }
+        if (read_result == AUDIO_IO_STOPPED)
+        {
+            break;
+        }
+        if (read_result != K_SUCCESS)
+        {
+            if (!exit_requested())
+            {
+                ret = K_FAILED;
+            }
+            break;
+        }
+        final_frame = data_read + bytes_read == data_size;
+        if (bytes_read < frame.len)
+        {
+            memset((k_u8 *)frame.virt_addr + bytes_read, 0,
+                   frame.len - bytes_read);
+        }
+        if (kd_mpi_ao_send_frame(dev, chn, &frame,
+                                 AUDIO_FRAME_TIMEOUT_MS) != K_SUCCESS)
+        {
+            if (!exit_requested())
+            {
+                ret = K_FAILED;
+            }
+            break;
+        }
+        data_read += bytes_read;
+        ++frames_sent;
+        if (final_frame)
+        {
+            reached_end = K_TRUE;
+            break;
         }
     }
+    if (reached_end && ret == K_SUCCESS && !exit_requested())
+    {
+        wait_for_ao_drain(frames_sent);
+    }
 
-    // exit
-    printf("diable ao audio \n");
-    kd_mpi_ao_disable_chn(nDev, nChannel);
-    kd_mpi_ao_disable(nDev);
-    _release_audio_frame();
-
-    return K_SUCCESS;
+cleanup:
+    if (file_reader != NULL)
+    {
+        merge_result(&ret, audio_io_reader_destroy(&file_reader),
+                     "stop WAV reader");
+    }
+    if (ao_started)
+    {
+        merge_result(&ret, stop_ao(dev, chn), "stop AO");
+    }
+    if (buffer_allocated)
+    {
+        merge_result(&ret, release_audio_buffer(&buffer),
+                     "release playback buffer");
+    }
+    if (audio_wav_reader_close(&reader) != K_SUCCESS)
+    {
+        ret = K_FAILED;
+    }
+    return ret;
 }
 
-k_s32 audio_sample_api_ai_to_ao(int ai_dev_num, int ai_channel, int ao_dev_num, int ao_channel, k_u32 sample_rate, k_audio_bit_width bit_width, k_i2s_work_mode i2s_work_mode, k_u32 enable_audio3a)
+static k_s32 validate_duplex_configuration(k_ai_chn ai_chn,
+                                           k_ao_chn ao_chn,
+                                           k_audio_bit_width bit_width)
 {
-    k_aio_dev_attr ai_dev_attr;
-    ai_dev_attr.audio_type = (ai_dev_num == 0) ? KD_AUDIO_INPUT_TYPE_I2S : KD_AUDIO_INPUT_TYPE_PDM;
-    // i2s
-    if (ai_dev_num == 0)
+    if (g_enable_audio_codec && (ai_chn != 0 || ao_chn != 0))
     {
-        if (!g_enable_audio_codec)
-        {
-            if (bit_width != KD_AUDIO_BIT_WIDTH_32) // tm8211
-            {
-                printf("error:tm8211 is 16bit, right justified,only 32 bit width is supported when ai to ao\n");
-                return -1;
-            }
-        }
-        if (g_enable_audio_codec)
-        {
-            if (0 != ai_channel)
-            {
-                printf("the built-in codec must use channel 0\n");
-                return -1;
-            }
-        }
-        ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-        ai_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-        ai_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-        ai_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-        ai_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-        ai_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ai_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-        ai_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-    }
-    // pdm
-    else if (ai_dev_num == 1)
-    {
-        ai_dev_attr.kd_audio_attr.pdm_attr.sample_rate = sample_rate;
-        ai_dev_attr.kd_audio_attr.pdm_attr.bit_width = bit_width;
-        ai_dev_attr.kd_audio_attr.pdm_attr.chn_cnt = 4; // max pdm channel
-        ai_dev_attr.kd_audio_attr.pdm_attr.snd_mode = KD_AUDIO_SOUND_MODE_STEREO;
-        ai_dev_attr.kd_audio_attr.pdm_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-        ai_dev_attr.kd_audio_attr.pdm_attr.pdm_oversample = KD_AUDIO_PDM_INPUT_OVERSAMPLE_64;
-        ai_dev_attr.kd_audio_attr.pdm_attr.point_num_per_frame = ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ai_dev_attr.kd_audio_attr.pdm_attr.frame_num;
-    }
-
-    if (g_enable_audio_codec)
-    {
-        if (0 != ao_channel)
-        {
-            printf("the built-in codec must use channel 0\n");
-            return -1;
-        }
-    }
-
-    if (K_SUCCESS != kd_mpi_ai_set_pub_attr(ai_dev_num, &ai_dev_attr))
-    {
-        printf("kd_mpi_ai_set_pub_attr failed\n");
+        printf("the built-in codec requires AI/AO channel 0\n");
         return K_FAILED;
     }
-
-    k_aio_dev_attr ao_dev_attr;
-    memset(&ao_dev_attr,0,sizeof(ao_dev_attr));
-    ao_dev_attr.audio_type = KD_AUDIO_OUTPUT_TYPE_I2S;
-    ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    ao_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    ao_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    ao_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    ao_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ao_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-
-    if (K_SUCCESS != kd_mpi_ao_set_pub_attr(ao_dev_num, &ao_dev_attr))
+    if (!g_enable_audio_codec && bit_width != KD_AUDIO_BIT_WIDTH_32)
     {
-        printf("kd_mpi_ao_set_pub_attr failed\n");
+        printf("external I2S duplex mode requires 32-bit samples\n");
         return K_FAILED;
     }
-
-    kd_mpi_ai_enable(ai_dev_num);
-    _enable_audio3a(ai_dev_num, ai_channel, bit_width, enable_audio3a);
-    kd_mpi_ai_enable_chn(ai_dev_num, ai_channel);
-
-    kd_mpi_ao_enable(ao_dev_num);
-    kd_mpi_ao_enable_chn(ao_dev_num, ao_channel);
-
-    g_ai_to_ao_test_start = K_TRUE;
-
-    _test_ai_to_ao(ai_dev_num, ai_channel, ao_dev_num, ao_channel, sample_rate, bit_width);
-
-    // exit
-    printf("diable ao module \n");
-    kd_mpi_ao_disable_chn(ao_dev_num, ao_channel);
-    kd_mpi_ao_disable(ao_dev_num);
-
-    printf("diable ai module \n");
-    kd_mpi_ai_disable_chn(ai_dev_num, ai_channel);
-    kd_mpi_ai_disable(ai_dev_num);
-
-    printf("release vb block \n");
-
     return K_SUCCESS;
 }
 
-k_s32 audio_sample_bind_ai_to_ao(int ai_dev_num, int ai_channel, int ao_dev_num, int ao_channel, k_u32 sample_rate, k_audio_bit_width bit_width, k_i2s_work_mode i2s_work_mode, k_u32 enable_audio3a)
+static void init_duplex_attrs(k_aio_dev_attr *ai_attr, k_aio_dev_attr *ao_attr,
+                              k_audio_dev ai_dev, k_u32 sample_rate,
+                              k_audio_bit_width bit_width,
+                              k_i2s_work_mode i2s_work_mode)
 {
-    k_aio_dev_attr ai_dev_attr;
-    if (ai_dev_num == 1)
+    if (ai_dev == 0)
     {
-        ai_dev_attr.audio_type = KD_AUDIO_INPUT_TYPE_PDM;
-        ai_dev_attr.kd_audio_attr.pdm_attr.sample_rate = sample_rate;
-        ai_dev_attr.kd_audio_attr.pdm_attr.bit_width = bit_width;
-        ai_dev_attr.kd_audio_attr.pdm_attr.pdm_oversample = KD_AUDIO_PDM_INPUT_OVERSAMPLE_64;
-        ai_dev_attr.kd_audio_attr.pdm_attr.chn_cnt = 4; // max pdm channel
-        ai_dev_attr.kd_audio_attr.pdm_attr.snd_mode = KD_AUDIO_SOUND_MODE_STEREO;
-        ai_dev_attr.kd_audio_attr.pdm_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-        ai_dev_attr.kd_audio_attr.pdm_attr.point_num_per_frame = ai_dev_attr.kd_audio_attr.pdm_attr.sample_rate / ai_dev_attr.kd_audio_attr.pdm_attr.frame_num;
-        if (K_SUCCESS != kd_mpi_ai_set_pub_attr(ai_dev_num, &ai_dev_attr))
-        {
-            printf("kd_mpi_ai_set_pub_attr failed\n");
-            return K_FAILED;
-        }
+        init_i2s_attr(ai_attr, K_TRUE, sample_rate, bit_width, 2,
+                      KD_I2S_IN_MONO_RIGHT_CHANNEL, i2s_work_mode);
     }
-    else if (ai_dev_num == 0)
+    else
     {
-        if (!g_enable_audio_codec)
-        {
-            if (bit_width != KD_AUDIO_BIT_WIDTH_32) // tm8211
-            {
-                printf("error:tm8211 is 16bit, right justified,only 32 bit width is supported when ai to ao\n");
-                return -1;
-            }
-        }
-        if (g_enable_audio_codec)
-        {
-            if (0 != ai_channel)
-            {
-                printf("the built-in codec must use channel 0\n");
-                return -1;
-            }
-        }
-        ai_dev_attr.audio_type = KD_AUDIO_INPUT_TYPE_I2S;
-        ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-        ai_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-        ai_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-        ai_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-        ai_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-        ai_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ai_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-        ai_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-        if (K_SUCCESS != kd_mpi_ai_set_pub_attr(ai_dev_num, &ai_dev_attr))
-        {
-            printf("kd_mpi_ai_set_pub_attr failed\n");
-            return K_FAILED;
-        }
+        init_pdm_attr(ai_attr, sample_rate, bit_width, 2);
     }
+    init_i2s_attr(ao_attr, K_FALSE, sample_rate, bit_width, 2,
+                  KD_I2S_IN_MONO_RIGHT_CHANNEL, i2s_work_mode);
+}
 
-    if (g_enable_audio_codec)
-    {
-        if (0 != ao_channel)
-        {
-            printf("the built-in codec must use channel 0\n");
-            return -1;
-        }
-    }
+k_s32 audio_sample_api_ai_to_ao(int ai_dev, int ai_chn, int ao_dev, int ao_chn,
+                                k_u32 sample_rate,
+                                k_audio_bit_width bit_width,
+                                k_i2s_work_mode i2s_work_mode,
+                                k_u32 enable_audio3a)
+{
+    k_aio_dev_attr ai_attr;
+    k_aio_dev_attr ao_attr;
+    k_bool ai_started = K_FALSE;
+    k_bool ao_started = K_FALSE;
+    k_s32 ret = K_FAILED;
 
-    k_aio_dev_attr ao_dev_attr;
-    memset(&ao_dev_attr,0,sizeof(ao_dev_attr));
-    ao_dev_attr.audio_type = KD_AUDIO_OUTPUT_TYPE_I2S;
-    ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    ao_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    ao_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    ao_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    ao_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ao_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-    if (K_SUCCESS != kd_mpi_ao_set_pub_attr(ao_dev_num, &ao_dev_attr))
+    if (validate_duplex_configuration(ai_chn, ao_chn, bit_width) != K_SUCCESS)
     {
-        printf("kd_mpi_ao_set_pub_attr failed\n");
         return K_FAILED;
     }
-
-    kd_mpi_ai_enable(ai_dev_num);
-    _enable_audio3a(ai_dev_num, ai_channel, bit_width, enable_audio3a);
-    kd_mpi_ai_enable_chn(ai_dev_num, ai_channel);
-
-    kd_mpi_ao_enable(ao_dev_num);
-    kd_mpi_ao_enable_chn(ao_dev_num, ao_channel);
-
-    g_ai_bind_ao_test_start = K_TRUE;
-    _ai_bind_ao(ai_dev_num, ai_channel, ao_dev_num, ao_channel);
-
-    // exit
-    printf("diable ao module \n");
-    kd_mpi_ao_disable_chn(ao_dev_num, ao_channel);
-    kd_mpi_ao_disable(ao_dev_num);
-
-    printf("diable ai module \n");
-    kd_mpi_ai_disable_chn(ai_dev_num, ai_channel);
-    kd_mpi_ai_disable(ai_dev_num);
-
-    printf("release vb block \n");
-
-    return K_SUCCESS;
-}
-
-k_s32 audio_sample_exit()
-{
-    g_ao_test_start = K_FALSE;
-    g_ai_to_ao_test_start = K_FALSE;
-    g_ai_bind_ao_test_start = K_FALSE;
-    g_adec_test_start = K_FALSE;
-    g_aenc_test_start = K_FALSE;
-    g_audio_overall_start = K_FALSE;
-
-    return K_SUCCESS;
-}
-
-static k_s32 _load_file(const char *filename, unsigned char **data, int *size)
-{
-    FILE *fp = fopen(filename, "rb");
-    if (NULL == fp)
+    init_duplex_attrs(&ai_attr, &ao_attr, ai_dev, sample_rate, bit_width,
+                      i2s_work_mode);
+    if (start_ai(ai_dev, ai_chn, &ai_attr, enable_audio3a) != K_SUCCESS)
     {
-        printf("open file:%s failed\n", filename);
-        return -1;
+        goto cleanup;
+    }
+    ai_started = K_TRUE;
+    if (start_ao(ao_dev, ao_chn, &ao_attr) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ao_started = K_TRUE;
+    ret = K_SUCCESS;
+
+    while (!exit_requested())
+    {
+        k_audio_frame frame;
+
+        if (kd_mpi_ai_get_frame(ai_dev, ai_chn, &frame,
+                                AUDIO_FRAME_TIMEOUT_MS) != K_SUCCESS)
+        {
+            continue;
+        }
+        if (kd_mpi_ao_send_frame(ao_dev, ao_chn, &frame,
+                                 AUDIO_FRAME_TIMEOUT_MS) != K_SUCCESS &&
+            !exit_requested())
+        {
+            ret = K_FAILED;
+        }
+        merge_result(&ret,
+                     kd_mpi_ai_release_frame(ai_dev, ai_chn, &frame),
+                     "kd_mpi_ai_release_frame");
+        if (ret != K_SUCCESS)
+        {
+            break;
+        }
     }
 
-    fseek(fp, 0, SEEK_END);
-    *size = ftell(fp);
-    *data = (unsigned char *)malloc(*size);
-    if (*data == NULL)
+cleanup:
+    if (ao_started)
     {
-        printf("malloc size %d failed\n", *size);
-        return -1;
+        merge_result(&ret, stop_ao(ao_dev, ao_chn), "stop AO");
     }
-
-    fseek(fp, 0, SEEK_SET);
-    fread(*data, *size, 1, fp);
-    fclose(fp);
-
-    return 0;
+    if (ai_started)
+    {
+        merge_result(&ret, stop_ai(ai_dev, ai_chn), "stop AI");
+    }
+    return ret;
 }
 
-static k_s32 _get_audio_stream(k_audio_stream *audio_stream, int nSize, k_vb_blk_handle *handle)
+k_s32 audio_sample_bind_ai_to_ao(int ai_dev, int ai_chn, int ao_dev, int ao_chn,
+                                 k_u32 sample_rate,
+                                 k_audio_bit_width bit_width,
+                                 k_i2s_work_mode i2s_work_mode,
+                                 k_u32 enable_audio3a)
 {
-    *handle = kd_mpi_vb_get_block(g_audio_data_pool_id, nSize, NULL);
-    if (*handle == VB_INVALID_HANDLE)
+    k_aio_dev_attr ai_attr;
+    k_aio_dev_attr ao_attr;
+    k_mpp_chn ai_channel = make_mpp_channel(K_ID_AI, ai_dev, ai_chn);
+    k_mpp_chn ao_channel = make_mpp_channel(K_ID_AO, ao_dev, ao_chn);
+    k_bool ai_started = K_FALSE;
+    k_bool ao_started = K_FALSE;
+    k_bool bound = K_FALSE;
+    k_s32 ret = K_FAILED;
+
+    if (validate_duplex_configuration(ai_chn, ao_chn, bit_width) != K_SUCCESS)
     {
-        printf("%s get vb block error\n", __func__);
         return K_FAILED;
     }
-    audio_stream->len = nSize;
-    audio_stream->phys_addr = kd_mpi_vb_handle_to_phyaddr(*handle);
-    audio_stream->stream = kd_mpi_sys_mmap(audio_stream->phys_addr, nSize);
-    // printf("_get_audio_stream virt_addr:%p\n", audio_stream->stream);
+    init_duplex_attrs(&ai_attr, &ao_attr, ai_dev, sample_rate, bit_width,
+                      i2s_work_mode);
+    if (start_ai(ai_dev, ai_chn, &ai_attr, enable_audio3a) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ai_started = K_TRUE;
+    if (start_ao(ao_dev, ao_chn, &ao_attr) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ao_started = K_TRUE;
+    if (kd_mpi_sys_bind(&ai_channel, &ao_channel) != K_SUCCESS)
+    {
+        printf("AI to AO bind failed\n");
+        goto cleanup;
+    }
+    bound = K_TRUE;
+    ret = K_SUCCESS;
 
-    return K_SUCCESS;
+    while (!exit_requested())
+    {
+        usleep(100000);
+    }
+
+cleanup:
+    if (bound)
+    {
+        merge_result(&ret, kd_mpi_sys_unbind(&ai_channel, &ao_channel),
+                     "AI to AO unbind");
+    }
+    if (ao_started)
+    {
+        merge_result(&ret, stop_ao(ao_dev, ao_chn), "stop AO");
+    }
+    if (ai_started)
+    {
+        merge_result(&ret, stop_ai(ai_dev, ai_chn), "stop AI");
+    }
+    return ret;
 }
 
-static k_s32 _release_audio_stream(k_vb_blk_handle handle)
+k_s32 audio_sample_ai_encode(k_audio_dev ai_dev, k_bool use_sysbind,
+                             k_u32 sample_rate, k_audio_bit_width bit_width,
+                             int enc_chn, k_payload_type type,
+                             const char *filename, k_u32 enable_audio3a)
 {
-    kd_mpi_vb_release_block(handle);
-    return K_SUCCESS;
-}
-
-static void _test_file_adec_ao_api(const char *filename, int ao_dev_num, int ao_channel, int adec_channel, k_audio_bit_width bit_width, int sample_rate)
-{
-    k_audio_frame audio_frame;
-    int nSize = 0;
-    k_audio_stream audio_stream;
-
-    unsigned char *file_data = NULL;
-
-    unsigned char *cur_data = NULL;
-    int nCur_data_index = 0;
-    if (0 != _load_file(filename, &file_data, &nSize))
-    {
-        return;
-    }
-
-    int enc_frame_len = sample_rate * 2 * 2 / AUDIO_PERSEC_DIV_NUM / 2;
-
-    k_vb_blk_handle handle;
-    if (K_SUCCESS != _get_audio_stream(&audio_stream, enc_frame_len, &handle))
-    {
-        printf("_get_audio_stream failed\n");
-        return;
-    }
-
-    while (g_adec_test_start)
-    {
-        if (nCur_data_index + enc_frame_len > nSize)
-        {
-            printf("read file again\n");
-            nCur_data_index = 0;
-        }
-
-        cur_data = file_data + nCur_data_index;
-        memcpy(audio_stream.stream, cur_data, enc_frame_len);
-        audio_stream.seq++;
-
-        if (0 != kd_mpi_adec_send_stream(adec_channel, &audio_stream, K_TRUE))
-        {
-            printf("kd_mpi_adec_send_stream failed\n");
-            _release_audio_stream(handle);
-            continue;
-        }
-
-        if (0 != kd_mpi_adec_get_frame(adec_channel, &audio_frame, 0))
-        {
-            printf("kd_mpi_adec_get_frame failed\n");
-        }
-        else
-        {
-            kd_mpi_ao_send_frame(ao_dev_num, ao_channel, &audio_frame, 100);
-
-            kd_mpi_adec_release_frame(adec_channel, &audio_frame);
-        }
-
-        nCur_data_index += enc_frame_len;
-    }
-
-    _release_audio_stream(handle);
-
-    if (file_data != NULL)
-    {
-        free(file_data);
-        file_data = NULL;
-    }
-}
-
-static void _test_file_adec_ao_sysbind(const char *filename, int ao_dev_num, int ao_channel, int adec_channel, k_audio_bit_width bit_width, int sample_rate)
-{
-    int nSize = 0;
-    k_audio_stream audio_stream;
-    unsigned char *file_data = NULL;
-    unsigned char *cur_data = NULL;
-    int nCur_data_index = 0;
-    int enc_frame_len = sample_rate * 2 * 2 / AUDIO_PERSEC_DIV_NUM / 2;
-
-    if (0 != _load_file(filename, &file_data, &nSize))
-    {
-        return;
-    }
-
-    k_mpp_chn ao_mpp_chn;
-    k_mpp_chn adec_mpp_chn;
-
-    adec_mpp_chn.mod_id = K_ID_ADEC;
-    adec_mpp_chn.dev_id = 0;
-    adec_mpp_chn.chn_id = adec_channel;
-    ao_mpp_chn.mod_id = K_ID_AO;
-    ao_mpp_chn.dev_id = ao_dev_num;
-    ao_mpp_chn.chn_id = ao_channel;
-
-    if (0 != kd_mpi_sys_bind(&adec_mpp_chn, &ao_mpp_chn))
-    {
-        printf("kd_mpi_sys_bind failed\n");
-        return;
-    }
-
-    // int nCount = 0;
-    k_vb_blk_handle handle;
-    if (K_SUCCESS != _get_audio_stream(&audio_stream, enc_frame_len, &handle))
-    {
-        return;
-    }
-
-    while (g_adec_test_start)
-    {
-        if (nCur_data_index + enc_frame_len > nSize)
-        {
-            printf("read file again\n");
-            nCur_data_index = 0;
-        }
-
-        cur_data = file_data + nCur_data_index;
-        memcpy(audio_stream.stream, cur_data, enc_frame_len);
-        audio_stream.seq++;
-        audio_stream.len = enc_frame_len;
-
-        if (0 != kd_mpi_adec_send_stream(adec_channel, &audio_stream, K_TRUE)) // must be block to prevent fast reading of data from file
-        {
-            printf("kd_mpi_adec_send_stream failed\n");
-            continue;
-        }
-
-        nCur_data_index += enc_frame_len;
-        // printf("=====================kd_mpi_adec_send_stream:%d,size:%d\n",nCount++,audio_stream.len);
-    }
-
-    _release_audio_stream(handle);
-
-    kd_mpi_sys_unbind(&adec_mpp_chn, &ao_mpp_chn);
-
-    if (file_data != NULL)
-    {
-        free(file_data);
-        file_data = NULL;
-    }
-
-}
-
-static void _test_ai_aenc_file_api(const char *filename, int ai_dev_num, int ai_channel, int aenc_channel, k_audio_bit_width bit_width, int sample_rate)
-{
-    k_audio_frame audio_frame;
-    k_audio_stream audio_stream;
-
-    FILE *fp = fopen(filename, "wb");
-    if (NULL == fp)
-    {
-        printf("open file:%s failed\n", filename);
-        return;
-    }
-
-    while (g_aenc_test_start)
-    {
-        if (K_SUCCESS != kd_mpi_ai_get_frame(ai_dev_num, ai_channel, &audio_frame, 1000))
-        {
-            printf("kd_mpi_ai_get_frame timeout\n");
-            continue;
-        }
-
-        if (0 != kd_mpi_aenc_send_frame(aenc_channel, &audio_frame))
-        {
-            printf("kd_mpi_aenc_send_frame failed\n");
-        }
-        else
-        {
-            if (0 != kd_mpi_aenc_get_stream(aenc_channel, &audio_stream, 0))
-            {
-                printf("kd_mpi_aenc_get_stream failed\n");
-            }
-            else
-            {
-                // printf("enc audio stream len:%d,timestamp:%ld,seq:%d,phys:0x%lx\n", audio_stream.len, audio_stream.time_stamp, audio_stream.seq, audio_stream.phys_addr);
-
-                k_u8 *raw_data = (k_u8 *)kd_mpi_sys_mmap(audio_stream.phys_addr, audio_stream.len);
-                fwrite(raw_data, 1, audio_stream.len, fp);
-                kd_mpi_sys_munmap(raw_data, audio_stream.len);
-
-                kd_mpi_aenc_release_stream(aenc_channel, &audio_stream);
-            }
-        }
-
-        kd_mpi_ai_release_frame(ai_dev_num, ai_channel, &audio_frame);
-    }
-
-    fclose(fp);
-}
-
-static void _test_ai_aenc_file_sysbind(const char *filename, int ai_dev_num, int ai_channel, int aenc_channel, k_audio_bit_width bit_width, int sample_rate)
-{
-    k_audio_stream audio_stream;
-
-    FILE *fp = fopen(filename, "wb");
-    if (NULL == fp)
-    {
-        printf("open file:%s failed\n", filename);
-        return;
-    }
-
-    k_mpp_chn ai_mpp_chn;
-    k_mpp_chn aenc_mpp_chn;
-
-    ai_mpp_chn.mod_id = K_ID_AI;
-    ai_mpp_chn.dev_id = ai_dev_num;
-    ai_mpp_chn.chn_id = ai_channel;
-    aenc_mpp_chn.mod_id = K_ID_AENC;
-    aenc_mpp_chn.dev_id = 0;
-    aenc_mpp_chn.chn_id = aenc_channel;
-    if (0 != kd_mpi_sys_bind(&ai_mpp_chn, &aenc_mpp_chn))
-    {
-        printf("%s kd_mpi_sys_bind failed\n", __FUNCTION__);
-        return;
-    }
-
-    while (g_aenc_test_start)
-    {
-        if (0 != kd_mpi_aenc_get_stream(aenc_channel, &audio_stream, 1000))
-        {
-            printf("kd_mpi_aenc_get_stream failed\n");
-            continue;
-        }
-        else
-        {
-            printf("enc audio stream len:%d,timestamp:%ld,seq:%d,phys:0x%lx\n", audio_stream.len, audio_stream.time_stamp, audio_stream.seq, audio_stream.phys_addr);
-
-            k_u8 *raw_data = (k_u8 *)kd_mpi_sys_mmap(audio_stream.phys_addr, audio_stream.len);
-            fwrite(raw_data, 1, audio_stream.len, fp);
-            kd_mpi_sys_munmap(raw_data, audio_stream.len);
-
-            kd_mpi_aenc_release_stream(aenc_channel, &audio_stream);
-        }
-    }
-
-    kd_mpi_sys_unbind(&ai_mpp_chn, &aenc_mpp_chn);
-    fclose(fp);
-}
-
-k_s32 audio_sample_ai_encode(k_bool use_sysbind, k_u32 samplerate, k_audio_bit_width bit_width, int encChannel, k_payload_type type, const char *filename, k_u32 enable_audio3a)
-{
-    int sample_rate = samplerate;
-    k_aenc_chn aenc_chn = encChannel;
-    k_audio_dev ai_dev = 0;
-    k_ai_chn ai_chn = 0;
+    k_aio_dev_attr ai_attr;
+    k_aenc_chn_attr aenc_attr;
+    k_mpp_chn ai_channel = make_mpp_channel(K_ID_AI, ai_dev, 0);
+    k_mpp_chn aenc_channel = make_mpp_channel(K_ID_AENC, 0, enc_chn);
+    FILE *output = NULL;
+    audio_io_writer *file_writer = NULL;
+    char output_path[AUDIO_FILE_PATH_SIZE];
+    k_bool encoder_created = K_FALSE;
+    k_bool ai_started = K_FALSE;
+    k_bool bound = K_FALSE;
+    k_s32 ret = K_FAILED;
+    k_u64 output_size = 0;
+    k_u32 encoded_block_size = sample_rate / AUDIO_FRAMES_PER_SECOND * 2U;
 
     if (bit_width != KD_AUDIO_BIT_WIDTH_16)
     {
         bit_width = KD_AUDIO_BIT_WIDTH_16;
-        printf("Force the sampling accuracy to be set to 16\n");
+        printf("encoder input forced to 16-bit\n");
     }
 
-    k_aenc_chn_attr aenc_chn_attr;
-    aenc_chn_attr.type = type;
-    aenc_chn_attr.buf_size = AUDIO_PERSEC_DIV_NUM;
-    aenc_chn_attr.point_num_per_frame = sample_rate / aenc_chn_attr.buf_size;
-    aenc_chn_attr.sample_rate = samplerate;
-    aenc_chn_attr.channels = 1;
-    aenc_chn_attr.bitrate = 16000;//bps
-
-    if (0 != kd_mpi_aenc_create_chn(aenc_chn, &aenc_chn_attr))
+    if (audio_file_open_unique(filename, "wb", &output, output_path,
+                               sizeof(output_path)) != K_SUCCESS)
     {
-        printf("kd_mpi_aenc_create_chn faild\n");
-        return -1;
+        printf("open output file %s failed\n", filename);
+        goto cleanup;
     }
-
-    k_aio_dev_attr aio_dev_attr;
-    aio_dev_attr.audio_type = KD_AUDIO_INPUT_TYPE_I2S;
-    aio_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    aio_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    aio_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    aio_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = K_STANDARD_MODE;
-    aio_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    aio_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = sample_rate / aio_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    aio_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-    aio_dev_attr.kd_audio_attr.i2s_attr.snd_mode = KD_AUDIO_SOUND_MODE_MONO;
-    aio_dev_attr.kd_audio_attr.i2s_attr.mono_channel = KD_I2S_IN_MONO_RIGHT_CHANNEL;
-    if (K_SUCCESS != kd_mpi_ai_set_pub_attr(ai_dev, &aio_dev_attr))
+    printf("recording to %s\n", output_path);
+    if (audio_io_writer_create(&file_writer, encoded_block_size,
+                               AUDIO_FILE_RING_BLOCKS, write_file_data, output,
+                               file_io_stop_requested, NULL) != K_SUCCESS)
     {
-        kd_mpi_aenc_destroy_chn(aenc_chn);
-        printf("kd_mpi_ai_set_pub_attr failed\n");
-        return K_FAILED;
+        printf("start encoded writer failed\n");
+        goto cleanup;
     }
+    init_aenc_attr(&aenc_attr, type, sample_rate, 1);
+    if (kd_mpi_aenc_create_chn(enc_chn, &aenc_attr) != K_SUCCESS)
+    {
+        printf("kd_mpi_aenc_create_chn failed\n");
+        goto cleanup;
+    }
+    encoder_created = K_TRUE;
 
-    kd_mpi_ai_enable(ai_dev);
-    _enable_audio3a(ai_dev, ai_chn, bit_width, enable_audio3a);
-    kd_mpi_ai_enable_chn(ai_dev, ai_chn);
+    init_codec_input_attr(&ai_attr, ai_dev, sample_rate, bit_width);
+    if (start_ai(ai_dev, 0, &ai_attr, enable_audio3a) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ai_started = K_TRUE;
 
-    g_aenc_test_start = K_TRUE;
     if (use_sysbind)
     {
-        _test_ai_aenc_file_sysbind(filename, ai_dev, ai_chn, aenc_chn, bit_width, sample_rate);
+        if (kd_mpi_sys_bind(&ai_channel, &aenc_channel) != K_SUCCESS)
+        {
+            printf("AI to AENC bind failed\n");
+            goto cleanup;
+        }
+        bound = K_TRUE;
     }
-    else
+    ret = K_SUCCESS;
+
+    while (!exit_requested())
     {
-        _test_ai_aenc_file_api(filename, ai_dev, ai_chn, aenc_chn, bit_width, sample_rate);
+        k_audio_frame frame;
+        k_audio_stream stream;
+        k_bool frame_acquired = K_FALSE;
+
+        if (!use_sysbind)
+        {
+            if (kd_mpi_ai_get_frame(ai_dev, 0, &frame,
+                                    AUDIO_FRAME_TIMEOUT_MS) != K_SUCCESS)
+            {
+                continue;
+            }
+            frame_acquired = K_TRUE;
+            if (kd_mpi_aenc_send_frame(enc_chn, &frame) != K_SUCCESS)
+            {
+                merge_result(&ret,
+                             kd_mpi_ai_release_frame(ai_dev, 0, &frame),
+                             "kd_mpi_ai_release_frame");
+                ret = K_FAILED;
+                break;
+            }
+        }
+
+        if (kd_mpi_aenc_get_stream(enc_chn, &stream,
+                                   AUDIO_FRAME_TIMEOUT_MS) == K_SUCCESS)
+        {
+            k_s32 queue_result = queue_audio_stream(file_writer, &stream);
+
+            if (queue_result != K_SUCCESS &&
+                queue_result != AUDIO_IO_STOPPED)
+            {
+                ret = K_FAILED;
+            }
+            merge_result(&ret, kd_mpi_aenc_release_stream(enc_chn, &stream),
+                         "kd_mpi_aenc_release_stream");
+            if (queue_result == AUDIO_IO_STOPPED)
+            {
+                break;
+            }
+        }
+        if (frame_acquired)
+        {
+            merge_result(&ret, kd_mpi_ai_release_frame(ai_dev, 0, &frame),
+                         "kd_mpi_ai_release_frame");
+        }
+        if (ret != K_SUCCESS)
+        {
+            break;
+        }
     }
-    // exit
 
-    kd_mpi_ai_disable_chn(ai_dev, ai_chn);
-    kd_mpi_ai_disable(ai_dev);
-    kd_mpi_aenc_destroy_chn(aenc_chn);
-
-    return K_SUCCESS;
+cleanup:
+    if (bound)
+    {
+        merge_result(&ret, kd_mpi_sys_unbind(&ai_channel, &aenc_channel),
+                     "AI to AENC unbind");
+    }
+    if (ai_started)
+    {
+        merge_result(&ret, stop_ai(ai_dev, 0), "stop AI");
+    }
+    if (encoder_created)
+    {
+        merge_result(&ret, kd_mpi_aenc_destroy_chn(enc_chn),
+                     "destroy AENC channel");
+    }
+    if (file_writer != NULL)
+    {
+        merge_result(&ret,
+                     audio_io_writer_finish(&file_writer, &output_size),
+                     "finish encoded writer");
+    }
+    if (output != NULL)
+    {
+        if (output_size == 0)
+        {
+            merge_result(&ret, audio_file_discard(&output, output_path),
+                         "discard empty encoded output");
+        }
+        else if (fclose(output) != 0)
+        {
+            printf("close encoded output failed\n");
+            ret = K_FAILED;
+        }
+    }
+    return ret;
 }
 
-k_s32 audio_sample_decode_ao(k_bool use_sysbind, k_u32 samplerate, k_audio_bit_width bit_width, int decChannel, k_payload_type type, const char *filename)
+k_s32 audio_sample_decode_ao(k_bool use_sysbind, k_u32 sample_rate,
+                             k_audio_bit_width bit_width, int dec_chn,
+                             k_payload_type type, const char *filename)
 {
-    int sample_rate = samplerate;
-    k_adec_chn adec_chn = decChannel;
-    k_audio_dev ao_dev = 0;
-    k_ao_chn ao_chn = 0;
+    k_aio_dev_attr ao_attr;
+    k_adec_chn_attr adec_attr;
+    k_mpp_chn adec_channel = make_mpp_channel(K_ID_ADEC, 0, dec_chn);
+    k_mpp_chn ao_channel = make_mpp_channel(K_ID_AO, 0, 0);
+    sample_file_reader reader;
+    audio_io_reader *file_reader = NULL;
+    sample_audio_buffer buffer;
+    k_audio_stream stream;
+    k_bool reader_open = K_FALSE;
+    k_bool decoder_created = K_FALSE;
+    k_bool ao_started = K_FALSE;
+    k_bool buffer_allocated = K_FALSE;
+    k_bool bound = K_FALSE;
+    k_s32 ret = K_FAILED;
+    k_u32 frame_size;
 
     if (bit_width != KD_AUDIO_BIT_WIDTH_16)
     {
         bit_width = KD_AUDIO_BIT_WIDTH_16;
-        printf("Force the sampling accuracy to be set to 16\n");
+        printf("decoder output forced to 16-bit\n");
     }
-
-    k_adec_chn_attr adec_chn_attr;
-    adec_chn_attr.type = type;
-    adec_chn_attr.buf_size = AUDIO_PERSEC_DIV_NUM;
-    adec_chn_attr.point_num_per_frame = sample_rate / adec_chn_attr.buf_size;
-
-    if (0 != kd_mpi_adec_create_chn(adec_chn, &adec_chn_attr))
+    if (open_looping_file(&reader, filename) != K_SUCCESS)
     {
-        printf("kd_mpi_adec_create_chn faild\n");
-        return -1;
+        goto cleanup;
     }
-
-    k_aio_dev_attr aio_dev_attr;
-    memset(&aio_dev_attr,0,sizeof(aio_dev_attr));
-    aio_dev_attr.audio_type = KD_AUDIO_OUTPUT_TYPE_I2S;
-    aio_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    aio_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    aio_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    aio_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = g_enable_audio_codec ? K_STANDARD_MODE : K_RIGHT_JUSTIFYING_MODE;
-    aio_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    aio_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = sample_rate / aio_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    aio_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-    if (K_SUCCESS != kd_mpi_ao_set_pub_attr(ao_dev, &aio_dev_attr))
+    reader_open = K_TRUE;
+    frame_size = sample_rate / AUDIO_FRAMES_PER_SECOND;
+    if (audio_io_reader_create(&file_reader, frame_size,
+                               AUDIO_FILE_RING_BLOCKS, read_looping_data,
+                               &reader, file_io_stop_requested, NULL) !=
+        K_SUCCESS)
     {
-        printf("kd_mpi_ao_set_pub_attr failed\n");
-        kd_mpi_adec_destroy_chn(adec_chn);
-        return K_FAILED;
+        printf("start encoded reader failed\n");
+        goto cleanup;
     }
 
-    kd_mpi_ao_enable(ao_dev);
-    kd_mpi_ao_enable_chn(ao_dev, ao_chn);
-    kd_mpi_adec_clr_chn_buf(adec_chn);
+    init_adec_attr(&adec_attr, type, sample_rate, 1);
+    if (kd_mpi_adec_create_chn(dec_chn, &adec_attr) != K_SUCCESS)
+    {
+        printf("kd_mpi_adec_create_chn failed\n");
+        goto cleanup;
+    }
+    decoder_created = K_TRUE;
 
-    g_adec_test_start = K_TRUE;
+    init_i2s_attr(&ao_attr, K_FALSE, sample_rate, bit_width, 1,
+                  KD_I2S_IN_MONO_RIGHT_CHANNEL,
+                  g_enable_audio_codec ? K_STANDARD_MODE : K_RIGHT_JUSTIFYING_MODE);
+    if (start_ao(0, 0, &ao_attr) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ao_started = K_TRUE;
+    kd_mpi_adec_clr_chn_buf(dec_chn);
+
     if (use_sysbind)
     {
-        _test_file_adec_ao_sysbind(filename, ao_dev, ao_chn, adec_chn, bit_width, sample_rate);
+        if (kd_mpi_sys_bind(&adec_channel, &ao_channel) != K_SUCCESS)
+        {
+            printf("ADEC to AO bind failed\n");
+            goto cleanup;
+        }
+        bound = K_TRUE;
     }
-    else
+
+    if (allocate_audio_buffer(&buffer, frame_size) != K_SUCCESS)
     {
-        _test_file_adec_ao_api(filename, ao_dev, ao_chn, adec_chn, bit_width, sample_rate);
+        goto cleanup;
     }
-    // exit
+    buffer_allocated = K_TRUE;
+    init_audio_stream(&stream, &buffer);
+    ret = K_SUCCESS;
 
-    kd_mpi_ao_disable_chn(ao_dev, ao_chn);
-    kd_mpi_ao_disable(ao_dev);
-    kd_mpi_adec_destroy_chn(adec_chn);
+    while (!exit_requested())
+    {
+        k_audio_frame frame;
+        k_u32 bytes_read = 0;
+        k_s32 read_result = audio_io_reader_pop(
+            file_reader, stream.stream, frame_size, &bytes_read);
 
-    return K_SUCCESS;
+        if (read_result == AUDIO_IO_STOPPED)
+        {
+            break;
+        }
+        if (read_result != K_SUCCESS || bytes_read != frame_size)
+        {
+            ret = K_FAILED;
+            break;
+        }
+        stream.len = frame_size;
+        stream.seq++;
+        k_s32 send_ret = send_adec_stream(dec_chn, &stream, use_sysbind, NULL);
+        if (send_ret == SAMPLE_OPERATION_STOPPED)
+        {
+            break;
+        }
+        if (send_ret != K_SUCCESS)
+        {
+            ret = K_FAILED;
+            break;
+        }
+        if (!use_sysbind &&
+            kd_mpi_adec_get_frame(dec_chn, &frame, AUDIO_FRAME_TIMEOUT_MS) == K_SUCCESS)
+        {
+            if (kd_mpi_ao_send_frame(0, 0, &frame,
+                                     AUDIO_FRAME_TIMEOUT_MS) != K_SUCCESS &&
+                !exit_requested())
+            {
+                ret = K_FAILED;
+            }
+            merge_result(&ret, kd_mpi_adec_release_frame(dec_chn, &frame),
+                         "kd_mpi_adec_release_frame");
+        }
+        if (ret != K_SUCCESS)
+        {
+            break;
+        }
+    }
+
+cleanup:
+    if (file_reader != NULL)
+    {
+        merge_result(&ret, audio_io_reader_destroy(&file_reader),
+                     "stop encoded reader");
+    }
+    if (bound)
+    {
+        merge_result(&ret, kd_mpi_sys_unbind(&adec_channel, &ao_channel),
+                     "ADEC to AO unbind");
+    }
+    if (ao_started)
+    {
+        merge_result(&ret, stop_ao(0, 0), "stop AO");
+    }
+    if (decoder_created)
+    {
+        merge_result(&ret, kd_mpi_adec_destroy_chn(dec_chn),
+                     "destroy ADEC channel");
+    }
+    if (buffer_allocated)
+    {
+        merge_result(&ret, release_audio_buffer(&buffer),
+                     "release decoder buffer");
+    }
+    if (reader_open)
+    {
+        merge_result(&ret, close_looping_file(&reader), "close encoded input");
+    }
+    return ret;
 }
 
-static char *g_load_filename = NULL;
-static void *sample_record_fn(void *arg)
+static void *overall_record_thread(void *arg)
 {
-    k_audio_dev ai_dev = 0;
-    k_ai_chn ai_chn = 0;
-    k_aenc_chn aenc_chn = 0;
-    kd_mpi_ai_enable(ai_dev);
-    _enable_audio3a(ai_dev, ai_chn, KD_AUDIO_BIT_WIDTH_16, 1);
-    kd_mpi_ai_enable_chn(ai_dev, ai_chn);
+    overall_thread_context *context = arg;
 
-    k_mpp_chn ai_mpp_chn;
-    k_mpp_chn aenc_mpp_chn;
-    ai_mpp_chn.mod_id = K_ID_AI;
-    ai_mpp_chn.dev_id = ai_dev;
-    ai_mpp_chn.chn_id = ai_chn;
-    aenc_mpp_chn.mod_id = K_ID_AENC;
-    aenc_mpp_chn.dev_id = 0;
-    aenc_mpp_chn.chn_id = aenc_chn;
-    kd_mpi_sys_bind(&ai_mpp_chn, &aenc_mpp_chn);
-
-    k_audio_stream audio_stream;
-
-    char filename[256] = {0};
-    sprintf(filename, "%s_rec", g_load_filename);
-    // const char *filename = "/sharefs/rec.g711a";
-    FILE *fp = fopen(filename, "wb");
-    if (NULL == fp)
+    while (!exit_requested() && !overall_failed(context))
     {
-        printf("open file:%s failed\n", filename);
-        return NULL;
-    }
+        k_audio_stream stream;
 
-    printf("=====start record thread,record file:%s\n", filename);
-    while (g_audio_overall_start)
-    {
-        if (0 != kd_mpi_aenc_get_stream(aenc_chn, &audio_stream, 100))
+        if (kd_mpi_aenc_get_stream(context->aenc_chn, &stream,
+                                   AUDIO_FRAME_TIMEOUT_MS) != K_SUCCESS)
         {
-            printf("kd_mpi_aenc_get_stream failed\n");
             continue;
         }
-        else
+        k_s32 queue_result = queue_audio_stream(context->file_writer, &stream);
+
+        if (queue_result != K_SUCCESS && queue_result != AUDIO_IO_STOPPED)
         {
-            k_u8 *raw_data = (k_u8 *)kd_mpi_sys_mmap(audio_stream.phys_addr, audio_stream.len);
-            fwrite(raw_data, 1, audio_stream.len, fp);
-            kd_mpi_sys_munmap(raw_data, audio_stream.len);
+            set_overall_failed(context);
         }
-
-        kd_mpi_aenc_release_stream(aenc_chn, &audio_stream);
+        if (kd_mpi_aenc_release_stream(context->aenc_chn, &stream) != K_SUCCESS)
+        {
+            set_overall_failed(context);
+        }
+        if (queue_result == AUDIO_IO_STOPPED)
+        {
+            break;
+        }
     }
-
-    fclose(fp);
-
-    kd_mpi_sys_unbind(&ai_mpp_chn, &aenc_mpp_chn);
     return NULL;
 }
 
-static void *sample_play_fn(void *arg)
+static void *overall_play_thread(void *arg)
 {
-    k_adec_chn adec_channel = 0;
-    k_audio_dev ao_dev = 0;
-    k_ao_chn ao_chn = 0;
+    overall_thread_context *context = arg;
+    k_audio_stream stream;
 
-    kd_mpi_ao_enable(ao_dev);
-    kd_mpi_ao_enable_chn(ao_dev, ao_chn);
-
-    k_mpp_chn ao_mpp_chn;
-    k_mpp_chn adec_mpp_chn;
-
-    adec_mpp_chn.mod_id = K_ID_ADEC;
-    adec_mpp_chn.dev_id = 0;
-    adec_mpp_chn.chn_id = adec_channel;
-    ao_mpp_chn.mod_id = K_ID_AO;
-    ao_mpp_chn.dev_id = 0;
-    ao_mpp_chn.chn_id = 0;
-
-    kd_mpi_sys_bind(&adec_mpp_chn, &ao_mpp_chn);
-
-    unsigned char *file_data = NULL;
-    k_audio_stream audio_stream;
-    k_s32 sample_rate = 44100;
-    int nSize = 0;
-    unsigned char *cur_data = NULL;
-    int nCur_data_index = 0;
-    int enc_frame_len = sample_rate * 2 * 2 / AUDIO_PERSEC_DIV_NUM / 2;
-    if (0 != _load_file(g_load_filename, &file_data, &nSize))
+    init_audio_stream(&stream, context->play_buffer);
+    while (!exit_requested() && !overall_failed(context))
     {
-        return NULL;
-    }
+        k_u32 bytes_read = 0;
+        k_s32 read_result = audio_io_reader_pop(
+            context->file_reader, stream.stream, context->frame_size,
+            &bytes_read);
 
-    k_vb_blk_handle handle;
-    if (K_SUCCESS != _get_audio_stream(&audio_stream, enc_frame_len, &handle))
-    {
-        return NULL;
-    }
-    printf("=====start play thread\n");
-    while (g_audio_overall_start)
-    {
-        if (nCur_data_index + enc_frame_len > nSize)
+        if (read_result == AUDIO_IO_STOPPED)
         {
-            printf("read file again\n");
-            nCur_data_index = 0;
+            break;
         }
-
-        cur_data = file_data + nCur_data_index;
-        memcpy(audio_stream.stream, cur_data, enc_frame_len);
-        audio_stream.seq++;
-        audio_stream.len = enc_frame_len;
-
-        if (0 != kd_mpi_adec_send_stream(adec_channel, &audio_stream, K_TRUE)) // must be block to prevent fast reading of data from file
+        if (read_result != K_SUCCESS || bytes_read != context->frame_size)
         {
-            printf("kd_mpi_adec_send_stream failed\n");
-            continue;
+            set_overall_failed(context);
+            break;
         }
-
-        nCur_data_index += enc_frame_len;
-        // printf("=====================kd_mpi_adec_send_stream:%d,size:%d\n",nCount++,audio_stream.len);
+        stream.len = context->frame_size;
+        stream.seq++;
+        k_s32 send_ret = send_adec_stream(context->adec_chn, &stream, K_TRUE,
+                                          &context->failed);
+        if (send_ret == SAMPLE_OPERATION_STOPPED)
+        {
+            break;
+        }
+        if (send_ret != K_SUCCESS)
+        {
+            set_overall_failed(context);
+            break;
+        }
     }
-
-    _release_audio_stream(handle);
-
-    kd_mpi_sys_unbind(&adec_mpp_chn, &ao_mpp_chn);
-
-    if (file_data != NULL)
-    {
-        free(file_data);
-        file_data = NULL;
-    }
-
     return NULL;
 }
 
-k_s32 audio_sample_ai_aenc_adec_ao(k_audio_dev ai_dev, k_ai_chn ai_chn, k_audio_dev ao_dev, k_ao_chn ao_chn, k_aenc_chn aenc_chn, k_adec_chn adec_chn, k_u32 samplerate, k_audio_bit_width bit_width, k_payload_type type, const char *load_filename, k_u32 enable_audio3a)
+k_s32 audio_sample_ai_aenc_adec_ao(k_audio_dev ai_dev, k_ai_chn ai_chn,
+                                   k_audio_dev ao_dev, k_ao_chn ao_chn,
+                                   k_aenc_chn aenc_chn, k_adec_chn adec_chn,
+                                   k_u32 sample_rate,
+                                   k_audio_bit_width bit_width,
+                                   k_payload_type type,
+                                   const char *load_filename,
+                                   const char *record_filename,
+                                   k_u32 enable_audio3a)
 {
-    pthread_t record_thread_handle;
-    pthread_t play_thread_handle;
-    k_u32 sample_rate = samplerate;
-    g_load_filename = (char *)load_filename;
-    if (0 != access(load_filename, 0))
-    {
-        printf("open file:%s failed\n", g_load_filename);
-        return K_FAILED;
-    }
+    k_aio_dev_attr ai_attr;
+    k_aio_dev_attr ao_attr;
+    k_aenc_chn_attr aenc_attr;
+    k_adec_chn_attr adec_attr;
+    k_mpp_chn ai_channel = make_mpp_channel(K_ID_AI, ai_dev, ai_chn);
+    k_mpp_chn aenc_channel = make_mpp_channel(K_ID_AENC, 0, aenc_chn);
+    k_mpp_chn adec_channel = make_mpp_channel(K_ID_ADEC, 0, adec_chn);
+    k_mpp_chn ao_channel = make_mpp_channel(K_ID_AO, ao_dev, ao_chn);
+    sample_file_reader reader;
+    sample_audio_buffer play_buffer;
+    overall_thread_context context;
+    pthread_t record_thread;
+    pthread_t play_thread;
+    audio_io_writer *file_writer = NULL;
+    audio_io_reader *file_reader = NULL;
+    FILE *record_file = NULL;
+    char record_path[AUDIO_FILE_PATH_SIZE];
+    k_bool reader_open = K_FALSE;
+    k_bool buffer_allocated = K_FALSE;
+    k_bool encoder_created = K_FALSE;
+    k_bool decoder_created = K_FALSE;
+    k_bool ai_started = K_FALSE;
+    k_bool ao_started = K_FALSE;
+    k_bool ai_bound = K_FALSE;
+    k_bool ao_bound = K_FALSE;
+    k_bool record_thread_created = K_FALSE;
+    k_bool play_thread_created = K_FALSE;
+    k_s32 ret = K_FAILED;
+    k_u32 frame_size;
+    k_u64 output_size = 0;
 
+    (void)bit_width;
     g_enable_audio_codec = K_TRUE;
     bit_width = KD_AUDIO_BIT_WIDTH_16;
-    k_i2s_work_mode i2s_work_mode = K_STANDARD_MODE;
-    printf("Force the sampling accuracy to be set to 16,use inner cocdec\n");
+    memset(&context, 0, sizeof(context));
 
-    k_aio_dev_attr ai_dev_attr;
-    ai_dev_attr.audio_type = KD_AUDIO_INPUT_TYPE_I2S;
-    ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    ai_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    ai_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    ai_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    ai_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    ai_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ai_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    ai_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-    if (K_SUCCESS != kd_mpi_ai_set_pub_attr(ai_dev, &ai_dev_attr))
+    if (open_looping_file(&reader, load_filename) != K_SUCCESS)
     {
-        printf("kd_mpi_ai_set_pub_attr failed\n");
-        return K_FAILED;
+        goto cleanup;
     }
-
-    k_aio_dev_attr ao_dev_attr;
-    memset(&ao_dev_attr,0,sizeof(ao_dev_attr));
-    ao_dev_attr.audio_type = KD_AUDIO_OUTPUT_TYPE_I2S;
-    ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    ao_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    ao_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    ao_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    ao_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ao_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-
-    if (K_SUCCESS != kd_mpi_ao_set_pub_attr(ao_dev, &ao_dev_attr))
+    reader_open = K_TRUE;
+    if (audio_file_open_unique(record_filename, "wb", &record_file,
+                               record_path, sizeof(record_path)) != K_SUCCESS)
     {
-        printf("kd_mpi_ao_set_pub_attr failed\n");
-        return K_FAILED;
+        printf("open output file %s failed\n", record_filename);
+        goto cleanup;
     }
+    printf("recording to %s\n", record_path);
 
-    k_aenc_chn_attr aenc_chn_attr;
-    aenc_chn_attr.type = type;
-    aenc_chn_attr.buf_size = AUDIO_PERSEC_DIV_NUM;
-    aenc_chn_attr.point_num_per_frame = sample_rate / aenc_chn_attr.buf_size;
-
-    if (0 != kd_mpi_aenc_create_chn(aenc_chn, &aenc_chn_attr))
+    frame_size = sample_rate / AUDIO_FRAMES_PER_SECOND;
+    if (allocate_audio_buffer(&play_buffer, frame_size) != K_SUCCESS)
     {
-        printf("kd_mpi_aenc_create_chn faild\n");
-        return K_FAILED;
+        goto cleanup;
     }
+    buffer_allocated = K_TRUE;
 
-    k_adec_chn_attr adec_chn_attr;
-    adec_chn_attr.type = type;
-    adec_chn_attr.buf_size = AUDIO_PERSEC_DIV_NUM;
-    adec_chn_attr.point_num_per_frame = sample_rate / adec_chn_attr.buf_size;
-
-    if (0 != kd_mpi_adec_create_chn(adec_chn, &adec_chn_attr))
+    context.aenc_chn = aenc_chn;
+    context.adec_chn = adec_chn;
+    context.play_buffer = &play_buffer;
+    context.frame_size = frame_size;
+    if (audio_io_reader_create(&file_reader, frame_size,
+                               AUDIO_FILE_RING_BLOCKS, read_looping_data,
+                               &reader, overall_io_stop_requested,
+                               &context) != K_SUCCESS)
     {
-        printf("kd_mpi_adec_create_chn faild\n");
-        return K_FAILED;
+        printf("start duplex encoded reader failed\n");
+        goto cleanup;
     }
+    context.file_reader = file_reader;
+    if (audio_io_writer_create(&file_writer, frame_size * 2U,
+                               AUDIO_FILE_RING_BLOCKS, write_file_data,
+                               record_file, overall_io_stop_requested,
+                               &context) != K_SUCCESS)
+    {
+        printf("start duplex encoded writer failed\n");
+        goto cleanup;
+    }
+    context.file_writer = file_writer;
 
-    g_audio_overall_start = K_TRUE;
-    pthread_create(&play_thread_handle, NULL, sample_play_fn, NULL);
-    sleep(1);
-    pthread_create(&record_thread_handle, NULL, sample_record_fn, NULL);
+    init_aenc_attr(&aenc_attr, type, sample_rate, 1);
+    init_adec_attr(&adec_attr, type, sample_rate, 1);
+    if (kd_mpi_aenc_create_chn(aenc_chn, &aenc_attr) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    encoder_created = K_TRUE;
+    if (kd_mpi_adec_create_chn(adec_chn, &adec_attr) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    decoder_created = K_TRUE;
 
-    pthread_join(record_thread_handle, NULL);
-    pthread_join(play_thread_handle, NULL);
+    init_codec_input_attr(&ai_attr, ai_dev, sample_rate, bit_width);
+    init_i2s_attr(&ao_attr, K_FALSE, sample_rate, bit_width, 1,
+                  KD_I2S_IN_MONO_RIGHT_CHANNEL, K_STANDARD_MODE);
+    if (start_ai(ai_dev, ai_chn, &ai_attr, enable_audio3a) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ai_started = K_TRUE;
+    if (start_ao(ao_dev, ao_chn, &ao_attr) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ao_started = K_TRUE;
+    if (kd_mpi_sys_bind(&ai_channel, &aenc_channel) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ai_bound = K_TRUE;
+    if (kd_mpi_sys_bind(&adec_channel, &ao_channel) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ao_bound = K_TRUE;
 
-    kd_mpi_ai_disable_chn(ai_dev, ai_chn);
-    kd_mpi_ai_disable(ai_dev);
-    kd_mpi_ao_disable_chn(ao_dev, ao_chn);
-    kd_mpi_ao_disable(ao_dev);
-    kd_mpi_aenc_destroy_chn(aenc_chn);
-    kd_mpi_adec_destroy_chn(adec_chn);
+    if (pthread_create(&play_thread, NULL, overall_play_thread, &context) != 0)
+    {
+        set_overall_failed(&context);
+        goto join_threads;
+    }
+    play_thread_created = K_TRUE;
+    if (pthread_create(&record_thread, NULL, overall_record_thread, &context) != 0)
+    {
+        set_overall_failed(&context);
+        goto join_threads;
+    }
+    record_thread_created = K_TRUE;
 
-    return K_SUCCESS;
+join_threads:
+    if (record_thread_created && pthread_join(record_thread, NULL) != 0)
+    {
+        set_overall_failed(&context);
+    }
+    if (play_thread_created && pthread_join(play_thread, NULL) != 0)
+    {
+        set_overall_failed(&context);
+    }
+    ret = overall_failed(&context) ? K_FAILED : K_SUCCESS;
+
+cleanup:
+    if (file_reader != NULL)
+    {
+        merge_result(&ret, audio_io_reader_destroy(&file_reader),
+                     "stop duplex encoded reader");
+        context.file_reader = NULL;
+    }
+    if (file_writer != NULL)
+    {
+        merge_result(&ret,
+                     audio_io_writer_finish(&file_writer, &output_size),
+                     "finish duplex encoded writer");
+        context.file_writer = NULL;
+    }
+    if (ao_bound)
+    {
+        merge_result(&ret, kd_mpi_sys_unbind(&adec_channel, &ao_channel),
+                     "ADEC to AO unbind");
+    }
+    if (ai_bound)
+    {
+        merge_result(&ret, kd_mpi_sys_unbind(&ai_channel, &aenc_channel),
+                     "AI to AENC unbind");
+    }
+    if (ao_started)
+    {
+        merge_result(&ret, stop_ao(ao_dev, ao_chn), "stop AO");
+    }
+    if (ai_started)
+    {
+        merge_result(&ret, stop_ai(ai_dev, ai_chn), "stop AI");
+    }
+    if (decoder_created)
+    {
+        merge_result(&ret, kd_mpi_adec_destroy_chn(adec_chn),
+                     "destroy ADEC channel");
+    }
+    if (encoder_created)
+    {
+        merge_result(&ret, kd_mpi_aenc_destroy_chn(aenc_chn),
+                     "destroy AENC channel");
+    }
+    if (buffer_allocated)
+    {
+        merge_result(&ret, release_audio_buffer(&play_buffer),
+                     "release decoder buffer");
+    }
+    if (record_file != NULL)
+    {
+        if (output_size == 0)
+        {
+            merge_result(&ret, audio_file_discard(&record_file, record_path),
+                         "discard empty encoded output");
+        }
+        else if (fclose(record_file) != 0)
+        {
+            printf("close encoded output failed\n");
+            ret = K_FAILED;
+        }
+    }
+    if (reader_open)
+    {
+        merge_result(&ret, close_looping_file(&reader), "close encoded input");
+    }
+    return ret;
 }
 
-k_s32 audio_sample_ai_aenc_adec_ao_2(k_audio_dev ai_dev, k_ai_chn ai_chn, k_audio_dev ao_dev, k_ao_chn ao_chn, k_aenc_chn aenc_chn, k_adec_chn adec_chn, k_u32 samplerate, k_audio_bit_width bit_width, k_payload_type type, k_u32 enable_audio3a)
+static k_s32 run_codec_loopback(k_audio_dev ai_dev, k_ai_chn ai_chn,
+                                k_audio_dev ao_dev, k_ao_chn ao_chn,
+                                k_aenc_chn aenc_chn, k_adec_chn adec_chn,
+                                k_u32 sample_rate, k_payload_type type,
+                                k_u32 enable_audio3a)
 {
+    k_aio_dev_attr ai_attr;
+    k_aio_dev_attr ao_attr;
+    k_aenc_chn_attr aenc_attr;
+    k_adec_chn_attr adec_attr;
+    k_mpp_chn ai_channel = make_mpp_channel(K_ID_AI, ai_dev, ai_chn);
+    k_mpp_chn aenc_channel = make_mpp_channel(K_ID_AENC, 0, aenc_chn);
+    k_mpp_chn adec_channel = make_mpp_channel(K_ID_ADEC, 0, adec_chn);
+    k_mpp_chn ao_channel = make_mpp_channel(K_ID_AO, ao_dev, ao_chn);
+    k_bool encoder_created = K_FALSE;
+    k_bool decoder_created = K_FALSE;
+    k_bool ai_started = K_FALSE;
+    k_bool ao_started = K_FALSE;
+    k_bool ai_bound = K_FALSE;
+    k_bool ao_bound = K_FALSE;
+    k_s32 ret = K_FAILED;
+
     g_enable_audio_codec = K_TRUE;
-    bit_width = KD_AUDIO_BIT_WIDTH_16;
-    k_u32 sample_rate = samplerate;
-    k_i2s_work_mode i2s_work_mode = K_STANDARD_MODE;
-    printf("Force the sampling accuracy to be set to 16,use inner cocdec\n");
-
-    k_aio_dev_attr ai_dev_attr;
-    ai_dev_attr.audio_type = KD_AUDIO_INPUT_TYPE_I2S;
-    ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    ai_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    ai_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    ai_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    ai_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    ai_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ai_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    ai_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-    if (K_SUCCESS != kd_mpi_ai_set_pub_attr(ai_dev, &ai_dev_attr))
+    init_aenc_attr(&aenc_attr, type, sample_rate, 1);
+    init_adec_attr(&adec_attr, type, sample_rate, 1);
+    if (kd_mpi_aenc_create_chn(aenc_chn, &aenc_attr) != K_SUCCESS)
     {
-        printf("kd_mpi_ai_set_pub_attr failed\n");
-        return K_FAILED;
+        goto cleanup;
     }
-
-    k_aio_dev_attr ao_dev_attr;
-    memset(&ao_dev_attr,0,sizeof(ao_dev_attr));
-    ao_dev_attr.audio_type = KD_AUDIO_OUTPUT_TYPE_I2S;
-    ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    ao_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    ao_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    ao_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    ao_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ao_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-
-    if (K_SUCCESS != kd_mpi_ao_set_pub_attr(ao_dev, &ao_dev_attr))
+    encoder_created = K_TRUE;
+    if (kd_mpi_adec_create_chn(adec_chn, &adec_attr) != K_SUCCESS)
     {
-        printf("kd_mpi_ao_set_pub_attr failed\n");
-        return K_FAILED;
+        goto cleanup;
     }
+    decoder_created = K_TRUE;
 
-    k_aenc_chn_attr aenc_chn_attr;
-    aenc_chn_attr.type = type;
-    aenc_chn_attr.buf_size = AUDIO_PERSEC_DIV_NUM;
-    aenc_chn_attr.point_num_per_frame = sample_rate / aenc_chn_attr.buf_size;
-
-    if (0 != kd_mpi_aenc_create_chn(aenc_chn, &aenc_chn_attr))
+    init_codec_input_attr(&ai_attr, ai_dev, sample_rate,
+                          KD_AUDIO_BIT_WIDTH_16);
+    init_i2s_attr(&ao_attr, K_FALSE, sample_rate, KD_AUDIO_BIT_WIDTH_16, 1,
+                  KD_I2S_IN_MONO_RIGHT_CHANNEL, K_STANDARD_MODE);
+    if (start_ai(ai_dev, ai_chn, &ai_attr, enable_audio3a) != K_SUCCESS)
     {
-        printf("kd_mpi_aenc_create_chn faild\n");
-        return K_FAILED;
+        goto cleanup;
     }
-
-    k_adec_chn_attr adec_chn_attr;
-    adec_chn_attr.type = type;
-    adec_chn_attr.buf_size = AUDIO_PERSEC_DIV_NUM;
-    adec_chn_attr.point_num_per_frame = sample_rate / adec_chn_attr.buf_size;
-
-    if (0 != kd_mpi_adec_create_chn(adec_chn, &adec_chn_attr))
+    ai_started = K_TRUE;
+    if (start_ao(ao_dev, ao_chn, &ao_attr) != K_SUCCESS)
     {
-        printf("kd_mpi_adec_create_chn faild\n");
-        return K_FAILED;
+        goto cleanup;
     }
-
-    kd_mpi_ai_enable(ai_dev);
-    kd_mpi_ai_enable_chn(ai_dev, ai_chn);
-
-    k_mpp_chn ai_mpp_chn;
-    k_mpp_chn aenc_mpp_chn;
-
-    ai_mpp_chn.mod_id = K_ID_AI;
-    ai_mpp_chn.dev_id = ai_dev;
-    ai_mpp_chn.chn_id = ai_chn;
-    aenc_mpp_chn.mod_id = K_ID_AENC;
-    aenc_mpp_chn.dev_id = 0;
-    aenc_mpp_chn.chn_id = aenc_chn;
-
-    kd_mpi_sys_bind(&ai_mpp_chn, &aenc_mpp_chn);
-
-    kd_mpi_ao_enable(ao_dev);
-    kd_mpi_ao_enable_chn(ao_dev, ao_chn);
-
-    k_mpp_chn ao_mpp_chn;
-    k_mpp_chn adec_mpp_chn;
-
-    adec_mpp_chn.mod_id = K_ID_ADEC;
-    adec_mpp_chn.dev_id = 0;
-    adec_mpp_chn.chn_id = adec_chn;
-    ao_mpp_chn.mod_id = K_ID_AO;
-    ao_mpp_chn.dev_id = ao_dev;
-    ao_mpp_chn.chn_id = ao_chn;
-
-    kd_mpi_sys_bind(&adec_mpp_chn, &ao_mpp_chn);
-
-    g_audio_overall_start = K_TRUE;
-
-    k_audio_stream audio_stream;
-    while (g_audio_overall_start)
+    ao_started = K_TRUE;
+    if (kd_mpi_sys_bind(&ai_channel, &aenc_channel) != K_SUCCESS)
     {
-        if (K_SUCCESS != kd_mpi_aenc_get_stream(aenc_chn, &audio_stream, 100))
+        goto cleanup;
+    }
+    ai_bound = K_TRUE;
+    if (kd_mpi_sys_bind(&adec_channel, &ao_channel) != K_SUCCESS)
+    {
+        goto cleanup;
+    }
+    ao_bound = K_TRUE;
+    ret = K_SUCCESS;
+
+    while (!exit_requested())
+    {
+        k_audio_stream stream;
+
+        if (kd_mpi_aenc_get_stream(aenc_chn, &stream,
+                                   AUDIO_FRAME_TIMEOUT_MS) != K_SUCCESS)
         {
-            printf("========kd_mpi_aenc_get_stream failed\n");
             continue;
         }
-
-        _test_aenc_timestamp(sample_rate, 2, bit_width, audio_stream.time_stamp, audio_stream.len);
-
-        if (K_SUCCESS != kd_mpi_adec_send_stream(adec_chn, &audio_stream, K_FALSE))
+        k_s32 send_ret = send_adec_stream(adec_chn, &stream, K_FALSE, NULL);
+        if (send_ret == SAMPLE_OPERATION_STOPPED)
         {
-
-            printf("========kd_mpi_adec_send_stream failed\n");
+            merge_result(&ret,
+                         kd_mpi_aenc_release_stream(aenc_chn, &stream),
+                         "kd_mpi_aenc_release_stream");
+            break;
         }
-
-        kd_mpi_aenc_release_stream(aenc_chn, &audio_stream);
+        if (send_ret != K_SUCCESS)
+        {
+            ret = K_FAILED;
+        }
+        merge_result(&ret, kd_mpi_aenc_release_stream(aenc_chn, &stream),
+                     "kd_mpi_aenc_release_stream");
+        if (ret != K_SUCCESS)
+        {
+            break;
+        }
     }
 
-    kd_mpi_sys_unbind(&ai_mpp_chn, &aenc_mpp_chn);
-    kd_mpi_sys_unbind(&adec_mpp_chn, &ao_mpp_chn);
+cleanup:
+    if (ao_bound)
+    {
+        merge_result(&ret, kd_mpi_sys_unbind(&adec_channel, &ao_channel),
+                     "ADEC to AO unbind");
+    }
+    if (ai_bound)
+    {
+        merge_result(&ret, kd_mpi_sys_unbind(&ai_channel, &aenc_channel),
+                     "AI to AENC unbind");
+    }
+    if (ao_started)
+    {
+        merge_result(&ret, stop_ao(ao_dev, ao_chn), "stop AO");
+    }
+    if (ai_started)
+    {
+        merge_result(&ret, stop_ai(ai_dev, ai_chn), "stop AI");
+    }
+    if (decoder_created)
+    {
+        merge_result(&ret, kd_mpi_adec_destroy_chn(adec_chn),
+                     "destroy ADEC channel");
+    }
+    if (encoder_created)
+    {
+        merge_result(&ret, kd_mpi_aenc_destroy_chn(aenc_chn),
+                     "destroy AENC channel");
+    }
+    return ret;
+}
 
-    kd_mpi_ai_disable_chn(ai_dev, ai_chn);
-    kd_mpi_ai_disable(ai_dev);
-    kd_mpi_ao_disable_chn(ao_dev, ao_chn);
-    kd_mpi_ao_disable(ao_dev);
-    kd_mpi_aenc_destroy_chn(aenc_chn);
-    kd_mpi_adec_destroy_chn(adec_chn);
+k_s32 audio_sample_ai_aenc_adec_ao_2(k_audio_dev ai_dev, k_ai_chn ai_chn,
+                                     k_audio_dev ao_dev, k_ao_chn ao_chn,
+                                     k_aenc_chn aenc_chn, k_adec_chn adec_chn,
+                                     k_u32 sample_rate,
+                                     k_audio_bit_width bit_width,
+                                     k_payload_type type,
+                                     k_u32 enable_audio3a)
+{
+    (void)bit_width;
+    return run_codec_loopback(ai_dev, ai_chn, ao_dev, ao_chn, aenc_chn,
+                              adec_chn, sample_rate, type, enable_audio3a);
+}
 
-    return K_SUCCESS;
+k_s32 audio_sample_ai_aenc_adec_ao_opus(k_audio_dev ai_dev, k_ai_chn ai_chn,
+                                        k_audio_dev ao_dev, k_ao_chn ao_chn,
+                                        k_aenc_chn aenc_chn,
+                                        k_adec_chn adec_chn,
+                                        k_u32 sample_rate,
+                                        k_audio_bit_width bit_width,
+                                        k_payload_type type,
+                                        k_u32 enable_audio3a)
+{
+    (void)sample_rate;
+    (void)bit_width;
+    return run_codec_loopback(ai_dev, ai_chn, ao_dev, ao_chn, aenc_chn,
+                              adec_chn, 8000, type, enable_audio3a);
 }
 
 static k_s32 g_acodec_fd = -1;
 static pthread_mutex_t g_acodec_mutex = PTHREAD_MUTEX_INITIALIZER;
-static k_s32 acodec_check_open(void)
+
+static k_s32 acodec_open(void)
 {
     pthread_mutex_lock(&g_acodec_mutex);
     if (g_acodec_fd < 0)
     {
         g_acodec_fd = open("/dev/acodec_device", O_RDWR);
-        if (g_acodec_fd < 0)
-        {
-            perror("open err\n");
-            pthread_mutex_unlock(&g_acodec_mutex);
-            return -1;
-        }
     }
     pthread_mutex_unlock(&g_acodec_mutex);
-    return 0;
+
+    if (g_acodec_fd < 0)
+    {
+        perror("open /dev/acodec_device");
+        return K_FAILED;
+    }
+    return K_SUCCESS;
 }
 
-static k_s32 _get_func_key()
+static k_bool wait_for_continue(void)
 {
-    printf("please input 'c' key to continue,'q' key to exit\n");
-    int c;
-    while ((c = getchar()) != EOF)
+    int key;
+
+    printf("input c to continue or q to return\n");
+    while (!exit_requested() && (key = getchar()) != EOF)
     {
-        if ('q' == c)
+        if (key == 'c')
         {
-            return -1;
+            return K_TRUE;
         }
-        else if ('c' == c)
+        if (key == 'q')
         {
-            return 0;
+            return K_FALSE;
         }
     }
-    return 0;
+    return K_FALSE;
 }
 
-static float g_dac_hpout_gain = 0;
-static k_s32 _test_dac_hpout()
+static void test_adc_mic_gain(void)
 {
-    float gain_value = -39;
-    k_s32 key_value;
+    static const k_u32 gains[] = {0, 6, 20, 30};
+    size_t index = 0;
 
-    for (;;)
+    do
     {
-        gain_value += 1.5;
-        if (gain_value > 6)
-        {
-            gain_value = -39;
-        }
-        g_dac_hpout_gain = gain_value;
-        ioctl(g_acodec_fd, k_acodec_set_gain_hpoutl, &gain_value);
-        ioctl(g_acodec_fd, k_acodec_set_gain_hpoutr, &gain_value);
-        printf("cur dac gain value:%.2f db\n", gain_value);
-
-        key_value = _get_func_key();
-        if (0 == key_value)
-        {
-            continue;
-        }
-        else
-        {
-            return 0;
-        }
-    }
-    return 0;
+        k_u32 gain = gains[index++ % (sizeof(gains) / sizeof(gains[0]))];
+        ioctl(g_acodec_fd, k_acodec_set_gain_micl, &gain);
+        ioctl(g_acodec_fd, k_acodec_set_gain_micr, &gain);
+        printf("ADC microphone gain: %u dB\n", gain);
+    } while (wait_for_continue());
 }
 
-static k_s32 _test_dac_volume()
+static void test_adc_volume(void)
 {
-    k_s32 key_value;
-    float volume_value = -120;
-    for (;;)
+    float volume = -97.0f;
+
+    do
     {
-        volume_value += 0.5;
-        if (volume_value > 7)
+        volume += 0.5f;
+        if (volume > 30.0f)
         {
-            volume_value = -120;
+            volume = -96.5f;
         }
-        ioctl(g_acodec_fd, k_acodec_set_dacl_volume, &volume_value);
-        ioctl(g_acodec_fd, k_acodec_set_dacr_volume, &volume_value);
-        printf("cur dac volume  value:%.2f db\n", volume_value);
-
-        key_value = _get_func_key();
-        if (0 == key_value)
-        {
-            continue;
-        }
-        else
-        {
-            return 0;
-        }
-    }
-
-    return 0;
+        ioctl(g_acodec_fd, k_acodec_set_adcl_volume, &volume);
+        ioctl(g_acodec_fd, k_acodec_set_adcr_volume, &volume);
+        printf("ADC volume: %.2f dB\n", volume);
+    } while (wait_for_continue());
 }
 
-static k_s32 _test_adc_mic()
+static void test_alc_gain(void)
 {
-    k_s32 key_value;
-    k_u32 gain_value[4] = {0, 6, 20, 30};
-    int cur_index = 0;
-    for (;;)
+    float gain = -18.0f;
+
+    do
     {
-        if (cur_index >= 4)
+        gain += 1.5f;
+        if (gain > 28.5f)
         {
-            cur_index = 0;
+            gain = -16.5f;
         }
-
-        ioctl(g_acodec_fd, k_acodec_set_gain_micl, &gain_value[cur_index]);
-        ioctl(g_acodec_fd, k_acodec_set_gain_micr, &gain_value[cur_index]);
-        printf("cur adc mic gain value:%d db\n", gain_value[cur_index]);
-
-        key_value = _get_func_key();
-        if (0 == key_value)
-        {
-            cur_index++;
-            continue;
-        }
-        else
-        {
-            return 0;
-        }
-    }
-    return 0;
+        ioctl(g_acodec_fd, k_acodec_set_alc_gain_micl, &gain);
+        ioctl(g_acodec_fd, k_acodec_set_alc_gain_micr, &gain);
+        printf("ALC microphone gain: %.2f dB\n", gain);
+    } while (wait_for_continue());
 }
 
-static k_s32 _test_alc_mic()
+static void test_dac_gain(void)
 {
-    k_s32 key_value;
-    float gain_value = -18;
-    for (;;)
+    float gain = -39.0f;
+
+    do
     {
-        gain_value += 1.5;
-        if (gain_value > 28.5)
+        gain += 1.5f;
+        if (gain > 6.0f)
         {
-            gain_value = -18;
+            gain = -37.5f;
         }
-        printf("k_acodec_set_alc_gain_micr:%.2f db\n", gain_value);
-        ioctl(g_acodec_fd, k_acodec_set_alc_gain_micr, &gain_value);
-
-        printf("k_acodec_set_alc_gain_micl:%.2f db\n", gain_value);
-        ioctl(g_acodec_fd, k_acodec_set_alc_gain_micl, &gain_value);
-
-        printf("cur alc mic gain value:%.2f db\n", gain_value);
-
-        key_value = _get_func_key();
-        if (0 == key_value)
-        {
-            continue;
-        }
-        else
-        {
-            return 0;
-        }
-    }
-
-    return 0;
+        ioctl(g_acodec_fd, k_acodec_set_gain_hpoutl, &gain);
+        ioctl(g_acodec_fd, k_acodec_set_gain_hpoutr, &gain);
+        printf("DAC headphone gain: %.2f dB\n", gain);
+    } while (wait_for_continue());
 }
 
-static k_s32 _test_adc_volume()
+static void test_dac_volume(void)
 {
-    k_s32 key_value;
-    float volume_value = -97;
-    for (;;)
+    float volume = -120.0f;
+
+    do
     {
-        volume_value += 0.5;
-        if (volume_value > 30)
+        volume += 0.5f;
+        if (volume > 7.0f)
         {
-            volume_value = -97;
+            volume = -119.5f;
         }
-        ioctl(g_acodec_fd, k_acodec_set_adcl_volume, &volume_value);
-        ioctl(g_acodec_fd, k_acodec_set_adcr_volume, &volume_value);
-        printf("cur adc volume  value:%.2f db\n", volume_value);
-
-        key_value = _get_func_key();
-        if (0 == key_value)
-        {
-            continue;
-        }
-        else
-        {
-            return 0;
-        }
-    }
-
-    return 0;
+        ioctl(g_acodec_fd, k_acodec_set_dacl_volume, &volume);
+        ioctl(g_acodec_fd, k_acodec_set_dacr_volume, &volume);
+        printf("DAC volume: %.2f dB\n", volume);
+    } while (wait_for_continue());
 }
 
-static k_s32 _test_adc_mic_mute()
+static void test_adc_mute(void)
 {
     k_bool mute = K_TRUE;
-    k_s32 key_value;
-    for (;;)
+
+    do
     {
         ioctl(g_acodec_fd, k_acodec_set_micl_mute, &mute);
         ioctl(g_acodec_fd, k_acodec_set_micr_mute, &mute);
-        printf("cur adc mic mute value:%d\n", mute);
-
-        key_value = _get_func_key();
-        if (0 == key_value)
-        {
-            mute = (k_bool)!mute;
-            continue;
-        }
-        else
-        {
-            return 0;
-        }
-    }
-    return 0;
+        printf("ADC mute: %d\n", mute);
+        mute = !mute;
+    } while (wait_for_continue());
 }
 
-static k_s32 _test_dac_hpout_mute()
+static void test_dac_mute(void)
 {
     k_bool mute = K_TRUE;
-    k_s32 key_value;
-    for (;;)
+
+    do
     {
         ioctl(g_acodec_fd, k_acodec_set_dacl_mute, &mute);
         ioctl(g_acodec_fd, k_acodec_set_dacr_mute, &mute);
-        printf("cur dac hpout mute value:%d\n", mute);
-
-        key_value = _get_func_key();
-        if (0 == key_value)
-        {
-            mute = (k_bool)!mute;
-            continue;
-        }
-        else
-        {
-            return 0;
-        }
-    }
-    return 0;
+        printf("DAC mute: %d\n", mute);
+        mute = !mute;
+    } while (wait_for_continue());
 }
 
-static k_s32 _test_get_current_db_value()
+static void print_acodec_values(void)
 {
-    k_u32 adcl_gain_value;
-    k_u32 adcr_gain_value;
-    float adcl_volume_value;
-    float adcr_volume_value;
-    float alcl_gain_value;
-    float alcr_gain_value;
-    float dacl_volume_value;
-    float dacr_volume_value;
-    float dacl_gain_value;
-    float dacr_gain_value;
+    k_u32 mic_left;
+    k_u32 mic_right;
+    float adc_left;
+    float adc_right;
+    float alc_left;
+    float alc_right;
+    float dac_left;
+    float dac_right;
+    float hp_left;
+    float hp_right;
 
-    ioctl(g_acodec_fd, k_acodec_get_gain_micl, &adcl_gain_value);
-    ioctl(g_acodec_fd, k_acodec_get_gain_micr, &adcr_gain_value);
+    ioctl(g_acodec_fd, k_acodec_get_gain_micl, &mic_left);
+    ioctl(g_acodec_fd, k_acodec_get_gain_micr, &mic_right);
+    ioctl(g_acodec_fd, k_acodec_get_adcl_volume, &adc_left);
+    ioctl(g_acodec_fd, k_acodec_get_adcr_volume, &adc_right);
+    ioctl(g_acodec_fd, k_acodec_get_alc_gain_micl, &alc_left);
+    ioctl(g_acodec_fd, k_acodec_get_alc_gain_micr, &alc_right);
+    ioctl(g_acodec_fd, k_acodec_get_dacl_volume, &dac_left);
+    ioctl(g_acodec_fd, k_acodec_get_dacr_volume, &dac_right);
+    ioctl(g_acodec_fd, k_acodec_get_gain_hpoutl, &hp_left);
+    ioctl(g_acodec_fd, k_acodec_get_gain_hpoutr, &hp_right);
 
-    ioctl(g_acodec_fd, k_acodec_get_adcl_volume, &adcl_volume_value);
-    ioctl(g_acodec_fd, k_acodec_get_adcr_volume, &adcr_volume_value);
-
-    ioctl(g_acodec_fd, k_acodec_get_alc_gain_micl, &alcl_gain_value);
-    ioctl(g_acodec_fd, k_acodec_get_alc_gain_micr, &alcr_gain_value);
-
-    ioctl(g_acodec_fd, k_acodec_get_dacl_volume, &dacl_volume_value);
-    ioctl(g_acodec_fd, k_acodec_get_dacr_volume, &dacr_volume_value);
-
-    ioctl(g_acodec_fd, k_acodec_get_gain_hpoutl, &dacl_gain_value);
-    ioctl(g_acodec_fd, k_acodec_get_gain_hpoutr, &dacr_gain_value);
-
-    printf("adcl_gain(%d),adcr_gain(%d),adcl_volume(%.1f),adcr_volume(%.1f),alcl_gain(%.1f),alcr_gain(%.1f),dacl_volume(%.1f),dacr_volume(%.1f),dacl_gain(%.1f),dacr_gain(%.1f)", \
-    adcl_gain_value,adcr_gain_value,adcl_volume_value,adcr_volume_value,\
-    alcl_gain_value,alcr_gain_value,dacl_volume_value,dacr_volume_value,\
-    dacl_gain_value,dacr_gain_value);
-    return 0;
+    printf("mic=(%u,%u) adc=(%.1f,%.1f) alc=(%.1f,%.1f) "
+           "dac=(%.1f,%.1f) headphone=(%.1f,%.1f)\n",
+           mic_left, mic_right, adc_left, adc_right, alc_left, alc_right,
+           dac_left, dac_right, hp_left, hp_right);
 }
 
-static k_s32 _test_acodec_reset()
+static void show_acodec_menu(void)
 {
-    return ioctl(g_acodec_fd, k_acodec_reset, NULL);
-
+    printf("\n0: ADC microphone gain\n"
+           "1: ADC volume\n"
+           "2: ALC microphone gain\n"
+           "3: DAC headphone gain\n"
+           "4: DAC volume\n"
+           "5: ADC mute\n"
+           "6: DAC mute\n"
+           "7: show current values\n"
+           "8: reset codec\n"
+           "q: exit\n");
 }
 
-static void _show_acodec_func()
+k_s32 audio_sample_acodec(void)
 {
-    printf("\r\n===================\n");
-    printf("please input:\n");
-    printf("0:adc mic gain\n");
-    printf("1:adc volume\n");
-    printf("2:alc mic gain\n");
-    printf("3:dac hpout gain\n");
-    printf("4:dac volume\n");
-    printf("5:adc mute \n");
-    printf("6:dac mute\n");
-    printf("7:get current db values\n");
-    printf("8:reset \n");
-    printf("q:exit\n");
-}
+    int key;
 
-static k_s32 _get_menu_key(int *key)
-{
-    _show_acodec_func();
-    int c;
-    while ((c = getchar()) != EOF)
+    if (acodec_open() != K_SUCCESS)
     {
-        if ('q' == c)
-        {
-            return -1;
-        }
-        else
-        {
-            *key = c;
-            return 0;
-        }
+        return K_FAILED;
     }
-    return -1;
-}
 
-static void _acodec_test_func()
-{
-
-    int value;
-    while (1)
+    while (!exit_requested())
     {
-        _show_acodec_func();
-        if (-1 == _get_menu_key(&value))
+        show_acodec_menu();
+        key = getchar();
+        if (key == EOF || key == 'q')
         {
             break;
         }
-
-        if (value >= '0' && value <= '8')
+        switch (key)
         {
-            if ('0' == value)
-            {
-                _test_adc_mic();
-            }
-            else if ('1' == value)
-            {
-                _test_adc_volume();
-            }
-            else if ('2' == value)
-            {
-                _test_alc_mic();
-            }
-            else if ('3' == value)
-            {
-                _test_dac_hpout();
-            }
-            else if ('4' == value)
-            {
-                _test_dac_volume();
-            }
-            else if ('5' == value)
-            {
-                _test_adc_mic_mute();
-            }
-            else if ('6' == value)
-            {
-                _test_dac_hpout_mute();
-            }
-            else if ('7' == value)
-            {
-                _test_get_current_db_value();
-            }
-            else if ('8' == value)
-            {
-                _test_acodec_reset();
-            }
-        }
-        else
-        {
-            printf("input error:%c\n", value);
-            continue;
+        case '0':
+            test_adc_mic_gain();
+            break;
+        case '1':
+            test_adc_volume();
+            break;
+        case '2':
+            test_alc_gain();
+            break;
+        case '3':
+            test_dac_gain();
+            break;
+        case '4':
+            test_dac_volume();
+            break;
+        case '5':
+            test_adc_mute();
+            break;
+        case '6':
+            test_dac_mute();
+            break;
+        case '7':
+            print_acodec_values();
+            break;
+        case '8':
+            ioctl(g_acodec_fd, k_acodec_reset, NULL);
+            break;
+        default:
+            break;
         }
     }
-}
 
-k_s32 audio_sample_acodec()
-{
-    if (acodec_check_open())
-        return -1;
-
-    _acodec_test_func();
-
-    return 0;
-}
-
-k_s32 audio_sample_ai_aenc_adec_ao_opus(k_audio_dev ai_dev,k_ai_chn ai_chn,k_audio_dev ao_dev,k_ao_chn ao_chn,k_aenc_chn aenc_chn,k_adec_chn adec_chn,k_u32 samplerate,k_audio_bit_width bit_width,k_payload_type type, k_u32 enable_audio3a)
-{
-    samplerate = 8000;
-
-    g_enable_audio_codec = K_TRUE;
-    bit_width = KD_AUDIO_BIT_WIDTH_16;
-    k_u32 sample_rate = samplerate;
-    k_i2s_work_mode i2s_work_mode = K_STANDARD_MODE;
-    printf("Force the sampling accuracy to be set to 16,use inner cocdec\n");
-
-    k_aio_dev_attr ai_dev_attr;
-    ai_dev_attr.audio_type = KD_AUDIO_INPUT_TYPE_I2S;
-    ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    ai_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    ai_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    ai_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    ai_dev_attr.kd_audio_attr.i2s_attr.snd_mode = KD_AUDIO_SOUND_MODE_MONO;
-    ai_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    ai_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ai_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ai_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    ai_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-    if (K_SUCCESS != kd_mpi_ai_set_pub_attr(ai_dev, &ai_dev_attr))
+    if (close(g_acodec_fd) != 0)
     {
-        printf("kd_mpi_ai_set_pub_attr failed\n");
+        perror("close /dev/acodec_device");
+        g_acodec_fd = -1;
         return K_FAILED;
     }
-
-    k_aio_dev_attr ao_dev_attr;
-    memset(&ao_dev_attr,0,sizeof(ao_dev_attr));
-    ao_dev_attr.audio_type = KD_AUDIO_OUTPUT_TYPE_I2S;
-    ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate = sample_rate;
-    ao_dev_attr.kd_audio_attr.i2s_attr.bit_width = bit_width;
-    ao_dev_attr.kd_audio_attr.i2s_attr.chn_cnt = 2;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_mode = i2s_work_mode;
-    ao_dev_attr.kd_audio_attr.i2s_attr.snd_mode = KD_AUDIO_SOUND_MODE_MONO;
-    ao_dev_attr.kd_audio_attr.i2s_attr.frame_num = AUDIO_PERSEC_DIV_NUM;
-    ao_dev_attr.kd_audio_attr.i2s_attr.point_num_per_frame = ao_dev_attr.kd_audio_attr.i2s_attr.sample_rate / ao_dev_attr.kd_audio_attr.i2s_attr.frame_num;
-    ao_dev_attr.kd_audio_attr.i2s_attr.i2s_type = g_enable_audio_codec ? K_AIO_I2STYPE_INNERCODEC : K_AIO_I2STYPE_EXTERN;
-
-    if (K_SUCCESS != kd_mpi_ao_set_pub_attr(ao_dev, &ao_dev_attr))
-    {
-        printf("kd_mpi_ao_set_pub_attr failed\n");
-        return K_FAILED;
-    }
-
-    k_aenc_chn_attr aenc_chn_attr;
-    aenc_chn_attr.type = type;
-    aenc_chn_attr.buf_size = AUDIO_PERSEC_DIV_NUM;
-    aenc_chn_attr.sample_rate = sample_rate;
-    aenc_chn_attr.channels = 1;
-    aenc_chn_attr.bitrate = 16000;
-    aenc_chn_attr.point_num_per_frame = sample_rate / aenc_chn_attr.buf_size;
-
-    if (0 != kd_mpi_aenc_create_chn(aenc_chn, &aenc_chn_attr))
-    {
-        printf("kd_mpi_aenc_create_chn faild\n");
-        return K_FAILED;
-    }
-
-    k_adec_chn_attr adec_chn_attr;
-    adec_chn_attr.type = type;
-    adec_chn_attr.sample_rate = sample_rate;
-    adec_chn_attr.channels = 1;
-    adec_chn_attr.buf_size = AUDIO_PERSEC_DIV_NUM;
-    adec_chn_attr.point_num_per_frame = sample_rate / adec_chn_attr.buf_size;
-
-    if (0 != kd_mpi_adec_create_chn(adec_chn, &adec_chn_attr))
-    {
-        printf("kd_mpi_adec_create_chn faild\n");
-        return K_FAILED;
-    }
-
-    kd_mpi_ai_enable(ai_dev);
-    kd_mpi_ai_enable_chn(ai_dev, ai_chn);
-
-    k_mpp_chn ai_mpp_chn;
-    k_mpp_chn aenc_mpp_chn;
-
-    ai_mpp_chn.mod_id = K_ID_AI;
-    ai_mpp_chn.dev_id = ai_dev;
-    ai_mpp_chn.chn_id = ai_chn;
-    aenc_mpp_chn.mod_id = K_ID_AENC;
-    aenc_mpp_chn.dev_id = 0;
-    aenc_mpp_chn.chn_id = aenc_chn;
-
-    kd_mpi_sys_bind(&ai_mpp_chn, &aenc_mpp_chn);
-
-    kd_mpi_ao_enable(ao_dev);
-    kd_mpi_ao_enable_chn(ao_dev, ao_chn);
-
-    k_mpp_chn ao_mpp_chn;
-    k_mpp_chn adec_mpp_chn;
-
-    adec_mpp_chn.mod_id = K_ID_ADEC;
-    adec_mpp_chn.dev_id = 0;
-    adec_mpp_chn.chn_id = adec_chn;
-    ao_mpp_chn.mod_id = K_ID_AO;
-    ao_mpp_chn.dev_id = ao_dev;
-    ao_mpp_chn.chn_id = ao_chn;
-
-    kd_mpi_sys_bind(&adec_mpp_chn, &ao_mpp_chn);
-
-    g_audio_overall_start = K_TRUE;
-
-    k_audio_stream audio_stream;
-    while (g_audio_overall_start)
-    {
-        if (K_SUCCESS != kd_mpi_aenc_get_stream(aenc_chn, &audio_stream, 100))
-        {
-            printf("========kd_mpi_aenc_get_stream failed\n");
-            continue;
-        }
-
-        //_test_aenc_timestamp(sample_rate, 2, bit_width, audio_stream.time_stamp, audio_stream.len);
-
-        if (K_SUCCESS != kd_mpi_adec_send_stream(adec_chn, &audio_stream, K_FALSE))
-        {
-
-            printf("========kd_mpi_adec_send_stream failed\n");
-        }
-
-        kd_mpi_aenc_release_stream(aenc_chn, &audio_stream);
-    }
-
-    kd_mpi_sys_unbind(&ai_mpp_chn, &aenc_mpp_chn);
-    kd_mpi_sys_unbind(&adec_mpp_chn, &ao_mpp_chn);
-
-    kd_mpi_ai_disable_chn(ai_dev, ai_chn);
-    kd_mpi_ai_disable(ai_dev);
-    kd_mpi_ao_disable_chn(ao_dev, ao_chn);
-    kd_mpi_ao_disable(ao_dev);
-    kd_mpi_aenc_destroy_chn(aenc_chn);
-    kd_mpi_adec_destroy_chn(adec_chn);
-
+    g_acodec_fd = -1;
     return K_SUCCESS;
 }

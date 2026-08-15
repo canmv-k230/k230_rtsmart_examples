@@ -30,7 +30,7 @@ C_CXX_FLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generat
 C_CXX_FLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
 
 CFLAGS 		:= $(C_CXX_FLAGS) -std=gnu99
-CXX_FLAGS 	:= $(C_CXX_FLAGS) -std=c++20 
+CXX_FLAGS 	:= $(C_CXX_FLAGS) -std=c++20
 
 # Linker flags
 LDFLAGS := -T $(SDK_RTSMART_SRC_DIR)/libs/mk/link.lds --static -Wl,--gc-sections
