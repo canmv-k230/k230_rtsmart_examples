@@ -111,6 +111,13 @@ if RTSMART_ENABLE_PERIPHERAL_EXAMPLES
         bool "Enable Build usb_hid_mouse"
         default y
 
+    config RTSMART_PERIPHERAL_ENABLE_VGLITE_TIGER
+        bool "Enable Build vglite_tiger"
+        default y
+        select RTSMART_HAL_ENABLE_VG_LITE
+        help
+            Render and display the VG-Lite tiger sample.
+
     config RTSMART_PERIPHERAL_ENABLE_WDT
         bool "Enable Build wdt"
         default y
