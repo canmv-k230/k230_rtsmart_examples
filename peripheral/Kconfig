@@ -23,6 +23,14 @@ if RTSMART_ENABLE_PERIPHERAL_EXAMPLES
         bool "Enable Build fpioa"
         default y
 
+    config RTSMART_PERIPHERAL_ENABLE_WLAN_OFFLOAD
+        bool "Enable Build WLAN offload control example"
+        default n
+        help
+            Build the userspace /dev/wlanctlN diagnostic using libwlan_offload. The
+            RT-Smart kernel must enable the WLAN offload framework and userspace
+            supplicant interface.
+
     config RTSMART_PERIPHERAL_ENABLE_GPIO
         bool "Enable Build gpio"
         default y
