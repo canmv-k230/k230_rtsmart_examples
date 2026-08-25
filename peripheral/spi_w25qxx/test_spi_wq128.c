@@ -100,9 +100,17 @@ static const flash_device_info_t flash_devices[] = {
 #define W25Q_MULTI_READ_CHUNK_SIZE  (32 * 1024)
 
 // 状态寄存器位定义
-#define W25Q_SR1_BUSY (1 << 0)
-#define W25Q_SR1_WEL  (1 << 1)
-#define W25Q_SR2_QE   (1 << 1)
+#define W25Q_SR1_BUSY         (1 << 0)
+#define W25Q_SR1_WEL          (1 << 1)
+#define W25Q_SR1_BP_MASK      (7 << 2)
+#define W25Q_SR1_TB           (1 << 5)
+#define W25Q_SR1_SEC          (1 << 6)
+#define W25Q_SR1_SRP0         (1 << 7)
+#define W25Q_SR1_PROTECT_MASK (W25Q_SR1_BP_MASK | W25Q_SR1_TB | W25Q_SR1_SEC | W25Q_SR1_SRP0)
+#define W25Q_SR2_QE           (1 << 1)
+#define W25Q_SR2_CMP          (1 << 6)
+
+#define W25Q_STATUS_WRITE_TIMEOUT_MS 100
 
 // Flash驱动结构体
 typedef struct {
@@ -217,44 +225,63 @@ static uint8_t flash_get_quad_program_cmd(const flash_device_t* flash)
 }
 
 // 读取状态寄存器1
-static uint8_t flash_read_status_reg1(flash_device_t* flash)
+static bool flash_read_status_reg(flash_device_t* flash, uint8_t cmd, uint8_t* status)
 {
-    uint8_t cmd = W25Q_CMD_READ_STATUS_REG1;
-    uint8_t status;
+    int ret;
+
+    if (!status)
+        return false;
 
     flash_cs_select(flash);
-    drv_spi_write(flash->spi_handle, &cmd, 1, 0);
-    drv_spi_read(flash->spi_handle, &status, 1, 1);
-    flash_cs_deselect(flash);
+    ret = drv_spi_write(flash->spi_handle, &cmd, 1, 0);
+    if (ret != 1) {
+        printf("%s: Failed to send status register command 0x%02X\n", flash->device_info.name, cmd);
+        return false;
+    }
 
-    return status;
+    ret = drv_spi_read(flash->spi_handle, status, 1, 1);
+    flash_cs_deselect(flash);
+    if (ret != 1) {
+        printf("%s: Failed to read status register 0x%02X\n", flash->device_info.name, cmd);
+        return false;
+    }
+
+    return true;
 }
 
-static uint8_t flash_read_status_reg2(flash_device_t* flash)
+static bool flash_read_status_reg1(flash_device_t* flash, uint8_t* status)
 {
-    uint8_t cmd = W25Q_CMD_READ_STATUS_REG2;
-    uint8_t status;
+    return flash_read_status_reg(flash, W25Q_CMD_READ_STATUS_REG1, status);
+}
 
-    flash_cs_select(flash);
-    drv_spi_write(flash->spi_handle, &cmd, 1, 0);
-    drv_spi_read(flash->spi_handle, &status, 1, 1);
-    flash_cs_deselect(flash);
-
-    return status;
+static bool flash_read_status_reg2(flash_device_t* flash, uint8_t* status)
+{
+    return flash_read_status_reg(flash, W25Q_CMD_READ_STATUS_REG2, status);
 }
 
 // 等待忙状态结束
-static bool flash_wait_busy(flash_device_t* flash, uint32_t timeout_ms)
+static bool flash_wait_busy(flash_device_t* flash, uint32_t timeout_ms, bool require_busy)
 {
-    uint32_t wait_time = 0;
+    bool busy_seen = false;
 
-    while (wait_time < timeout_ms) {
-        uint8_t status = flash_read_status_reg1(flash);
+    for (uint32_t wait_time = 0; wait_time <= timeout_ms; wait_time++) {
+        uint8_t status;
+
+        if (!flash_read_status_reg1(flash, &status))
+            return false;
+
         if (!(status & W25Q_SR1_BUSY)) {
+            if (require_busy && !busy_seen) {
+                printf("%s: Operation did not enter BUSY state (SR1: 0x%02X); command may have been rejected\n",
+                       flash->device_info.name, status);
+                return false;
+            }
             return true;
         }
-        delay_ms(1);
-        wait_time++;
+
+        busy_seen = true;
+        if (wait_time < timeout_ms)
+            delay_ms(1);
     }
 
     printf("%s: Timeout waiting for busy\n", flash->device_info.name);
@@ -265,23 +292,58 @@ static bool flash_wait_busy(flash_device_t* flash, uint32_t timeout_ms)
 static bool flash_write_enable(flash_device_t* flash)
 {
     uint8_t cmd = W25Q_CMD_WRITE_ENABLE;
+    uint8_t status;
 
     flash_cs_select(flash);
-    drv_spi_write(flash->spi_handle, &cmd, 1, 1);
+    if (drv_spi_write(flash->spi_handle, &cmd, 1, 1) != 1) {
+        printf("%s: Write enable command failed\n", flash->device_info.name);
+        return false;
+    }
     flash_cs_deselect(flash);
 
-    uint8_t status = flash_read_status_reg1(flash);
+    if (!flash_read_status_reg1(flash, &status))
+        return false;
+
     return (status & W25Q_SR1_WEL) != 0;
 }
 
 // 写禁止
-static void flash_write_disable(flash_device_t* flash)
+static bool flash_write_disable(flash_device_t* flash)
 {
     uint8_t cmd = W25Q_CMD_WRITE_DISABLE;
+    int     ret;
 
     flash_cs_select(flash);
-    drv_spi_write(flash->spi_handle, &cmd, 1, 1);
+    ret = drv_spi_write(flash->spi_handle, &cmd, 1, 1);
     flash_cs_deselect(flash);
+
+    return ret == 1;
+}
+
+static bool flash_write_status_reg1(flash_device_t* flash, uint8_t value)
+{
+    uint8_t cmd_buf[2] = { W25Q_CMD_WRITE_STATUS_REG1, value };
+    uint8_t status;
+
+    if (!flash_write_enable(flash)) {
+        printf("%s: Failed to enable write before SR1 update\n", flash->device_info.name);
+        return false;
+    }
+
+    flash_cs_select(flash);
+    if (drv_spi_write(flash->spi_handle, cmd_buf, sizeof(cmd_buf), 1) != (int)sizeof(cmd_buf)) {
+        printf("%s: Failed to write status register 1\n", flash->device_info.name);
+        return false;
+    }
+    flash_cs_deselect(flash);
+
+    if (!flash_wait_busy(flash, W25Q_STATUS_WRITE_TIMEOUT_MS, false))
+        return false;
+
+    if (!flash_read_status_reg1(flash, &status))
+        return false;
+
+    return (status & W25Q_SR1_PROTECT_MASK) == (value & W25Q_SR1_PROTECT_MASK);
 }
 
 static bool flash_write_status_reg2(flash_device_t* flash, uint8_t value)
@@ -294,21 +356,119 @@ static bool flash_write_status_reg2(flash_device_t* flash, uint8_t value)
     }
 
     flash_cs_select(flash);
-    drv_spi_write(flash->spi_handle, cmd_buf, sizeof(cmd_buf), 1);
+    if (drv_spi_write(flash->spi_handle, cmd_buf, sizeof(cmd_buf), 1) != (int)sizeof(cmd_buf)) {
+        printf("%s: Failed to write status register 2\n", flash->device_info.name);
+        return false;
+    }
     flash_cs_deselect(flash);
 
-    return flash_wait_busy(flash, flash->device_info.max_program_time_ms);
+    return flash_wait_busy(flash, W25Q_STATUS_WRITE_TIMEOUT_MS, false);
+}
+
+static bool flash_override_wp_begin(int io2_pin, uint32_t* saved_cfg, drv_gpio_inst_t** wp_gpio)
+{
+    if (drv_fpioa_get_pin_cfg(io2_pin, saved_cfg) != 0) {
+        printf("Failed to read IO2 configuration on pin %d\n", io2_pin);
+        return false;
+    }
+
+    if (drv_fpioa_set_pin_func(io2_pin, (fpioa_func_t)(GPIO0 + io2_pin)) != 0) {
+        printf("Failed to configure IO2/WP# as GPIO on pin %d\n", io2_pin);
+        return false;
+    }
+
+    if (drv_gpio_inst_create(io2_pin, wp_gpio) != 0) {
+        printf("Failed to create IO2/WP# GPIO on pin %d\n", io2_pin);
+        drv_fpioa_set_pin_cfg(io2_pin, *saved_cfg);
+        return false;
+    }
+
+    if (drv_gpio_mode_set(*wp_gpio, GPIO_DM_OUTPUT) != 0 || drv_gpio_value_set(*wp_gpio, GPIO_PV_HIGH) != 0) {
+        printf("Failed to drive IO2/WP# high on pin %d\n", io2_pin);
+        drv_gpio_inst_destroy(wp_gpio);
+        drv_fpioa_set_pin_cfg(io2_pin, *saved_cfg);
+        return false;
+    }
+
+    return true;
+}
+
+static bool flash_override_wp_end(int io2_pin, uint32_t saved_cfg, drv_gpio_inst_t** wp_gpio)
+{
+    drv_gpio_inst_destroy(wp_gpio);
+    if (drv_fpioa_set_pin_cfg(io2_pin, saved_cfg) != 0) {
+        printf("Failed to restore IO2 pin %d\n", io2_pin);
+        return false;
+    }
+
+    return true;
+}
+
+static bool flash_clear_write_protection(flash_device_t* flash, int io2_pin)
+{
+    uint8_t          status1;
+    uint8_t          status2;
+    uint32_t         saved_io2_cfg = 0;
+    drv_gpio_inst_t* wp_gpio       = NULL;
+    bool             result        = false;
+
+    if ((flash->jedec_id >> 16) != 0xEF)
+        return true;
+
+    if (!flash_read_status_reg1(flash, &status1) || !flash_read_status_reg2(flash, &status2))
+        return false;
+
+    if (!(status1 & (W25Q_SR1_BP_MASK | W25Q_SR1_SRP0)) && !(status2 & W25Q_SR2_CMP))
+        return true;
+
+    printf("Write protection configuration detected (SR1: 0x%02X, SR2: 0x%02X); clearing it for destructive tests...\n",
+           status1, status2);
+
+    if (!flash_override_wp_begin(io2_pin, &saved_io2_cfg, &wp_gpio))
+        return false;
+
+    status1 &= ~W25Q_SR1_PROTECT_MASK;
+    if (!flash_write_status_reg1(flash, status1))
+        goto out;
+
+    if ((status2 & W25Q_SR2_CMP) && !flash_write_status_reg2(flash, status2 & ~W25Q_SR2_CMP))
+        goto out;
+
+    if (!flash_read_status_reg1(flash, &status1) || !flash_read_status_reg2(flash, &status2))
+        goto out;
+
+    if ((status1 & W25Q_SR1_BP_MASK) || (status2 & W25Q_SR2_CMP)) {
+        printf("%s: Failed to clear write protection (SR1: 0x%02X, SR2: 0x%02X)\n", flash->device_info.name, status1,
+               status2);
+        goto out;
+    }
+
+    printf("Write protection cleared (SR1: 0x%02X, SR2: 0x%02X)\n", status1, status2);
+    result = true;
+
+out:
+    if (!flash_override_wp_end(io2_pin, saved_io2_cfg, &wp_gpio))
+        result = false;
+
+    return result;
 }
 
 // 读取JEDEC ID
 static uint32_t flash_read_jedec_id(flash_device_t* flash)
 {
     uint8_t cmd = W25Q_CMD_READ_JEDEC_ID;
-    uint8_t id[3];
+    uint8_t id[3] = { 0xFF, 0xFF, 0xFF };
 
     flash_cs_select(flash);
-    drv_spi_write(flash->spi_handle, &cmd, 1, 0);
-    drv_spi_read(flash->spi_handle, id, 3, 1);
+    if (drv_spi_write(flash->spi_handle, &cmd, 1, 0) != 1) {
+        printf("Failed to send JEDEC ID command\n");
+        return 0;
+    }
+
+    if (drv_spi_read(flash->spi_handle, id, sizeof(id), 1) != (int)sizeof(id)) {
+        printf("Failed to read JEDEC ID\n");
+        return 0;
+    }
     flash_cs_deselect(flash);
 
     return (id[0] << 16) | (id[1] << 8) | id[2];
@@ -368,7 +528,9 @@ static bool flash_enable_quad_mode(flash_device_t* flash)
         return true;
     }
 
-    status2 = flash_read_status_reg2(flash);
+    if (!flash_read_status_reg2(flash, &status2))
+        return false;
+
     if (status2 & W25Q_SR2_QE) {
         return true;
     }
@@ -378,7 +540,9 @@ static bool flash_enable_quad_mode(flash_device_t* flash)
         return false;
     }
 
-    status2 = flash_read_status_reg2(flash);
+    if (!flash_read_status_reg2(flash, &status2))
+        return false;
+
     if (!(status2 & W25Q_SR2_QE)) {
         printf("%s: QE bit did not latch\n", flash->device_info.name);
         return false;
@@ -397,7 +561,10 @@ static bool flash_enter_4byte_mode(flash_device_t* flash)
     uint8_t cmd = W25Q_CMD_ENTER_4BYTE_MODE;
 
     flash_cs_select(flash);
-    drv_spi_write(flash->spi_handle, &cmd, 1, 1);
+    if (drv_spi_write(flash->spi_handle, &cmd, 1, 1) != 1) {
+        printf("%s: Failed to enter 4-byte address mode\n", flash->device_info.name);
+        return false;
+    }
     flash_cs_deselect(flash);
 
     flash->addr_4byte_mode = true;
@@ -414,7 +581,10 @@ static bool flash_exit_4byte_mode(flash_device_t* flash)
     uint8_t cmd = W25Q_CMD_EXIT_4BYTE_MODE;
 
     flash_cs_select(flash);
-    drv_spi_write(flash->spi_handle, &cmd, 1, 1);
+    if (drv_spi_write(flash->spi_handle, &cmd, 1, 1) != 1) {
+        printf("%s: Failed to exit 4-byte address mode\n", flash->device_info.name);
+        return false;
+    }
     flash_cs_deselect(flash);
 
     flash->addr_4byte_mode = false;
@@ -445,7 +615,10 @@ static bool flash_erase_sector(flash_device_t* flash, uint32_t addr)
         cmd_buf[4] = addr & 0xFF;
 
         flash_cs_select(flash);
-        drv_spi_write(flash->spi_handle, cmd_buf, 5, 1);
+        if (drv_spi_write(flash->spi_handle, cmd_buf, 5, 1) != 5) {
+            printf("%s: Sector erase command failed\n", flash->device_info.name);
+            return false;
+        }
         flash_cs_deselect(flash);
     } else {
         cmd_buf[0] = W25Q_CMD_ERASE_SECTOR_4K;
@@ -454,11 +627,14 @@ static bool flash_erase_sector(flash_device_t* flash, uint32_t addr)
         cmd_buf[3] = addr & 0xFF;
 
         flash_cs_select(flash);
-        drv_spi_write(flash->spi_handle, cmd_buf, 4, 1);
+        if (drv_spi_write(flash->spi_handle, cmd_buf, 4, 1) != 4) {
+            printf("%s: Sector erase command failed\n", flash->device_info.name);
+            return false;
+        }
         flash_cs_deselect(flash);
     }
 
-    return flash_wait_busy(flash, flash->device_info.max_erase_time_ms);
+    return flash_wait_busy(flash, flash->device_info.max_erase_time_ms, true);
 }
 
 // 页编程
@@ -500,20 +676,29 @@ static bool flash_page_program(flash_device_t* flash, uint32_t addr, const uint8
             cmd_buf[2] = (addr >> 16) & 0xFF;
             cmd_buf[3] = (addr >> 8) & 0xFF;
             cmd_buf[4] = addr & 0xFF;
-            drv_spi_write(flash->spi_handle, cmd_buf, 5, 0);
+            if (drv_spi_write(flash->spi_handle, cmd_buf, 5, 0) != 5) {
+                printf("%s: Page program command failed\n", flash->device_info.name);
+                return false;
+            }
         } else {
             cmd_buf[0] = W25Q_CMD_PAGE_PROGRAM;
             cmd_buf[1] = (addr >> 16) & 0xFF;
             cmd_buf[2] = (addr >> 8) & 0xFF;
             cmd_buf[3] = addr & 0xFF;
-            drv_spi_write(flash->spi_handle, cmd_buf, 4, 0);
+            if (drv_spi_write(flash->spi_handle, cmd_buf, 4, 0) != 4) {
+                printf("%s: Page program command failed\n", flash->device_info.name);
+                return false;
+            }
         }
 
-        drv_spi_write(flash->spi_handle, data, len, 1);
+        if (drv_spi_write(flash->spi_handle, data, len, 1) != (int)len) {
+            printf("%s: Page program data transfer failed\n", flash->device_info.name);
+            return false;
+        }
         flash_cs_deselect(flash);
     }
 
-    return flash_wait_busy(flash, flash->device_info.max_program_time_ms);
+    return flash_wait_busy(flash, flash->device_info.max_program_time_ms, true);
 }
 
 // 读取数据
@@ -565,16 +750,25 @@ static bool flash_read_data(flash_device_t* flash, uint32_t addr, uint8_t* data,
             cmd_buf[2] = (addr >> 16) & 0xFF;
             cmd_buf[3] = (addr >> 8) & 0xFF;
             cmd_buf[4] = addr & 0xFF;
-            drv_spi_write(flash->spi_handle, cmd_buf, 5, 0);
+            if (drv_spi_write(flash->spi_handle, cmd_buf, 5, 0) != 5) {
+                printf("%s: Read command failed\n", flash->device_info.name);
+                return false;
+            }
         } else {
             cmd_buf[0] = W25Q_CMD_READ_DATA;
             cmd_buf[1] = (addr >> 16) & 0xFF;
             cmd_buf[2] = (addr >> 8) & 0xFF;
             cmd_buf[3] = addr & 0xFF;
-            drv_spi_write(flash->spi_handle, cmd_buf, 4, 0);
+            if (drv_spi_write(flash->spi_handle, cmd_buf, 4, 0) != 4) {
+                printf("%s: Read command failed\n", flash->device_info.name);
+                return false;
+            }
         }
 
-        drv_spi_read(flash->spi_handle, data, len, 1);
+        if (drv_spi_read(flash->spi_handle, data, len, 1) != (int)len) {
+            printf("%s: Read data transfer failed\n", flash->device_info.name);
+            return false;
+        }
         flash_cs_deselect(flash);
     }
 
@@ -623,11 +817,14 @@ static bool flash_chip_erase(flash_device_t* flash)
     uint8_t cmd = W25Q_CMD_CHIP_ERASE;
 
     flash_cs_select(flash);
-    drv_spi_write(flash->spi_handle, &cmd, 1, 1);
+    if (drv_spi_write(flash->spi_handle, &cmd, 1, 1) != 1) {
+        printf("%s: Chip erase command failed\n", flash->device_info.name);
+        return false;
+    }
     flash_cs_deselect(flash);
 
     // 芯片擦除可能需要较长时间（几十秒）
-    bool result = flash_wait_busy(flash, 30000); // 30秒超时
+    bool result = flash_wait_busy(flash, 30000, true); // 30秒超时
     if (result) {
         printf("%s: Chip erase completed\n", flash->device_info.name);
     } else {
@@ -682,12 +879,6 @@ static flash_device_t* flash_create(int spi_id, int cs_pin, uint32_t baudrate)
     if (flash->device_info.size > 16 * 1024 * 1024) {
         printf("Device size >16MB, entering 4-byte address mode\n");
         flash_enter_4byte_mode(flash);
-    }
-
-    if (flash_supports_4line(flash) && !flash_enable_quad_mode(flash)) {
-        printf("Warning: Failed to enable quad mode, 4-line tests will be skipped\n");
-        flash->device_info.support_quad_read = false;
-        flash->device_info.support_quad_page_program = false;
     }
 
     return flash;
@@ -780,10 +971,17 @@ static bool test_device_info(flash_device_t* flash)
     printf("Current Address Mode: %s\n", flash->addr_4byte_mode ? "4-Byte" : "3-Byte");
 
     // 读取状态寄存器
-    uint8_t status = flash_read_status_reg1(flash);
+    uint8_t status;
+    uint8_t status2;
+
+    if (!flash_read_status_reg1(flash, &status) || !flash_read_status_reg2(flash, &status2)) {
+        printf("Failed to read status registers\n");
+        return false;
+    }
+
     printf("Status Register 1: 0x%02X\n", status);
     printf("  BUSY: %d, WEL: %d\n", (status & W25Q_SR1_BUSY) ? 1 : 0, (status & W25Q_SR1_WEL) ? 1 : 0);
-    printf("Status Register 2: 0x%02X\n", flash_read_status_reg2(flash));
+    printf("Status Register 2: 0x%02X\n", status2);
 
     return true;
 }
@@ -808,15 +1006,27 @@ static bool test_basic_functions(flash_device_t* flash)
         printf("   FAILED: Write enable failed\n");
         return false;
     }
-    uint8_t status = flash_read_status_reg1(flash);
+    uint8_t status;
+    if (!flash_read_status_reg1(flash, &status)) {
+        printf("   FAILED: Status register read failed\n");
+        return false;
+    }
+
     if (!(status & W25Q_SR1_WEL)) {
         printf("   FAILED: WEL bit not set\n");
         return false;
     }
     printf("   Write enabled successfully\n");
 
-    flash_write_disable(flash);
-    status = flash_read_status_reg1(flash);
+    if (!flash_write_disable(flash)) {
+        printf("   FAILED: Write disable command failed\n");
+        return false;
+    }
+
+    if (!flash_read_status_reg1(flash, &status)) {
+        printf("   FAILED: Status register read failed\n");
+        return false;
+    }
     if (status & W25Q_SR1_WEL) {
         printf("   FAILED: WEL bit still set\n");
         return false;
@@ -1022,15 +1232,18 @@ static bool test_performance(flash_device_t* flash)
 
     uint32_t test_addr = flash->device_info.size / 4; // 使用1/4位置
 
-    uint8_t* buffer = malloc(test_size);
-    if (!buffer) {
-        printf("Failed to allocate test buffer\n");
+    uint8_t* write_buf = malloc(test_size);
+    uint8_t* read_buf  = flash_alloc_aligned_buffer(test_size);
+    if (!write_buf || !read_buf) {
+        printf("Failed to allocate performance test buffers\n");
+        free(write_buf);
+        free(read_buf);
         return false;
     }
 
     // 生成随机数据
     for (size_t i = 0; i < test_size; i++) {
-        buffer[i] = (uint8_t)(rand() & 0xFF);
+        write_buf[i] = (uint8_t)(rand() & 0xFF);
     }
 
     struct timespec start, end;
@@ -1043,7 +1256,8 @@ static bool test_performance(flash_device_t* flash)
     for (uint32_t i = 0; i < sectors_to_erase; i++) {
         if (!flash_erase_sector(flash, test_addr + i * flash->device_info.sector_size)) {
             printf("   FAILED: Erase failed\n");
-            free(buffer);
+            free(write_buf);
+            free(read_buf);
             return false;
         }
     }
@@ -1052,13 +1266,21 @@ static bool test_performance(flash_device_t* flash)
     double erase_time = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     printf("   Erased %zu KB in %.3f seconds\n", test_size / 1024, erase_time);
 
+    if (!flash_read_data(flash, test_addr, read_buf, test_size) || !flash_buffer_is_erased(read_buf, test_size)) {
+        printf("   FAILED: Erase verification failed\n");
+        free(write_buf);
+        free(read_buf);
+        return false;
+    }
+
     // 2. 写入性能
     printf("2. Write performance:\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    if (!flash_write(flash, test_addr, buffer, test_size)) {
+    if (!flash_write(flash, test_addr, write_buf, test_size)) {
         printf("   FAILED: Write failed\n");
-        free(buffer);
+        free(write_buf);
+        free(read_buf);
         return false;
     }
 
@@ -1071,9 +1293,10 @@ static bool test_performance(flash_device_t* flash)
     printf("3. Read performance:\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    if (!flash_read_data(flash, test_addr, buffer, test_size)) {
+    if (!flash_read_data(flash, test_addr, read_buf, test_size)) {
         printf("   FAILED: Read failed\n");
-        free(buffer);
+        free(write_buf);
+        free(read_buf);
         return false;
     }
 
@@ -1082,9 +1305,17 @@ static bool test_performance(flash_device_t* flash)
     double read_speed = (test_size / 1024.0) / read_time;
     printf("   Read %zu KB in %.3f seconds (%.1f KB/s)\n", test_size / 1024, read_time, read_speed);
 
+    if (memcmp(write_buf, read_buf, test_size) != 0) {
+        printf("   FAILED: Performance test data verification failed\n");
+        free(write_buf);
+        free(read_buf);
+        return false;
+    }
+
     printf("   PASSED\n");
 
-    free(buffer);
+    free(write_buf);
+    free(read_buf);
     return true;
 }
 
@@ -1275,15 +1506,18 @@ static bool test_performance_with_params(flash_device_t* flash, uint32_t test_ad
     printf("\n=== Performance Test (%s, Addr:0x%06X, Size:%zu KB) ===\n", flash_data_line_name(flash->data_lines), test_addr,
            test_size / 1024);
 
-    uint8_t* buffer = malloc(test_size);
-    if (!buffer) {
-        printf("Failed to allocate test buffer\n");
+    uint8_t* write_buf = malloc(test_size);
+    uint8_t* read_buf  = flash_alloc_aligned_buffer(test_size);
+    if (!write_buf || !read_buf) {
+        printf("Failed to allocate performance test buffers\n");
+        free(write_buf);
+        free(read_buf);
         return false;
     }
 
     // 生成随机数据
     for (size_t i = 0; i < test_size; i++) {
-        buffer[i] = (uint8_t)(rand() & 0xFF);
+        write_buf[i] = (uint8_t)(rand() & 0xFF);
     }
 
     struct timespec start, end;
@@ -1296,7 +1530,8 @@ static bool test_performance_with_params(flash_device_t* flash, uint32_t test_ad
     for (uint32_t i = 0; i < sectors_to_erase; i++) {
         if (!flash_erase_sector(flash, test_addr + i * flash->device_info.sector_size)) {
             printf("   FAILED: Erase failed\n");
-            free(buffer);
+            free(write_buf);
+            free(read_buf);
             return false;
         }
     }
@@ -1305,13 +1540,21 @@ static bool test_performance_with_params(flash_device_t* flash, uint32_t test_ad
     double erase_time = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     printf("   Erased %zu KB in %.3f seconds\n", test_size / 1024, erase_time);
 
+    if (!flash_read_data(flash, test_addr, read_buf, test_size) || !flash_buffer_is_erased(read_buf, test_size)) {
+        printf("   FAILED: Erase verification failed\n");
+        free(write_buf);
+        free(read_buf);
+        return false;
+    }
+
     // 2. 写入性能
     printf("2. Write performance:\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    if (!flash_write(flash, test_addr, buffer, test_size)) {
+    if (!flash_write(flash, test_addr, write_buf, test_size)) {
         printf("   FAILED: Write failed\n");
-        free(buffer);
+        free(write_buf);
+        free(read_buf);
         return false;
     }
 
@@ -1324,9 +1567,10 @@ static bool test_performance_with_params(flash_device_t* flash, uint32_t test_ad
     printf("3. Read performance:\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    if (!flash_read_data(flash, test_addr, buffer, test_size)) {
+    if (!flash_read_data(flash, test_addr, read_buf, test_size)) {
         printf("   FAILED: Read failed\n");
-        free(buffer);
+        free(write_buf);
+        free(read_buf);
         return false;
     }
 
@@ -1335,9 +1579,17 @@ static bool test_performance_with_params(flash_device_t* flash, uint32_t test_ad
     double read_speed = (test_size / 1024.0) / read_time;
     printf("   Read %zu KB in %.3f seconds (%.1f KB/s)\n", test_size / 1024, read_time, read_speed);
 
+    if (memcmp(write_buf, read_buf, test_size) != 0) {
+        printf("   FAILED: Performance test data verification failed\n");
+        free(write_buf);
+        free(read_buf);
+        return false;
+    }
+
     printf("   PASSED\n");
 
-    free(buffer);
+    free(write_buf);
+    free(read_buf);
     return true;
 }
 
@@ -1419,6 +1671,8 @@ int main(int argc, char* argv[])
     uint32_t      test_addr    = 0; // 0表示自动选择
     uint32_t      test_size_kb = 0; // 0表示自动选择
     bool          check_4line  = false;
+    int           io2_pin      = -1;
+    int           io3_pin      = -1;
 
     // 解析命令行参数
     static struct option long_options[] = { { "help", no_argument, 0, 'h' },         { "spi-id", required_argument, 0, 'i' },
@@ -1540,27 +1794,39 @@ int main(int argc, char* argv[])
 
     // 配置引脚
     printf("\nConfiguring SPI pins...\n");
+    int pin_config_ret = 0;
     if (spi_id == 0) {
-        drv_fpioa_set_pin_func(15, OSPI_CLK);
-        drv_fpioa_set_pin_func(16, OSPI_D0);
-        drv_fpioa_set_pin_func(17, OSPI_D1);
-        drv_fpioa_set_pin_func(18, OSPI_D2);
-        drv_fpioa_set_pin_func(19, OSPI_D3);
+        pin_config_ret |= drv_fpioa_set_pin_func(15, OSPI_CLK);
+        pin_config_ret |= drv_fpioa_set_pin_func(16, OSPI_D0);
+        pin_config_ret |= drv_fpioa_set_pin_func(17, OSPI_D1);
+        pin_config_ret |= drv_fpioa_set_pin_func(18, OSPI_D2);
+        pin_config_ret |= drv_fpioa_set_pin_func(19, OSPI_D3);
+        io2_pin = 18;
+        io3_pin = 19;
         printf("  Using OSPI (CLK:15, D0:16, D1:17, D2:18, D3:19)\n");
     } else if (spi_id == 1) {
-        drv_fpioa_set_pin_func(15, QSPI0_CLK);
-        drv_fpioa_set_pin_func(16, QSPI0_D0);
-        drv_fpioa_set_pin_func(17, QSPI0_D1);
-        drv_fpioa_set_pin_func(18, QSPI0_D2);
-        drv_fpioa_set_pin_func(19, QSPI0_D3);
+        pin_config_ret |= drv_fpioa_set_pin_func(15, QSPI0_CLK);
+        pin_config_ret |= drv_fpioa_set_pin_func(16, QSPI0_D0);
+        pin_config_ret |= drv_fpioa_set_pin_func(17, QSPI0_D1);
+        pin_config_ret |= drv_fpioa_set_pin_func(18, QSPI0_D2);
+        pin_config_ret |= drv_fpioa_set_pin_func(19, QSPI0_D3);
+        io2_pin = 18;
+        io3_pin = 19;
         printf("  Using QSPI0 (CLK:15, D0:16, D1:17, D2:18, D3:19)\n");
     } else if (spi_id == 2) {
-        drv_fpioa_set_pin_func(21, QSPI1_CLK);
-        drv_fpioa_set_pin_func(40, QSPI1_D0);
-        drv_fpioa_set_pin_func(41, QSPI1_D1);
-        drv_fpioa_set_pin_func(42, QSPI1_D2);
-        drv_fpioa_set_pin_func(43, QSPI1_D3);
+        pin_config_ret |= drv_fpioa_set_pin_func(21, QSPI1_CLK);
+        pin_config_ret |= drv_fpioa_set_pin_func(40, QSPI1_D0);
+        pin_config_ret |= drv_fpioa_set_pin_func(41, QSPI1_D1);
+        pin_config_ret |= drv_fpioa_set_pin_func(42, QSPI1_D2);
+        pin_config_ret |= drv_fpioa_set_pin_func(43, QSPI1_D3);
+        io2_pin = 42;
+        io3_pin = 43;
         printf("  Using QSPI1 (CLK:21, D0:40, D1:41, D2:42, D3:43)\n");
+    }
+
+    if (pin_config_ret != 0 || drv_fpioa_set_pin_pu(io2_pin, 1) != 0 || drv_fpioa_set_pin_pu(io3_pin, 1) != 0) {
+        printf("ERROR: Failed to configure SPI pins\n");
+        return -1;
     }
 
     // 创建Flash实例
@@ -1576,7 +1842,22 @@ int main(int argc, char* argv[])
     printf("  Size:        %u MB (%.2f MB)\n", flash->device_info.size / (1024 * 1024),
            flash->device_info.size / (1024.0 * 1024.0));
 
-    bool all_passed = true;
+    bool all_passed      = true;
+    bool destructive     = test_config.run_rw || test_config.run_boundary || test_config.run_perf;
+    bool destructive_ok  = true;
+
+    if (destructive && !flash_clear_write_protection(flash, io2_pin)) {
+        printf("ERROR: Flash remains write-protected; destructive tests will be skipped\n");
+        destructive_ok = false;
+        all_passed     = false;
+    }
+
+    if (destructive_ok && check_4line && flash_supports_4line(flash) && !flash_enable_quad_mode(flash)) {
+        printf("ERROR: Failed to enable quad mode; 4-line tests will be skipped\n");
+        flash->device_info.support_quad_read         = false;
+        flash->device_info.support_quad_page_program = false;
+        all_passed                                   = false;
+    }
 
     // 自动选择测试地址（如果未指定）
     if (test_addr == 0) {
@@ -1612,7 +1893,10 @@ int main(int argc, char* argv[])
             all_passed = false;
     }
 
-    if (test_config.run_rw || test_config.run_boundary || test_config.run_perf) {
+    if (destructive && !destructive_ok)
+        printf("\nDestructive tests skipped because the flash could not be made writable\n");
+
+    if (destructive && destructive_ok) {
         const uint8_t data_line_modes[] = { 1, 2, 4 };
 
         if (!check_4line && flash_supports_4line(flash))
