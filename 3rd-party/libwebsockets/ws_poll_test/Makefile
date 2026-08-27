@@ -21,8 +21,6 @@ DEPS      := $(OBJS:.o=.d)
 
 OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
 
-# Library configuration (libc/musl only - no libwebsockets)
-include $(SDK_RTSMART_SRC_DIR)/libs/mk/lib3rdparty.mk
 
 # Compiler flags
 C_CXX_FLAGS := -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os

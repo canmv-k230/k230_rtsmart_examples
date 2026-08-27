@@ -22,6 +22,7 @@ DEPS      := $(OBJS:.o=.d)
 OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
 
 # Library configuration
+RTSMART_LINK_LIBPEER := n
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/lib3rdparty.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/librtsmart_hal.mk
 
