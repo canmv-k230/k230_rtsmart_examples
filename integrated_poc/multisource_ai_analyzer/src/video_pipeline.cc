@@ -21,7 +21,7 @@ PipeLine::PipeLine(int debug_mode, k_u32 csi_num, k_connector_type connector)
 
     // ------------------------ Sensor / VICAP 默认配置 ------------------------
     // 默认使用 GC2093，start() 中会根据探测结果自动适配
-    sensor_type = GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR;
+    sensor_type = SENSOR_TYPE_MAX;
     // VICAP 设备 ID
     vicap_dev = VICAP_DEV_ID_0;
     // VICAP → VO 通道（视频直通显示）
