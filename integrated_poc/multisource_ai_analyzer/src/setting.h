@@ -53,6 +53,22 @@
 #endif
 
 #include <string>
+#include "k_type.h"
+#include "k_connector_comm.h"
+
+// 默认连接器（显示器）类型：由编译期 DISPLAY_MODE 推导，
+// 运行时可用命令行 -c/--connector 覆盖
+#if DISPLAY_MODE == 1
+    #define DEFAULT_CONNECTOR_TYPE ST7701_V1_MIPI_2LAN_480X800_30FPS
+#elif DISPLAY_MODE == 2
+    #define DEFAULT_CONNECTOR_TYPE HX8377_V2_MIPI_4LAN_1080X1920_30FPS
+#else
+    #define DEFAULT_CONNECTOR_TYPE LT9611_MIPI_4LAN_1920X1080_30FPS
+#endif
+
+// 根据连接器类型返回横屏显示分辨率（竖屏面板会旋转 90° 使用）
+// rotate_90 非空时输出是否为竖屏面板（需要 90° 旋转）
+void GetConnectorDisplaySize(k_connector_type type, int &width, int &height, bool *rotate_90 = nullptr);
 
 // 默认参数配置结构体
 struct AppSettings {
@@ -77,6 +93,10 @@ struct AppSettings {
     // 运行参数
     int debug_mode = 0;                // 调试模式：0/1/2
     std::string video_path;            // 视频源路径（必需）
+
+    // 采集与显示
+    int csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;              // Sensor 所在 CSI 口 (0-2)
+    k_connector_type connector_type = DEFAULT_CONNECTOR_TYPE; // 显示器连接器类型（数值）
     
     // 打印当前配置
     void print() const;

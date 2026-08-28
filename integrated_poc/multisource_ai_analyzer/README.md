@@ -117,6 +117,8 @@ cd /sdcard/app/examples/integrated_poc
 
 | 参数 | 含义 | 默认值 | 说明 |
 |------|------|--------|------|
+| -s, --csi <num> | Sensor 所在 CSI 口 | 编译配置默认值 (0-2) | realtime 模式下指定摄像头所接的 CSI 口 |
+| -c, --connector <type> | 显示器连接器类型（数值） | 编译配置默认值 | 605274512=LCD 屏 (ST7701 480x800)，757006876=HDMI 屏 (LT9611 1920x1080@30fps)，可用 list_connector 查看全部类型 |
 | --det-model <path> | YOLOv8 检测模型路径 | yolov8n_320.kmodel | YOLOv8 目标检测的 kmodel 文件路径 |
 | --score-thres <float> | 目标检测置信度阈值 | 0.4 | 低于该阈值的检测结果将被过滤 |
 | --nms-thres <float> | 目标检测 NMS 阈值 | 0.6 | 非极大值抑制阈值，用于去除重复检测框 |
@@ -175,8 +177,15 @@ uvc 为固定参数，无需修改
 
 # 自定义所有参数
 ./multisource_ai_analyzer.elf --det-model yolov8n_320.kmodel --score-thres 0.5 --debug 1 realtime
+
+# 指定 CSI 口接 HDMI 屏
+./multisource_ai_analyzer.elf -s 1 -c 757006876 realtime
 ```
 realtime 为固定参数，无需修改
+
+### 退出程序
+
+程序运行中，在串口终端输入 `q` 并按**回车**即可正常退出（程序会释放 VICAP/OSD/VB 等资源后返回 msh）。
 
 ### 查看帮助
 
@@ -199,6 +208,11 @@ Required:
                             - "rtsp://*"   RTSP 网络视频流
 
 Optional:
+  -s, --csi <num>           Sensor 所在 CSI 口 (0-2, 默认：2，随编译配置 CONFIG_MPP_SENSOR_DEFAULT_CSI 变化)
+  -c, --connector <type>    显示器连接器类型，数值 (默认：605274512，随编译配置 DISPLAY_TYPE 变化)
+                              605274512  = LCD 屏 (ST7701 480x800)
+                              757006876  = HDMI 屏 (LT9611 1920x1080@30fps)
+                              可运行 list_connector 查看全部可选类型
   --det-model <path>        YOLOv8 检测模型路径 (默认：yolov8n_320.kmodel)
   --score-thres <float>     检测置信度阈值 (默认：0.4)
   --nms-thres <float>       NMS 阈值 (默认：0.6)
@@ -217,6 +231,7 @@ Optional:
 Examples:
   multisource_ai_analyzer.elf "rtsp://192.168.1.100:554/stream1"
   multisource_ai_analyzer.elf --det-model yolov8n_320.kmodel --score-thres 0.5 "realtime"
+  multisource_ai_analyzer.elf -s 1 -c 757006876 "realtime"
   multisource_ai_analyzer.elf --debug 1 --track-high 0.7 test.mp4
 ```
 
@@ -427,11 +442,11 @@ multisource_ai_analyzer/
 
 ### 核心配置项
 
-编辑 `src/setting.h`，只有两个核心配置项：
+编辑 `src/setting.h`，只有两个核心配置项（均只影响**编译期默认值**）：
 
 ```c
 // ================================
-// 显示类型配置
+// 显示类型配置（默认连接器，运行时可用 -c 覆盖）
 // ================================
 #define DISPLAY_TYPE 'st7701'   // 'st7701' = LCD 屏 (800x480), 'lt9611' = HDMI (1920x1080)
 
@@ -441,22 +456,31 @@ multisource_ai_analyzer/
 #define RTSP_RTP_OVER_TCP 1     // 1 = RTP over TCP (跨网络/防火墙/网络不稳定), 0 = RTP over UDP (局域网/低延迟)
 ```
 
-### DISPLAY_TYPE 详解
+### 显示配置：运行时切换（推荐）
+
+**换屏不用重新编译**：启动时用 `-c/--connector` 指定连接器类型，CSI 口用 `-s/--csi` 指定：
+
+```bash
+./multisource_ai_analyzer.elf -s 2 -c 757006876 realtime    # CSI2 + HDMI 屏
+./multisource_ai_analyzer.elf -c 605274512 realtime          # 默认 CSI + LCD 屏
+```
+
+显示分辨率与旋转角度由程序在运行时根据连接器信息自动推导：竖屏面板（如 ST7701 480x800、HX8377 1080x1920）自动横屏使用（交换宽高 + 90° 旋转）。
+
+### DISPLAY_TYPE 详解（编译期默认值）
 
 | 值 | 显示设备 | 分辨率 | 适用场景 |
 |----|----------|--------|----------|
 | `'st7701'` | LCD 触摸屏 | 800x480 | 便携式设备、嵌入式开发板 |
 | `'lt9611'` | HDMI 显示器 | 1920x1080 | 桌面显示器、电视 |
 
-**修改后会自动调整以下参数：**
+**该宏决定以下默认参数（运行时会被 -c 指定的连接器实际参数取代）：**
 
 | 参数 | st7701 | lt9611 |
 |------|--------|--------|
-| `DISPLAY_WIDTH` | 800 | 1920 |
-| `DISPLAY_HEIGHT` | 480 | 1080 |
-| `AI_FRAME_WIDTH` | 800 | 1920 |
-| `AI_FRAME_HEIGHT` | 480 | 1080 |
+| 默认连接器类型 | 605274512 | 757006876 |
 | `DISPLAY_MODE` | 1 (旋转 90°) | 0 (不旋转) |
+| `ISP_WIDTH/HEIGHT` | 1920x1080 | 1920x1080 |
 
 ### RTSP_RTP_OVER_TCP 详解
 

@@ -4,23 +4,15 @@
 #define ALIGN_UP_16(x)  (((x) + 15) & ~15)
 
 /* 构造函数：初始化管线各模块的默认配置 */
-PipeLine::PipeLine(int debug_mode)
+PipeLine::PipeLine(int debug_mode, k_u32 csi_num, k_connector_type connector)
 {
-    // ------------------------ 显示接口类型选择 ------------------------
-    // 根据宏 DISPLAY_MODE 选择不同屏幕（MIPI/HDMI 等）
-    if(DISPLAY_MODE==0){
-        connector_type = LT9611_MIPI_4LAN_1920X1080_30FPS;
-    }
-    else if(DISPLAY_MODE==1){
-        connector_type = ST7701_V1_MIPI_2LAN_480X800_30FPS;
-    }
-    else if(DISPLAY_MODE==2){
-        connector_type = HX8377_V2_MIPI_4LAN_1080X1920_30FPS;
-    }
-    else{
-        // 默认回退为 1080P HDMI 输出
-        connector_type = LT9611_MIPI_4LAN_1920X1080_30FPS;
-    }
+    // ------------------------ 显示接口类型 ------------------------
+    // 由命令行 -c/--connector 传入（默认 DEFAULT_CONNECTOR_TYPE，编译期由 DISPLAY_MODE 推导）
+    connector_type = connector;
+
+    // ------------------------ Sensor 所在 CSI 口 ------------------------
+    // 由命令行 -s/--csi 传入
+    csi_num_ = csi_num;
 
     // ------------------------ VO（视频输出）相关 ID ------------------------
     vo_dev_id = K_VO_DISPLAY_DEV_ID;        // VO 设备 ID
@@ -36,6 +28,13 @@ PipeLine::PipeLine(int debug_mode)
     vicap_chn_to_vo = VICAP_CHN_ID_0;
     // VICAP → AI 通道（用于算法推理）
     vicap_chn_to_ai = VICAP_CHN_ID_1;
+
+    // 显示分辨率在 Create() 中根据连接器信息推导
+    rotate_90_ = 0;
+    display_width_ = 0;
+    display_height_ = 0;
+    osd_width_ = 0;
+    osd_height_ = 0;
 
     // 调试模式开关
     debug_mode_ = debug_mode;
@@ -85,29 +84,30 @@ int PipeLine::Create()
     }
 
     // =============================================================================================
-    // 2. 创建 OSD 专用 VB 内存池（用于 ARGB8888 叠加图层）
-    // =============================================================================================
-    // 用于存放一帧 OSD 数据（如 AI 结果绘制）
-    if(USE_OSD == 1){
-        k_vb_pool_config pool_config;
-        memset(&pool_config, 0, sizeof(pool_config));
-        pool_config.blk_cnt = 3; // 3 个缓冲块，避免帧冲突
-        pool_config.blk_size = VICAP_ALIGN_UP((OSD_WIDTH * OSD_HEIGHT * OSD_CHANNEL), VICAP_ALIGN_1K);
-        pool_config.mode = VB_REMAP_MODE_NOCACHE; // 非 cache 映射，避免缓存一致性问题
-        osd_pool_id = kd_mpi_vb_create_pool(&pool_config);
-    }
-
-    // =============================================================================================
-    // 3. 屏幕（Connector）配置
+    // 2. 屏幕（Connector）配置
     // =============================================================================================
     k_connector_info connector_info;
     memset(&connector_info, 0, sizeof(k_connector_info));
 
-    // 根据 connector 类型获取硬件参数
+    // 根据 connector 类型获取硬件参数（类型由命令行 -c/--connector 指定）
     ret = kd_mpi_get_connector_info(connector_type, &connector_info);
     if (ret) {
         printf("the connector type not supported!\n");
         return ret;
+    }
+
+    // 从连接器信息推导横屏显示分辨率与旋转（复用统一推导逻辑）
+    {
+        bool portrait = false;
+        int disp_w = 0, disp_h = 0;
+        GetConnectorDisplaySize(connector_type, disp_w, disp_h, &portrait);
+        rotate_90_ = portrait ? 1 : 0;
+        display_width_  = disp_w;
+        display_height_ = disp_h;
+        osd_width_  = disp_w;
+        osd_height_ = disp_h;
+        printf("connector %u: display %ux%u, rotate90=%d\n",
+               (k_u32)connector_type, display_width_, display_height_, rotate_90_);
     }
 
     // 打开 connector 设备
@@ -139,6 +139,19 @@ int PipeLine::Create()
     }
 
     // =============================================================================================
+    // 3. 创建 OSD 专用 VB 内存池（用于 ARGB8888 叠加图层）
+    // =============================================================================================
+    // 用于存放一帧 OSD 数据（如 AI 结果绘制），大小取决于运行时显示分辨率
+    if(USE_OSD == 1){
+        k_vb_pool_config pool_config;
+        memset(&pool_config, 0, sizeof(pool_config));
+        pool_config.blk_cnt = 3; // 3 个缓冲块，避免帧冲突
+        pool_config.blk_size = VICAP_ALIGN_UP((osd_width_ * osd_height_ * OSD_CHANNEL), VICAP_ALIGN_1K);
+        pool_config.mode = VB_REMAP_MODE_NOCACHE; // 非 cache 映射，避免缓存一致性问题
+        osd_pool_id = kd_mpi_vb_create_pool(&pool_config);
+    }
+
+    // =============================================================================================
     // 4. 配置 VO（视频输出层：用于显示摄像头画面）
     // =============================================================================================
     kd_mpi_vo_disable_layer(vi_vo_id);  // 先关闭 layer，避免旧配置干扰
@@ -147,14 +160,14 @@ int PipeLine::Create()
     vi_vo_attr.layer_id        = vi_vo_id;
     vi_vo_attr.position.x      = 0;
     vi_vo_attr.position.y      = 0;
-    vi_vo_attr.img_size.width  = DISPLAY_WIDTH;
-    vi_vo_attr.img_size.height = DISPLAY_HEIGHT;
+    vi_vo_attr.img_size.width  = display_width_;
+    vi_vo_attr.img_size.height = display_height_;
     vi_vo_attr.pixel_format    = PIXEL_FORMAT_YUV_SEMIPLANAR_420; // NV12
     vi_vo_attr.global_alpha   = 0xFF;                            // 不透明
-    // 根据 DISPLAY_MODE 是否需要旋转
-    vi_vo_attr.func            = DISPLAY_MODE? GDMA_ROTATE_DEGREE_90 : GDMA_ROTATE_DEGREE_0;
+    // 竖屏面板需要旋转 90°
+    vi_vo_attr.func            = rotate_90_? GDMA_ROTATE_DEGREE_90 : GDMA_ROTATE_DEGREE_0;
     // 若旋转，需要额外的 DMA buffer
-    vi_vo_attr.rot_buf_nr      = DISPLAY_MODE? 1 : 0;
+    vi_vo_attr.rot_buf_nr      = rotate_90_? 1 : 0;
     vi_vo_attr.rot_buf_bpp     = 0;
 
     ret = kd_mpi_vo_set_layer_attr(vi_vo_id, &vi_vo_attr);
@@ -170,7 +183,7 @@ int PipeLine::Create()
     }
 
     printf("VICAP to VO: layer=%d configured for %ux%u NV12, rotate90=%d\n",
-           vi_vo_id, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MODE ? 1 : 0);
+           vi_vo_id, display_width_, display_height_, rotate_90_);
 
     // =============================================================================================
     // 5. 配置 OSD 层（ARGB8888 叠加图层）
@@ -182,12 +195,12 @@ int PipeLine::Create()
         osd_vo_attr.layer_id        = osd_vo_id;
         osd_vo_attr.position.x      = 0;
         osd_vo_attr.position.y      = 0;
-        osd_vo_attr.img_size.width  = OSD_WIDTH;
-        osd_vo_attr.img_size.height = OSD_HEIGHT;
+        osd_vo_attr.img_size.width  = osd_width_;
+        osd_vo_attr.img_size.height = osd_height_;
         osd_vo_attr.pixel_format    = PIXEL_FORMAT_ARGB_8888;  // OSD 常用 BGRA/ARGB
         osd_vo_attr.global_alpha    = 0xFF;
-        osd_vo_attr.func            = DISPLAY_MODE? GDMA_ROTATE_DEGREE_90 : GDMA_ROTATE_DEGREE_0;
-        osd_vo_attr.rot_buf_nr      = DISPLAY_MODE? 2 : 0;
+        osd_vo_attr.func            = rotate_90_? GDMA_ROTATE_DEGREE_90 : GDMA_ROTATE_DEGREE_0;
+        osd_vo_attr.rot_buf_nr      = rotate_90_? 2 : 0;
         osd_vo_attr.rot_buf_bpp     = 0;
 
         ret = kd_mpi_vo_set_layer_attr(osd_vo_id, &osd_vo_attr);
@@ -203,10 +216,10 @@ int PipeLine::Create()
         }
 
         printf("OSD to VO: layer=%d configured for %ux%u BGRA8888, rotate90=%d\n",
-               osd_vo_id, OSD_WIDTH, OSD_HEIGHT, DISPLAY_ROTATE ? 1 : 0);
+               osd_vo_id, osd_width_, osd_height_, rotate_90_);
 
         // --------------------- 从 OSD VB 池获取一块缓存，用于写入叠加数据 ---------------------
-        k_s32 size = VICAP_ALIGN_UP(OSD_HEIGHT * OSD_WIDTH * OSD_CHANNEL, VICAP_ALIGN_1K);
+        k_s32 size = VICAP_ALIGN_UP(osd_height_ * osd_width_ * OSD_CHANNEL, VICAP_ALIGN_1K);
 
         // 从指定内存池中申请一块缓存
         handle = kd_mpi_vb_get_block(osd_pool_id, size, NULL);
@@ -234,9 +247,9 @@ int PipeLine::Create()
 
         // 初始化 OSD 帧描述结构
         memset(&osd_frame_info, 0, sizeof(osd_frame_info));
-        osd_frame_info.v_frame.width        = OSD_WIDTH;
-        osd_frame_info.v_frame.height       = OSD_HEIGHT;
-        osd_frame_info.v_frame.stride[0]    = OSD_WIDTH*4;
+        osd_frame_info.v_frame.width        = osd_width_;
+        osd_frame_info.v_frame.height       = osd_height_;
+        osd_frame_info.v_frame.stride[0]    = osd_width_*4;
         osd_frame_info.v_frame.pixel_format = PIXEL_FORMAT_BGRA_8888;
         osd_frame_info.mod_id               = K_ID_VO;
         osd_frame_info.pool_id              = osd_pool_id;
@@ -250,10 +263,10 @@ int PipeLine::Create()
     // =============================================================================================
     // 6. 传感器探测 & VICAP 设备配置
     // =============================================================================================
-    // 自动探测 Sensor
+    // 自动探测 Sensor（CSI 口由命令行 -s/--csi 指定）
     k_vicap_probe_config probe_cfg;
     k_vicap_sensor_info sensor_info;
-    probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
+    probe_cfg.csi_num = csi_num_;
     probe_cfg.width   = ISP_WIDTH;
     probe_cfg.height  = ISP_HEIGHT;
     probe_cfg.fps     = 30;
@@ -297,8 +310,8 @@ int PipeLine::Create()
     // =============================================================================================
     k_vicap_chn_attr chn0_attr;
     memset(&chn0_attr, 0, sizeof(k_vicap_chn_attr));
-    chn0_attr.out_win.width  = DISPLAY_WIDTH;
-    chn0_attr.out_win.height = DISPLAY_HEIGHT;
+    chn0_attr.out_win.width  = display_width_;
+    chn0_attr.out_win.height = display_height_;
     chn0_attr.crop_win       = dev_attr.acq_win;
     chn0_attr.scale_win      = chn0_attr.out_win;
     chn0_attr.crop_enable    = K_FALSE;
@@ -306,7 +319,7 @@ int PipeLine::Create()
     chn0_attr.chn_enable     = K_TRUE;
     chn0_attr.pix_format     = PIXEL_FORMAT_YUV_SEMIPLANAR_420; // NV12
     chn0_attr.buffer_num     = VICAP_MAX_FRAME_COUNT;
-    chn0_attr.buffer_size    = VICAP_ALIGN_UP((DISPLAY_WIDTH * DISPLAY_HEIGHT * 3 / 2), VICAP_ALIGN_1K);
+    chn0_attr.buffer_size    = VICAP_ALIGN_UP((display_width_ * display_height_ * 3 / 2), VICAP_ALIGN_1K);
     chn0_attr.buffer_pool_id = VB_INVALID_POOLID;
 
     printf("vicap ...kd_mpi_vicap_set_chn_attr, buffer_size[%d]\n", chn0_attr.buffer_size);
@@ -331,10 +344,11 @@ int PipeLine::Create()
     // =============================================================================================
     // 8. VICAP 通道 1：输出给 AI 使用（RGB Planar）
     // =============================================================================================
+    // AI 帧尺寸与显示分辨率一致（与原 AI_FRAME_WIDTH/HEIGHT 宏的行为保持相同）
     k_vicap_chn_attr chn1_attr;
     memset(&chn1_attr, 0, sizeof(k_vicap_chn_attr));
-    chn1_attr.out_win.width  = AI_FRAME_WIDTH;
-    chn1_attr.out_win.height = AI_FRAME_HEIGHT;
+    chn1_attr.out_win.width  = display_width_;
+    chn1_attr.out_win.height = display_height_;
     chn1_attr.crop_win       = dev_attr.acq_win;
     chn1_attr.scale_win      = chn1_attr.out_win;
     chn1_attr.crop_enable    = K_FALSE;
@@ -342,7 +356,7 @@ int PipeLine::Create()
     chn1_attr.chn_enable     = K_TRUE;
     chn1_attr.pix_format     = PIXEL_FORMAT_RGB_888_PLANAR; // AI 常用输入格式
     chn1_attr.buffer_num     = VICAP_MAX_FRAME_COUNT;
-    chn1_attr.buffer_size    = VICAP_ALIGN_UP((AI_FRAME_WIDTH * AI_FRAME_HEIGHT * 3 ), VICAP_ALIGN_1K);
+    chn1_attr.buffer_size    = VICAP_ALIGN_UP((display_width_ * display_height_ * 3 ), VICAP_ALIGN_1K);
     chn1_attr.buffer_pool_id = VB_INVALID_POOLID;
 
     printf("kd_mpi_vicap_set_chn_attr, buffer_size[%d]\n", chn1_attr.buffer_size);
@@ -393,7 +407,7 @@ int PipeLine::GetFrame(DumpRes &dump_res){
     // 将物理地址映射为虚拟地址，供 CPU 访问
     dump_res.virt_addr = reinterpret_cast<uintptr_t>(
         kd_mpi_sys_mmap(dump_info.v_frame.phys_addr[0],
-                        AI_FRAME_CHANNEL*AI_FRAME_HEIGHT*AI_FRAME_WIDTH));
+                        AI_FRAME_CHANNEL*display_height_*display_width_));
     dump_res.phy_addr = reinterpret_cast<uintptr_t>(dump_info.v_frame.phys_addr[0]);
 
     return 0;
@@ -406,7 +420,7 @@ int PipeLine::ReleaseFrame(DumpRes &dump_res){
 
     // 解除虚拟地址映射
     kd_mpi_sys_munmap(reinterpret_cast<void*>(dump_res.virt_addr),
-                      AI_FRAME_CHANNEL*AI_FRAME_HEIGHT*AI_FRAME_WIDTH);
+                      AI_FRAME_CHANNEL*display_height_*display_width_);
 
     // 释放 VICAP dump 帧
     ret = kd_mpi_vicap_dump_release(vicap_dev, VICAP_CHN_ID_1, &dump_info);
@@ -423,7 +437,7 @@ int PipeLine::InsertFrame(void* osd_data){
     int ret=0;
 
     // 将外部生成的 OSD 数据拷贝到 VB 映射的内存中
-    memcpy(insert_osd_vaddr, osd_data, OSD_WIDTH * OSD_HEIGHT * OSD_CHANNEL);
+    memcpy(insert_osd_vaddr, osd_data, osd_width_ * osd_height_ * OSD_CHANNEL);
 
     // 插入到 VO 的 OSD layer
     if (kd_mpi_vo_insert_frame(osd_vo_id, &osd_frame_info) != K_SUCCESS) {
@@ -494,7 +508,7 @@ int PipeLine::Destroy()
     // ------------------ 销毁 OSD 内存池 ------------------
     if (osd_pool_id != VB_INVALID_POOLID){
         ret = kd_mpi_sys_munmap(reinterpret_cast<void*>(insert_osd_vaddr),
-                                OSD_WIDTH * OSD_HEIGHT * OSD_CHANNEL);
+                                osd_width_ * osd_height_ * OSD_CHANNEL);
         if (ret) {
             printf("kd_mpi_sys_munmap failed.\n");
             return ret;
@@ -515,4 +529,11 @@ int PipeLine::Destroy()
     }
 
     return 0;
+}
+
+/* 获取 AI 帧尺寸（与显示分辨率一致，RGB_888_PLANAR） */
+void PipeLine::GetFrameSize(int &width, int &height)
+{
+    width = display_width_;
+    height = display_height_;
 }

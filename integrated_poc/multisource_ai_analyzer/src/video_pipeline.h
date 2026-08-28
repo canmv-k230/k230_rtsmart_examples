@@ -73,7 +73,11 @@ public:
 
     // 构造函数
     // @param debug_mode: 是否开启调试模式（影响 ScopedTiming 打印）
-    PipeLine(int debug_mode);
+    // @param csi_num: Sensor 所在 CSI 口（命令行 -s/--csi 指定）
+    // @param connector: 显示器连接器类型（命令行 -c/--connector 指定）
+    PipeLine(int debug_mode,
+             k_u32 csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI,
+             k_connector_type connector = DEFAULT_CONNECTOR_TYPE);
 
     // 析构函数
     ~PipeLine();
@@ -98,6 +102,9 @@ public:
     // 包括 OSD、VICAP、VO、VB、内存池、映射地址等
     int Destroy();
 
+    // 获取 AI 帧尺寸（与显示分辨率一致，RGB_888_PLANAR）
+    void GetFrameSize(int &width, int &height);
+
     bool IsFinished(){return false;}
 
 private:
@@ -110,6 +117,12 @@ private:
     // 屏幕 / Connector 相关
     // ============================
     k_connector_type connector_type; // 显示接口类型（MIPI、HDMI、LCD 等）
+    k_u32 csi_num_;            // Sensor 所在 CSI 口（0-2）
+    int rotate_90_;            // 竖屏面板需要 90° 旋转（1=旋转，0=不旋转）
+    k_u32 display_width_;      // 运行时显示分辨率（横屏，来自连接器信息）
+    k_u32 display_height_;
+    k_u32 osd_width_;          // OSD 层分辨率（与显示一致，ARGB8888）
+    k_u32 osd_height_;
 
     // ============================
     // VO（Video Output）相关

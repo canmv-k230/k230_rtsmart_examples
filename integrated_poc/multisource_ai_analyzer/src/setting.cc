@@ -1,13 +1,38 @@
 #include "setting.h"
 #include <iostream>
 #include <cstring>
+#include <utility>
+#include "mpi_connector_api.h"
 
 using std::cout;
 using std::endl;
 using std::string;
 using std::cerr;
 
+void GetConnectorDisplaySize(k_connector_type type, int &width, int &height, bool *rotate_90)
+{
+    k_connector_info info;
+    memset(&info, 0, sizeof(info));
+    if (kd_mpi_get_connector_info(type, &info) == 0) {
+        width = info.resolution.hactive;
+        height = info.resolution.vactive;
+    } else {
+        // 未知连接器类型，回退 1080P 横屏
+        width = 1920;
+        height = 1080;
+    }
+    // 竖屏面板（如 ST7701 480x800 / HX8377 1080x1920）横屏使用：交换宽高
+    if (width < height) {
+        std::swap(width, height);
+        if (rotate_90) *rotate_90 = true;
+    } else if (rotate_90) {
+        *rotate_90 = false;
+    }
+}
+
 void AppSettings::print() const {
+    int disp_w, disp_h;
+    GetConnectorDisplaySize(connector_type, disp_w, disp_h);
     cout << "=== App Settings ===" << endl;
     cout << "Det Model: " << det_model_path << endl;
     cout << "ReID Model: " << reid_model_path << endl;
@@ -23,6 +48,8 @@ void AppSettings::print() const {
     cout << "Lambda: " << lambda << endl;
     cout << "Debug Mode: " << debug_mode << endl;
     cout << "Video Path: " << video_path << endl;
+    cout << "CSI Num: " << csi_num << endl;
+    cout << "Connector Type: " << connector_type << " (display " << disp_w << "x" << disp_h << ")" << endl;
     cout << "====================" << endl;
 }
 
@@ -38,6 +65,11 @@ void CmdLineParser::print_usage(const char* name)
          << "                            - \"rtsp://*\"   RTSP 网络视频流" << endl
          << endl
          << "Optional:" << endl
+         << "  -s, --csi <num>           Sensor 所在 CSI 口 (0-2, 默认：" << CONFIG_MPP_SENSOR_DEFAULT_CSI << ")" << endl
+         << "  -c, --connector <type>    显示器连接器类型，数值 (默认：" << DEFAULT_CONNECTOR_TYPE << ")" << endl
+         << "                              605274512  = LCD 屏 (ST7701 480x800)" << endl
+         << "                              757006876  = HDMI 屏 (LT9611 1920x1080@30fps)" << endl
+         << "                              可运行 list_connector 查看全部可选类型" << endl
          << "  --det-model <path>        YOLOv8 检测模型路径 (默认：yolov8n_320.kmodel)" << endl
          << "  --score-thres <float>     检测置信度阈值 (默认：0.4)" << endl
          << "  --nms-thres <float>       NMS 阈值 (默认：0.6)" << endl
@@ -56,6 +88,7 @@ void CmdLineParser::print_usage(const char* name)
          << "Examples:" << endl
          << "  " << name << " \"rtsp://192.168.1.100:554/stream1\"" << endl
          << "  " << name << " --det-model yolov8n_320.kmodel --score-thres 0.5 \"realtime\"" << endl
+         << "  " << name << " -s 1 -c 757006876 \"realtime\"" << endl
          << "  " << name << " --debug 1 --track-high 0.7 test.mp4" << endl
          << endl;
 }
@@ -76,6 +109,39 @@ bool CmdLineParser::parse(int argc, char* argv[], AppSettings& settings)
         if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return false;  // 显示帮助后退出
+        }
+        else if (arg == "-s" || arg == "--csi") {
+            if (i + 1 >= argc) {
+                cerr << "Error: -s/--csi requires a number argument (0-2)" << endl;
+                return false;
+            }
+            char *end = nullptr;
+            long val = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || val < 0 || val > 2) {
+                cerr << "Error: -s/--csi requires a number between 0 and 2, got '" << argv[i] << "'" << endl;
+                return false;
+            }
+            settings.csi_num = (int)val;
+        }
+        else if (arg == "-c" || arg == "--connector") {
+            if (i + 1 >= argc) {
+                cerr << "Error: -c/--connector requires a numeric type argument" << endl;
+                return false;
+            }
+            char *end = nullptr;
+            unsigned long val = strtoul(argv[i + 1], &end, 0); // base 0：支持十进制/十六进制
+            if (end == argv[i + 1] || *end != '\0') {
+                cerr << "Error: -c/--connector requires a numeric type, got '" << argv[i + 1] << "'" << endl;
+                return false;
+            }
+            i++;
+            k_connector_info info;
+            if (kd_mpi_get_connector_info((k_connector_type)val, &info) != 0) {
+                cerr << "Error: unsupported connector type " << val
+                     << " (605274512=LCD, 757006876=HDMI, run list_connector for all types)" << endl;
+                return false;
+            }
+            settings.connector_type = (k_connector_type)val;
         }
         else if (arg == "--det-model") {
             if (i + 1 >= argc) {
