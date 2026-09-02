@@ -87,7 +87,7 @@ void dump_touch_config(const struct drv_touch_config_t* config)
     printf("Device Index:      %d\n", config->touch_dev_index);
     printf("Display Range:     %d x %d\n", config->range_x, config->range_y);
     printf("Interrupt Pin:     %d\n", config->pin_intr);
-    printf("Interrupt Value:   %d\n", config->intr_value);
+    printf("Interrupt Mode:    %d\n", config->intr_value);
     printf("Reset Pin:         %d\n", config->pin_reset);
     printf("Reset Value:       %d\n", config->reset_value);
     printf("I2C Bus Index:     %d\n", config->i2c_bus_index);
@@ -219,7 +219,7 @@ void print_usage(const char* program_name)
     printf("  --range-x WIDTH        X-axis range\n");
     printf("  --range-y HEIGHT       Y-axis range\n");
     printf("  --int-pin PIN          Interrupt pin\n");
-    printf("  --int-value VALUE      Interrupt pin value\n");
+    printf("  --int-value MODE       Interrupt mode (0:rising, 1:falling, 2:both, 3:high, 4:low)\n");
     printf("  --reset-pin PIN        Reset pin\n");
     printf("  --reset-value VALUE    Reset pin value\n");
 
@@ -274,7 +274,7 @@ int main(int argc, char* argv[])
         .range_x         = 0, // use system default
         .range_y         = 0, // use system default
         .pin_intr        = -1,
-        .intr_value      = 0,
+        .intr_value      = DRV_TOUCH_INTR_RISING,
         .pin_reset       = -1,
         .reset_value     = 0,
         .i2c_bus_index   = 3,
