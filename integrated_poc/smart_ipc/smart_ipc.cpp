@@ -401,7 +401,7 @@ void MySmartIPC::OnHttpRequest(const char* method, const char* path,
 
 void MySmartIPC::WebRtcThreadMain() {
     /* Initialize libpeer */
-    PeerConfiguration config;
+    PeerConfiguration config{};
     config.datachannel = DATA_CHANNEL_NONE;
     config.video_codec = (input_config_.video_type == KdMediaVideoType::kVideoTypeH265) ? CODEC_H265 : CODEC_H264;
     config.audio_codec = CODEC_NONE;
