@@ -564,7 +564,10 @@ int MySmartIPC::Start() {
     if (started_) return 0;
 
     // 启动媒体服务
-    media_.enable_media_features();
+    if (0 != media_.enable_media_features()) {
+        printf("MySmartIPC::Start failed: enable_media_features error\n");
+        return -1;
+    }
     started_ = true;
 
     // 通知流媒体线程可以启动服务
@@ -577,7 +580,9 @@ int MySmartIPC::Stop() {
 
     // 停止媒体服务
     started_ = false;
-    media_.disable_media_features();
+    if (0 != media_.disable_media_features()) {
+        printf("MySmartIPC::Stop: disable_media_features reported errors\n");
+    }
 
     // 通知流媒体线程停止服务
     streaming_cv_.notify_one();

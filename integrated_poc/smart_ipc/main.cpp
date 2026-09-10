@@ -247,10 +247,18 @@ int main(int argc, char *argv[]) {
     if (!smartIPC || smartIPC->Init(config, "test", mode, port) < 0) {
         std::cout << "SmartIPC Init failed." << std::endl;
         smartIPC->DeInit();
+        delete smartIPC;
+        delete st;
         return -1;
     }
 
-    smartIPC->Start();
+    if (smartIPC->Start() < 0) {
+        std::cout << "SmartIPC Start failed." << std::endl;
+        smartIPC->DeInit();
+        delete smartIPC;
+        delete st;
+        return -1;
+    }
     printf("SmartIPC started (%s mode, port %d).\n",
            (mode == StreamingMode::kRtsp) ? "RTSP" : "WebRTC", port);
     delete st;

@@ -1,6 +1,7 @@
 #include "media.h"
 #include <fcntl.h>
 #include <cstring>
+#include <cerrno>
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -469,66 +470,138 @@ int KdMedia::configure_media_features(const KdMediaInputConfig &input_config, co
 
 int KdMedia::enable_media_features()
 {
-    // Audio codec initialization takes a long time, so it is executed in a separate thread
-    if (feature_config_.enable_audio_encoder)
-        pthread_create(&start_ai_aenc_tid_, NULL, start_ai_aenc_thread, this);
+    const char *failed_step = NULL;
 
-    //init vicap
-    _init_vi_cap();
-
-    //init vo
+    // Single-pass bring-up: the first failing step breaks out and everything that
+    // was already brought up is released below, instead of running on with a
+    // half-initialized pipeline.
+    do
     {
-        ScopedTiming st = ScopedTiming("@@@@@@_init_vo_layer_osd", 1);
-        _init_vo_layer_osd();
-    }
+        // Audio codec initialization takes a long time, so it is executed in a separate thread
+        if (feature_config_.enable_audio_encoder)
+        {
+            if (0 != pthread_create(&start_ai_aenc_tid_, NULL, start_ai_aenc_thread, this))
+            {
+                start_ai_aenc_tid_ = 0;
+                failed_step = "create start_ai_aenc thread";
+                break;
+            }
+        }
 
-    // start vicap
+        //init vicap
+        if (0 != _init_vi_cap())
+        {
+            failed_step = "_init_vi_cap";
+            break;
+        }
+
+        //init vo
+        {
+            ScopedTiming st = ScopedTiming("@@@@@@_init_vo_layer_osd", 1);
+            if (0 != _init_vo_layer_osd())
+            {
+                failed_step = "_init_vo_layer_osd";
+                break;
+            }
+        }
+
+        // start vicap
+        {
+            ScopedTiming st = ScopedTiming("@@@@@@_start_vi_cap", 1);
+            if (0 != _start_vi_cap())
+            {
+                failed_step = "_start_vi_cap";
+                break;
+            }
+        }
+
+        //start dump frame for ai analysis
+        if (0 != _start_dump_frame_for_ai_analysis())
+        {
+            failed_step = "_start_dump_frame_for_ai_analysis";
+            break;
+        }
+
+        //start wbc frame
+        if (input_config_.venc_data_source_type == DATA_SOURCE_VO_WBC && feature_config_.enable_video_encoder){
+            if (0 != _start_dump_wbc_frame())
+            {
+                failed_step = "_start_dump_wbc_frame";
+                break;
+            }
+        }
+
+        //init venc
+        if (0 != _init_venc())
+        {
+            failed_step = "_init_venc";
+            break;
+        }
+
+        //start vicap venc
+        if (0 != _start_venc())
+        {
+            failed_step = "_start_venc";
+            break;
+        }
+    } while (0);
+
+    if (failed_step != NULL)
     {
-        ScopedTiming st = ScopedTiming("@@@@@@_start_vi_cap", 1);
-        _start_vi_cap();
+        printf("enable_media_features failed at %s, rolling back.\n", failed_step);
+        // Release whatever has already been brought up, so that the caller can bail
+        // out (or retry) without leaving vicap/vo/venc/audio half-initialized.
+        disable_media_features();
+        return -1;
     }
-
-    //start dump frame for ai analysis
-    _start_dump_frame_for_ai_analysis();
-
-    //start wbc frame
-    if (input_config_.venc_data_source_type == DATA_SOURCE_VO_WBC && feature_config_.enable_video_encoder){
-        _start_dump_wbc_frame();
-    }
-
-    //init venc
-    _init_venc();
-
-    //start vicap venc
-    _start_venc();
 
     return 0;
 }
 
 int KdMedia::disable_media_features()
 {
+    // Best effort: every step is guarded by its own "was it started" flag, and a
+    // failure in one step must not skip the teardown of the remaining ones.
+    int ret = 0;
+
     //stop dump frame for ai analysis
-    _stop_dump_frame_for_ai_analysis();
+    if (0 != _stop_dump_frame_for_ai_analysis())
+        ret = -1;
 
     //stop wbc frame
-    _stop_dump_wbc_frame();
+    if (0 != _stop_dump_wbc_frame())
+        ret = -1;
 
     //stop venc
-    _stop_venc();
-    _deinit_venc();
+    if (0 != _stop_venc())
+        ret = -1;
+    if (0 != _deinit_venc())
+        ret = -1;
 
     //stop vo
-    _deinit_vo_layer_osd();
+    if (0 != _deinit_vo_layer_osd())
+        ret = -1;
+
+    //wait for the audio init thread, it may still be touching ai/aenc
+    if (start_ai_aenc_tid_ != 0)
+    {
+        pthread_join(start_ai_aenc_tid_, NULL);
+        start_ai_aenc_tid_ = 0;
+    }
 
     //stop ai,aenc
-    _stop_ai_aenc();
-    _deinit_ai_aenc();
+    if (0 != _stop_ai_aenc())
+        ret = -1;
+    if (0 != _deinit_ai_aenc())
+        ret = -1;
 
     //stop vi cap
-    _stop_vi_cap();
-    _deinit_vi_cap();
+    if (0 != _stop_vi_cap())
+        ret = -1;
+    if (0 != _deinit_vi_cap())
+        ret = -1;
 
-    return 0;
+    return ret;
 }
 
 int KdMedia::destroy_media_features()
@@ -558,6 +631,7 @@ int KdMedia::_init_vb_pool()
         printf("vb_init failed ret:%d\n", ret);
         return ret;
     }
+    vb_pool_initialized_ = true;
 
     //vb for osd
     if (feature_config_.enable_ai_analysis)
@@ -584,7 +658,10 @@ int KdMedia::_deinit_vb_pool()
         kd_mpi_vb_destory_pool(osd_pool_id_);
         osd_pool_id_ = VB_INVALID_POOLID;
     }
-    kd_mpi_vb_exit();
+    if (vb_pool_initialized_) {
+        vb_pool_initialized_ = false;
+        kd_mpi_vb_exit();
+    }
     return 0;
 }
 
@@ -597,6 +674,8 @@ int KdMedia::_init_vi_cap()
     k_s32 vicap_chn_index = -1;
     k_vicap_dev vicap_dev = vi_dev_id_;
 
+    vi_cap_initialized_ = false;
+
     memset(&vcap_dev_info_, 0, sizeof(vcap_dev_info_));
     vcap_dev_info_.dw_en = K_FALSE;
     vcap_dev_info_.pipe_ctrl.data = 0xFFFFFFFF;
@@ -604,7 +683,12 @@ int KdMedia::_init_vi_cap()
     vcap_dev_info_.vicap_dev = vi_dev_id_;
     vcap_dev_info_.mode = VICAP_WORK_ONLINE_MODE;
 
-    kd_sample_vicap_set_dev_attr(vcap_dev_info_);
+    ret = kd_sample_vicap_set_dev_attr(vcap_dev_info_);
+    if (ret != K_SUCCESS)
+    {
+        printf("vicap dev %d set attr failed, sensor_type %d, %x.\n", vi_dev_id_, input_config_.sensor_type, ret);
+        return -1;
+    }
 
     //set chn0 output yuv420sp for vo render
     if (feature_config_.enable_render)
@@ -730,11 +814,20 @@ int KdMedia::_init_vi_cap()
 
     }
 
+    if (vicap_chn_index < 0)
+    {
+        printf("vicap dev %d has no channel enabled, check render/ai/venc feature config.\n", vi_dev_id_);
+        return -1;
+    }
+
+    vi_cap_initialized_ = true;
+
     return 0;
 }
 
 int KdMedia::_deinit_vi_cap()
 {
+    vi_cap_initialized_ = false;
 
     return 0;
 }
@@ -928,42 +1021,57 @@ int KdMedia::_init_vo_layer_osd()
 
     //init wbc
     if (input_config_.venc_data_source_type == DATA_SOURCE_VO_WBC && feature_config_.enable_video_encoder){
-        _init_wbc();
+        if (0 != _init_wbc())
+        {
+            printf("init wbc failed\n");
+            return -1;
+        }
     }
 
     //vi bind vo
     ret = kd_sample_vi_bind_vo(vi_dev_id_, vi_chn_render_id_, K_VO_DISPLAY_DEV_ID, vo_layer_chn_id_);
+    if (ret != K_SUCCESS)
+    {
+        printf("vi bind vo failed:0x%x\n", ret);
+        return -1;
+    }
 
-    return ret;
+    vo_layer_osd_initialized_ = true;
+
+    return 0;
 }
 
 int KdMedia::_deinit_vo_layer_osd()
 {
-    if (!feature_config_.enable_render)
+    if (!feature_config_.enable_render || !vo_layer_osd_initialized_)
     {
         return 0;
     }
 
+    // Best effort: keep tearing down even if one step fails, otherwise the connector
+    // would stay powered on and the display could not be brought up again.
     k_s32 ret = 0;
+    vo_layer_osd_initialized_ = false;
+
     //vi unbind vo
     if (0 != kd_sample_vi_unbind_vo(vi_dev_id_, vi_chn_render_id_, K_VO_DISPLAY_DEV_ID, vo_layer_chn_id_))
     {
         printf("vi unbind vo failed\n");
-        return -1;
+        ret = -1;
     }
 
     //deinit osd
     if (0 != _deinit_osd(osd_id_))
     {
         printf("deinit osd failed\n");
-        return -1;
+        ret = -1;
     }
 
     //deinit layer
     if (0 != _deinit_layer(vo_layer_chn_id_))
     {
         printf("deinit layer failed\n");
-        return -1;
+        ret = -1;
     }
 
     //deinit connector
@@ -976,7 +1084,7 @@ int KdMedia::_deinit_vo_layer_osd()
 
     //kd_display_reset();
 
-    return 0;
+    return ret;
 }
 
 int KdMedia::_init_wbc()
@@ -1089,6 +1197,7 @@ int KdMedia::_init_venc()
         if (ret != K_SUCCESS)
         {
             printf("kd_mpi_venc_enable_idr failed:0x%x\n", ret);
+            kd_mpi_venc_destroy_chn(venc_chn_id);
             return -1;
         }
     }
@@ -1098,8 +1207,11 @@ int KdMedia::_init_venc()
     if (ret != K_SUCCESS)
     {
         printf("kd_mpi_venc_set_rotation failed:0x%x\n", ret);
+        kd_mpi_venc_destroy_chn(venc_chn_id);
         return -1;
     }
+
+    venc_initialized_ = true;
 
     return 0;
 }
@@ -1107,10 +1219,12 @@ int KdMedia::_init_venc()
 int KdMedia::_deinit_venc()
 {
     k_s32 ret = -1;
-    if (!feature_config_.enable_video_encoder)
+    if (!feature_config_.enable_video_encoder || !venc_initialized_)
     {
         return 0;
     }
+
+    venc_initialized_ = false;
 
     ret = kd_mpi_venc_detach_vb_pool(venc_chn_id_);
     if (ret != K_SUCCESS)
@@ -1202,12 +1316,47 @@ int KdMedia::_deinit_ai_aenc()
 
 int KdMedia::_start_vi_cap()
 {
-    return kd_sample_vicap_start(vi_dev_id_);
+    if (!vi_cap_initialized_)
+    {
+        printf("vicap dev %d not initialized, can not start.\n", vi_dev_id_);
+        return -1;
+    }
+
+    if (vi_cap_started_)
+    {
+        return 0;
+    }
+
+    // kd_sample_vicap_start() already rolls back kd_mpi_vicap_init()/start_stream()
+    // internally, so on failure the dev is left deinited: don't set the started flag,
+    // otherwise _stop_vi_cap() would deinit it a second time.
+    k_s32 ret = kd_sample_vicap_start(vi_dev_id_);
+    if (ret != K_SUCCESS)
+    {
+        printf("vicap dev %d start failed, %x.\n", vi_dev_id_, ret);
+        return -1;
+    }
+
+    vi_cap_started_ = true;
+
+    return 0;
 }
 
 int KdMedia::_stop_vi_cap()
 {
-    kd_sample_vicap_stop(vi_dev_id_);
+    if (!vi_cap_started_)
+    {
+        return 0;
+    }
+
+    vi_cap_started_ = false;
+
+    if (K_SUCCESS != kd_sample_vicap_stop(vi_dev_id_))
+    {
+        printf("vicap dev %d stop failed.\n", vi_dev_id_);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -1218,11 +1367,29 @@ int KdMedia::_start_venc()
         return 0;
     }
 
-    kd_mpi_venc_start_chn(venc_chn_id_);
+    if (!venc_initialized_)
+    {
+        printf("venc chn %d not initialized, can not start.\n", venc_chn_id_);
+        return -1;
+    }
+
+    k_s32 start_ret = kd_mpi_venc_start_chn(venc_chn_id_);
+    if (start_ret != K_SUCCESS)
+    {
+        printf("kd_mpi_venc_start_chn failed:0x%x\n", start_ret);
+        return -1;
+    }
+
     if (!start_get_video_stream_)
     {
         start_get_video_stream_ = true;
-        pthread_create(&venc_tid_, NULL, venc_stream_thread, this);
+        if (0 != pthread_create(&venc_tid_, NULL, venc_stream_thread, this))
+        {
+            printf("create venc stream thread failed, errno:%d\n", errno);
+            start_get_video_stream_ = false;
+            kd_mpi_venc_stop_chn(venc_chn_id_);
+            return -1;
+        }
     }
 
     //from vicap chn to venc chn，without ai analysis
@@ -1241,7 +1408,7 @@ int KdMedia::_start_venc()
 
 int KdMedia::_stop_venc()
 {
-    if (!feature_config_.enable_video_encoder)
+    if (!feature_config_.enable_video_encoder || !venc_initialized_)
     {
         return 0;
     }
@@ -1281,11 +1448,31 @@ int KdMedia::_start_ai_aenc()
     memset(&vqe_enable, 0, sizeof(vqe_enable));
     vqe_enable.ans_enable = K_TRUE;
     ret = kd_mpi_ai_set_vqe_attr(ai_dev_, ai_chn_, vqe_enable);
+    if (ret != K_SUCCESS)
+    {
+        printf("kd_mpi_ai_set_vqe_attr failed:0x%x\n", ret);
+        kd_mpi_ai_disable(ai_dev_);
+        return K_FAILED;
+    }
 
     //enable ai chn
     ret = kd_mpi_ai_enable_chn(ai_dev_, ai_chn_);
+    if (ret != K_SUCCESS)
+    {
+        printf("kd_mpi_ai_enable_chn failed:0x%x\n", ret);
+        kd_mpi_ai_disable(ai_dev_);
+        return K_FAILED;
+    }
+
     //bind ai and aenc
-    kd_sample_aenc_bind_ai(ai_dev_, ai_chn_, aenc_handle_);
+    ret = kd_sample_aenc_bind_ai(ai_dev_, ai_chn_, aenc_handle_);
+    if (ret != K_SUCCESS)
+    {
+        printf("kd_sample_aenc_bind_ai failed:0x%x\n", ret);
+        kd_mpi_ai_disable_chn(ai_dev_, ai_chn_);
+        kd_mpi_ai_disable(ai_dev_);
+        return K_FAILED;
+    }
 
     //start get aenc data
     if (!start_get_audio_stream_)
@@ -1295,6 +1482,9 @@ int KdMedia::_start_ai_aenc()
     else
     {
         printf("aenc handle:%d already start\n", aenc_handle_);
+        kd_sample_aenc_unbind_ai(ai_dev_, ai_chn_, aenc_handle_);
+        kd_mpi_ai_disable_chn(ai_dev_, ai_chn_);
+        kd_mpi_ai_disable(ai_dev_);
         return K_FAILED;
     }
 
@@ -1303,8 +1493,18 @@ int KdMedia::_start_ai_aenc()
         start_get_audio_stream_ = K_FALSE;
         pthread_join(get_audio_stream_tid_, NULL);
         get_audio_stream_tid_ = 0;
+        start_get_audio_stream_ = K_TRUE;
     }
-    pthread_create(&get_audio_stream_tid_, NULL, aenc_chn_get_stream_thread, this);
+    if (0 != pthread_create(&get_audio_stream_tid_, NULL, aenc_chn_get_stream_thread, this))
+    {
+        printf("create aenc get stream thread failed, errno:%d\n", errno);
+        get_audio_stream_tid_ = 0;
+        start_get_audio_stream_ = K_FALSE;
+        kd_sample_aenc_unbind_ai(ai_dev_, ai_chn_, aenc_handle_);
+        kd_mpi_ai_disable_chn(ai_dev_, ai_chn_);
+        kd_mpi_ai_disable(ai_dev_);
+        return K_FAILED;
+    }
 
     ai_started_ = true;
     return 0;
@@ -1380,7 +1580,13 @@ int KdMedia::_start_dump_frame_for_ai_analysis()
         pthread_join(ai_analysis_frame_tid_, NULL);
         ai_analysis_frame_tid_ = 0;
     }
-    pthread_create(&ai_analysis_frame_tid_, NULL, ai_analysis_frame_thread, this);
+    if (0 != pthread_create(&ai_analysis_frame_tid_, NULL, ai_analysis_frame_thread, this))
+    {
+        printf("create ai analysis frame thread failed, errno:%d\n", errno);
+        ai_analysis_frame_tid_ = 0;
+        start_dump_ai_analysis_frame_ = K_FALSE;
+        return K_FAILED;
+    }
     return 0;
 }
 
@@ -1413,7 +1619,14 @@ int KdMedia::_start_dump_wbc_frame()
         pthread_join(wbc_frame_tid_, NULL);
         wbc_frame_tid_ = 0;
     }
-    pthread_create(&wbc_frame_tid_, NULL, wbc_frame_thread, this);
+    if (0 != pthread_create(&wbc_frame_tid_, NULL, wbc_frame_thread, this))
+    {
+        printf("create wbc frame thread failed, errno:%d\n", errno);
+        wbc_frame_tid_ = 0;
+        start_dump_wbc_frame_ = K_FALSE;
+        return K_FAILED;
+    }
+    return 0;
 }
 
 int KdMedia::_stop_dump_wbc_frame()
@@ -1618,8 +1831,16 @@ void *KdMedia::wbc_frame_thread(void *arg)
 void *KdMedia::start_ai_aenc_thread(void *arg)
 {
     KdMedia *pthis = (KdMedia*)arg;
-    pthis->_init_ai_aenc();
-    pthis->_start_ai_aenc();
+    if (0 != pthis->_init_ai_aenc())
+    {
+        printf("start_ai_aenc_thread: _init_ai_aenc failed, audio capture disabled\n");
+        return NULL;
+    }
+    if (0 != pthis->_start_ai_aenc())
+    {
+        printf("start_ai_aenc_thread: _start_ai_aenc failed, audio capture disabled\n");
+        pthis->_deinit_ai_aenc();
+    }
     return NULL;
 }
 

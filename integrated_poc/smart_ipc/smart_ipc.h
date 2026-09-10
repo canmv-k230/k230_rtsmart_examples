@@ -62,7 +62,7 @@ private:
     KdMediaFeatureConfig feature_config_;
     KdMediaInputConfig input_config_;
     KdMedia media_;                  // 媒体MPI接口
-    FaceDetection* face_detection_;  // 人脸检测
+    FaceDetection* face_detection_{nullptr};  // 人脸检测
     std::string stream_url_;
     StreamingMode streaming_mode_ = StreamingMode::kRtsp;
     int port_;                       // RTSP端口 或 WebRTC HTTP端口

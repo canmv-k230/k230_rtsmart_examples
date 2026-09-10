@@ -345,6 +345,11 @@ class KdMedia {
   k_video_frame_info osd_vf_info_; // OSD video frame information
 
   k_vicap_dev_set_info vcap_dev_info_; // Video capture device settings
+  bool vb_pool_initialized_{false}; // kd_mpi_vb_init has succeeded
+  bool vi_cap_initialized_{false}; // vicap dev/chn attributes have been set
+  bool vi_cap_started_{false}; // vicap dev has been inited and streaming
+  bool vo_layer_osd_initialized_{false}; // connector/layer/osd have been inited
+  bool venc_initialized_{false}; // venc channel has been created
   k_vicap_dev vi_dev_id_{VICAP_DEV_ID_0}; // Video capture device ID
   k_vicap_chn vi_chn_render_id_{VICAP_CHN_ID_0}; // Video capture render channel ID
   k_pixel_format vi_chn_render_pixel_format_{PIXEL_FORMAT_YUV_SEMIPLANAR_420}; // Render channel pixel format
