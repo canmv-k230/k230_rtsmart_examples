@@ -24,43 +24,27 @@
  */
 
 /*
- * VICAP sensor preview with dump support.
+ * VICAP sensor preview + dump demo.
  *
- * 链路：
  *   Sensor → VICAP DEV0
- *        ├─ CHN0 → Dump (支持 YUV/RGB/RAW 格式)
+ *        ├─ CHN0 → Dump (YUV / RGB / RAW)
  *        └─ CHN1 → VO layer → Connector
  *
- * 命令行参数：
- *   sample_vicap_sensor -c <connector_type> [options]
+ * Examples:
+ *   sample_vicap_sensor -c 20
+ *   sample_vicap_sensor -c 20 -ofmt 3 -dump 1          # RAW dump (ONLINE)
+ *   sample_vicap_sensor -c 20 -width 2592 -height 1944 -lane 4
  *
- * 例如：
- *   sample_vicap_sensor -c 20                    # 默认预览
- *   sample_vicap_sensor -c 20 -ofmt 0            # CHN0 dump YUV 格式，CHN1 预览
- *   sample_vicap_sensor -c 20 -width 1280 -height 720 -fps 60
- *   sample_vicap_sensor -c 20 -mirror 1 -flip 0      # horizontal mirror only
- *   sample_vicap_sensor -c 20 -mirror 0 -flip 1      # vertical flip only
- *
- * 交互命令（运行后输入）：
- *   d      - Dump 一帧
- *   d 5    - Dump 5 帧
- *   q      - 退出
- *
- * 注意：
- *   - CHN0 用于 dump，支持多种格式
- *   - CHN1 用于预览，固定 YUV420SP
- *   - 宽度会自动调整为 8 的倍数（驱动硬件要求）
- *   - mirror/flip 须在 kd_mpi_vicap_set_dev_attr / kd_mpi_vicap_init 之前写入 dev_attr.mirror
+ * Interactive: d / d <n> dump frames; q quit.
  */
 
+#include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include <errno.h>
-#include <signal.h>
 #include <unistd.h>
 
 #include "k_module.h"
@@ -76,156 +60,14 @@
 
 #include "kd_display.h"
 
-// ---------------------------------------------------------------------------
-// Global Defines and State
-// ---------------------------------------------------------------------------
+#define SAMPLE_ALIGN_UP(x, a) (((x) + ((a) - 1u)) & ~((a) - 1u))
 
-
-/* VICAP device */
-static k_vicap_dev g_vicap_dev_id = VICAP_DEV_ID_2;
-
-/* Ctrl+C 退出标志 */
-static volatile bool g_app_run = true;
-
-/* Sensor resolution (obtained dynamically) */
-static k_u32 g_sensor_width = 1920;
-static k_s32 g_sensor_fd = -1;
-static k_u32 g_sensor_height = 1080;
-static k_vicap_sensor_info g_sensor_info;  // Save full sensor info
-
-/* Channel 0 output format for dump: 0=YUV, 1=RGB888, 2=RGB888P, 3=RAW */
-static k_u32 g_ch0_format = 0;
-
-// ---------------------------------------------------------------------------
-// Utils
-// ---------------------------------------------------------------------------
-
-static void handle_signal(int sig)
-{
-    if (sig == SIGINT) {
-        printf("Caught SIGINT, exiting preview loop...\n");
-        g_app_run = false;
-    }
-}
-
-/* Combine -mirror/-flip (0/1) into k_vicap_mirror for dev_attr (sensor init path). */
-static k_vicap_mirror mirror_flip_to_mode(k_bool mirror_en, k_bool flip_en)
-{
-    if (mirror_en && flip_en) {
-        return VICAP_MIRROR_BOTH;
-    }
-    if (mirror_en) {
-        return VICAP_MIRROR_HOR;
-    }
-    if (flip_en) {
-        return VICAP_MIRROR_VER;
-    }
-    return VICAP_MIRROR_NONE;
-}
-
-// Dump frame to file
-static void sample_vicap_dump_frame(k_vicap_dev dev, k_vicap_chn chn, k_u32 *dump_count)
-{
-    k_video_frame_info dump_info;
-    k_s32 ret;
-    
-    memset(&dump_info, 0, sizeof(dump_info));
-    
-    k_vicap_dump_format dump_fmt = (g_ch0_format == 3) ? VICAP_DUMP_RAW : VICAP_DUMP_YUV;
-    ret = kd_mpi_vicap_dump_frame(dev, chn, dump_fmt, &dump_info, 1000);
-    if (ret) {
-        printf("ERROR: kd_mpi_vicap_dump_frame failed, ret=%d\n", ret);
-        return;
-    }
-    
-    k_char *suffix;
-    k_u32 data_size = 0;
-    k_u8 *virt_addr = NULL;
-    k_char filename[256];
-    
-    if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_YUV_SEMIPLANAR_420) {
-        suffix = "yuv420sp";
-        data_size = dump_info.v_frame.width * dump_info.v_frame.height * 3 / 2;
-    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_888) {
-        suffix = "rgb888";
-        data_size = dump_info.v_frame.width * dump_info.v_frame.height * 3;
-    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_888_PLANAR) {
-        suffix = "rgb888p";
-        data_size = dump_info.v_frame.width * dump_info.v_frame.height * 3;
-    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_BAYER_10BPP) {
-        suffix = "raw10";
-        data_size = dump_info.v_frame.width * dump_info.v_frame.height * 2;
-    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_BAYER_12BPP) {
-        suffix = "raw12";
-        data_size = dump_info.v_frame.width * dump_info.v_frame.height * 2;
-    } else {
-        suffix = "yuv420sp";
-        data_size = dump_info.v_frame.width * dump_info.v_frame.height * 3 / 2;
-    }
-    
-    virt_addr = kd_mpi_sys_mmap(dump_info.v_frame.phys_addr[0], data_size);
-    if (virt_addr) {
-        memset(filename, 0, sizeof(filename));
-        snprintf(filename, sizeof(filename), "vicap_dev%d_chn%d_%dx%d_%04d.%s",
-                 dev, chn, dump_info.v_frame.width, dump_info.v_frame.height,
-                 *dump_count, suffix);
-        
-        printf("Saving dump data to %s...\n", filename);
-        FILE *file = fopen(filename, "wb");
-        if (file) {
-            fwrite(virt_addr, 1, data_size, file);
-            fclose(file);
-            printf("Dump saved: %s (%u bytes)\n", filename, data_size);
-        } else {
-            printf("ERROR: Failed to open dump file\n");
-        }
-        kd_mpi_sys_munmap(virt_addr, data_size);
-    } else {
-        printf("ERROR: Failed to mmap dump address\n");
-    }
-    
-    ret = kd_mpi_vicap_dump_release(dev, chn, &dump_info);
-    if (ret) {
-        printf("ERROR: kd_mpi_vicap_dump_release failed, ret=%d\n", ret);
-    }
-    
-    (*dump_count)++;
-}
-
-static void print_usage(const char *prog)
-{
-    printf("Usage: %s [options]\n", prog);
-    printf("Options:\n");
-    printf("  -c <type>   Connector type (e.g., 20) [REQUIRED]\n");
-    printf("  -r <degree> Rotation (0, 90, 180, 270) [default: 0]\n");
-    printf("  -s <csi>    CSI index (0-2) [default: 2]\n");
-    printf("  -ae <0|1>   AE status (0: disable, 1: enable) [default: 1]\n");
-    printf("  -exp <value> Manual exposure time in microseconds (must set -ae 0 when using)\n");
-    printf("  -again <value> Manual analog gain (must set -ae 0 when using)\n");
-    printf("  -awb <0|1>  AWB status (0: disable, 1: enable) [default: 1]\n");
-    printf("  -hdr <0|1>  HDR status (0: disable, 1: enable) [default: 0]\n");
-    printf("  -dw <0|1>   Dewarp status (0: disable, 1: enable) [default: 0]\n");
-    printf("  -dnr3 <0|1> DNR3 status (0: disable, 1: enable) [default: 1]\n");
-    printf("  -width <value> Sensor width [default: 1920]\n");
-    printf("  -height <value> Sensor height [default: 1080]\n");
-    printf("  -fps <value> Sensor FPS [default: 30]\n");
-    printf("  -ofmt <0|1|2|3> Channel 0 format [0:yuv, 1:rgb888, 2:rgb888p, 3:raw][default: 0]\n");
-    printf("  -mirror <0|1> Horizontal mirror [default: 0]\n");
-    printf("  -flip <0|1>   Vertical flip [default: 0]\n");
-    printf("  -scene_name <name>  Scene name (e.g., \"day\", \"night\")\n");
-    printf("  -scene_path <path>  Config path (must end with /, e.g., \"/etc/vicap/day/\")\n");
-    printf("\nNote: CHN0 for dump, CHN1 for preview.\n");
-    printf("\nExample:\n");
-    printf("  %s -c 20 -ae 1 -awb 1 -hdr 0\n", prog);
-    printf("  %s -c 20 -ae 0 -exp 10000  # 10000 us = 10ms\n", prog);
-    printf("  %s -c 20 -scene_name day -scene_path /etc/vicap/day/\n", prog);
-    printf("  %s -c 20 -mirror 1 -flip 0 -ofmt 0\n", prog);
-    printf("  %s -c 20 -mirror 1 -flip 1 -ofmt 0\n", prog);
-}
-
-// ---------------------------------------------------------------------------
-// Parameter parsing
-// ---------------------------------------------------------------------------
+enum {
+    CH0_FMT_YUV420SP = 0,
+    CH0_FMT_RGB888   = 1,
+    CH0_FMT_RGB888P  = 2,
+    CH0_FMT_RAW      = 3,
+};
 
 typedef struct {
     k_connector_type connector_type;
@@ -233,9 +75,9 @@ typedef struct {
     int csi_idx;
     k_bool ae_enable;
     k_bool awb_enable;
-    k_bool hdr_enable;
     k_bool dw_enable;
     k_bool dnr3_enable;
+    k_bool force_tile; /* force SW_TILE even for RAW / small res */
     k_bool exp_set;
     k_u32 exp_value_us;
     k_u32 sensor_width;
@@ -250,7 +92,72 @@ typedef struct {
     k_bool scene_set;
     k_bool mirror_en;
     k_bool flip_en;
+    k_bool sensor_type_set;
+    k_s32 sensor_type;
+    k_u32 auto_dump_count; /* 0=interactive; >0 dump N then quit */
+    k_vicap_mipi_lane_pref lane_pref;
 } sample_params_t;
+
+static k_vicap_dev g_vicap_csi = VICAP_DEV_ID_2;
+static volatile bool g_app_run = true;
+static k_u32 g_sensor_width = 1920;
+static k_u32 g_sensor_height = 1080;
+static k_s32 g_sensor_fd = -1;
+static k_vicap_sensor_info g_sensor_info;
+static k_u32 g_ch0_format = CH0_FMT_YUV420SP;
+
+/* -------------------------------------------------------------------------- */
+/* Utils                                                                      */
+/* -------------------------------------------------------------------------- */
+
+static void handle_signal(int sig)
+{
+    if (sig == SIGINT) {
+        printf("Caught SIGINT, exiting...\n");
+        g_app_run = false;
+    }
+}
+
+static k_vicap_mirror mirror_flip_to_mode(k_bool mirror_en, k_bool flip_en)
+{
+    if (mirror_en && flip_en)
+        return VICAP_MIRROR_BOTH;
+    if (mirror_en)
+        return VICAP_MIRROR_HOR;
+    if (flip_en)
+        return VICAP_MIRROR_VER;
+    return VICAP_MIRROR_NONE;
+}
+
+static const char *mipi_lanes_name(k_vicap_mipi_lanes lanes)
+{
+    switch (lanes) {
+    case VICAP_MIPI_1LANE:
+        return "1lane";
+    case VICAP_MIPI_2LANE:
+        return "2lane";
+    case VICAP_MIPI_4LANE:
+        return "4lane";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *work_mode_name(k_vicap_work_mode mode)
+{
+    switch (mode) {
+    case VICAP_WORK_ONLINE_MODE:
+        return "ONLINE";
+    case VICAP_WORK_OFFLINE_MODE:
+        return "OFFLINE";
+    case VICAP_WORK_SW_TILE_MODE:
+        return "SW_TILE";
+    case VICAP_WORK_MCM_MIPI_MODE:
+        return "MCM";
+    default:
+        return "UNKNOWN";
+    }
+}
 
 static k_s32 parse_bool01(const char *name, int val)
 {
@@ -261,27 +168,325 @@ static k_s32 parse_bool01(const char *name, int val)
     return 0;
 }
 
+static void align_preview_size(k_u32 *w, k_u32 *h)
+{
+    if ((*w & 15) != 0)
+        *w = SAMPLE_ALIGN_UP(*w, 16);
+    if ((*h & 1) != 0)
+        *h = *h & ~1u;
+}
+
+/**
+ * Select VICAP work mode.
+ * - ofmt=3 (RAW dump): ONLINE by default (RAW path does not need SW_TILE).
+ * - -tile 1: force SW_TILE for A/B.
+ * - else: SW_TILE when acq exceeds VICAP max; otherwise ONLINE.
+ */
+static k_vicap_work_mode select_work_mode(k_u32 acq_w, k_u32 acq_h,
+                                          k_u32 ch0_format, k_bool force_tile)
+{
+    if (force_tile) {
+        printf("INFO: force VICAP_WORK_SW_TILE_MODE (-tile 1), acq=%ux%u\n",
+               acq_w, acq_h);
+        return VICAP_WORK_SW_TILE_MODE;
+    }
+
+    if (ch0_format == CH0_FMT_RAW) {
+        printf("INFO: RAW dump (-ofmt 3): use VICAP_WORK_ONLINE_MODE, acq=%ux%u\n",
+               acq_w, acq_h);
+        return VICAP_WORK_ONLINE_MODE;
+    }
+
+    if (acq_w > VICAP_SENSOR_MAX_WIDTH || acq_h > VICAP_SENSOR_MAX_HEIGH) {
+        printf("INFO: acq %ux%u > %ux%u → VICAP_WORK_SW_TILE_MODE\n",
+               acq_w, acq_h, VICAP_SENSOR_MAX_WIDTH, VICAP_SENSOR_MAX_HEIGH);
+        return VICAP_WORK_SW_TILE_MODE;
+    }
+
+    return VICAP_WORK_ONLINE_MODE;
+}
+
+static void calc_preview_size(k_u32 sensor_w, k_u32 sensor_h,
+                              k_u32 screen_w, k_u32 screen_h,
+                              k_u32 *out_w, k_u32 *out_h)
+{
+    float sensor_aspect = (float)sensor_w / (float)sensor_h;
+    float screen_aspect = (float)screen_w / (float)screen_h;
+    k_u32 width, height;
+
+    if (sensor_aspect > screen_aspect) {
+        width = screen_w;
+        height = (k_u32)((float)width / sensor_aspect);
+    } else if (sensor_aspect < screen_aspect) {
+        height = screen_h;
+        width = (k_u32)((float)height * sensor_aspect);
+    } else {
+        width = screen_w;
+        height = screen_h;
+    }
+
+    if (width > screen_w) {
+        width = screen_w;
+        height = (k_u32)((float)width / sensor_aspect);
+    }
+    if (height > screen_h) {
+        height = screen_h;
+        width = (k_u32)((float)height * sensor_aspect);
+    }
+
+    align_preview_size(&width, &height);
+    *out_w = width;
+    *out_h = height;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Dump                                                                       */
+/* -------------------------------------------------------------------------- */
+
+static void sample_vicap_dump_frame(k_vicap_dev dev, k_vicap_chn chn, k_u32 *dump_count)
+{
+    k_video_frame_info dump_info;
+    k_s32 ret;
+    k_char *suffix = "bin";
+    k_char filename[256];
+    k_u32 w, h, stride0, stride1;
+    k_u32 map_size = 0;
+    k_u32 packed_size = 0;
+    k_u8 *virt0 = NULL;
+    k_u8 *virt1 = NULL;
+    k_u32 map1_size = 0;
+    FILE *file = NULL;
+    k_u32 y;
+
+    memset(&dump_info, 0, sizeof(dump_info));
+
+    k_vicap_dump_format dump_fmt =
+        (g_ch0_format == CH0_FMT_RAW) ? VICAP_DUMP_RAW : VICAP_DUMP_YUV;
+    ret = kd_mpi_vicap_dump_frame(dev, chn, dump_fmt, &dump_info, 1000);
+    if (ret) {
+        printf("ERROR: kd_mpi_vicap_dump_frame failed, ret=%d\n", ret);
+        return;
+    }
+
+    w = dump_info.v_frame.width;
+    h = dump_info.v_frame.height;
+    stride0 = dump_info.v_frame.stride[0];
+    stride1 = dump_info.v_frame.stride[1];
+
+    printf("dump meta: %ux%u fmt=%d stride=[%u,%u,%u] phys=[0x%llx,0x%llx]\n",
+           w, h, (int)dump_info.v_frame.pixel_format,
+           dump_info.v_frame.stride[0], dump_info.v_frame.stride[1],
+           dump_info.v_frame.stride[2],
+           (unsigned long long)dump_info.v_frame.phys_addr[0],
+           (unsigned long long)dump_info.v_frame.phys_addr[1]);
+
+    if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_YUV_SEMIPLANAR_420) {
+        suffix = "yuv420sp";
+        stride0 = SAMPLE_ALIGN_UP((stride0 > w) ? stride0 : w, 16);
+        stride1 = SAMPLE_ALIGN_UP((stride1 > w) ? stride1 : w, 16);
+        map_size = SAMPLE_ALIGN_UP(stride0 * h, 4096) +
+                   SAMPLE_ALIGN_UP(stride1 * (h / 2), 4096);
+        packed_size = w * h + w * (h / 2);
+    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_888) {
+        suffix = "rgb888";
+        {
+            k_u32 align_w = SAMPLE_ALIGN_UP(w, 16);
+            if (stride0 < align_w * 3)
+                stride0 = align_w * 3;
+        }
+        map_size = stride0 * h;
+        packed_size = w * h * 3;
+    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_888_PLANAR) {
+        suffix = "rgb888p";
+        stride0 = SAMPLE_ALIGN_UP((stride0 > w) ? stride0 : w, 16);
+        map_size = SAMPLE_ALIGN_UP(stride0 * h, 4096) * 3;
+        packed_size = w * h * 3;
+    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_BAYER_10BPP ||
+               dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_BAYER_12BPP) {
+        suffix = (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_BAYER_10BPP)
+                     ? "raw10"
+                     : "raw12";
+        {
+            k_u32 stride_bytes = ((w + 7u) / 8u) * 16u;
+            if (stride0 > w)
+                stride_bytes = stride0 * 2u;
+            stride0 = stride_bytes;
+        }
+        map_size = stride0 * h;
+        packed_size = w * h * 2;
+    } else {
+        suffix = "yuv420sp";
+        stride0 = SAMPLE_ALIGN_UP((stride0 > w) ? stride0 : w, 16);
+        stride1 = SAMPLE_ALIGN_UP((stride1 > w) ? stride1 : w, 16);
+        map_size = SAMPLE_ALIGN_UP(stride0 * h, 4096) +
+                   SAMPLE_ALIGN_UP(stride1 * (h / 2), 4096);
+        packed_size = w * h + w * (h / 2);
+    }
+
+    virt0 = kd_mpi_sys_mmap(dump_info.v_frame.phys_addr[0], map_size);
+    if (!virt0) {
+        printf("ERROR: Failed to mmap dump plane0 (size=%u)\n", map_size);
+        goto out_release;
+    }
+
+    if (dump_info.v_frame.phys_addr[1] &&
+        dump_info.v_frame.phys_addr[1] != dump_info.v_frame.phys_addr[0] &&
+        dump_info.v_frame.pixel_format == PIXEL_FORMAT_YUV_SEMIPLANAR_420) {
+        map1_size = SAMPLE_ALIGN_UP(stride1 * (h / 2), 4096);
+        virt1 = kd_mpi_sys_mmap(dump_info.v_frame.phys_addr[1], map1_size);
+        if (!virt1) {
+            printf("WARN: mmap plane1 failed, fallback to contiguous after Y\n");
+            map1_size = 0;
+        }
+    }
+
+    memset(filename, 0, sizeof(filename));
+    snprintf(filename, sizeof(filename), "vicap_dev%d_chn%d_%dx%d_%04d.%s",
+             dev, chn, w, h, *dump_count, suffix);
+
+    printf("Saving packed dump to %s (stride0=%u stride1=%u map=%u packed=%u)...\n",
+           filename, stride0, stride1, map_size, packed_size);
+    file = fopen(filename, "wb");
+    if (!file) {
+        printf("ERROR: Failed to open dump file\n");
+        goto out_unmap;
+    }
+
+    if (strcmp(suffix, "yuv420sp") == 0) {
+        for (y = 0; y < h; y++)
+            fwrite(virt0 + (size_t)y * stride0, 1, w, file);
+        {
+            k_u8 *uv = virt1;
+            if (!uv)
+                uv = virt0 + SAMPLE_ALIGN_UP(stride0 * h, 4096);
+            for (y = 0; y < h / 2; y++)
+                fwrite(uv + (size_t)y * stride1, 1, w, file);
+        }
+    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_888) {
+        for (y = 0; y < h; y++)
+            fwrite(virt0 + (size_t)y * stride0, 1, w * 3, file);
+    } else if (dump_info.v_frame.pixel_format == PIXEL_FORMAT_RGB_888_PLANAR) {
+        k_u32 plane;
+        for (plane = 0; plane < 3; plane++) {
+            k_u8 *p = virt0 + (size_t)plane * SAMPLE_ALIGN_UP(stride0 * h, 4096);
+            for (y = 0; y < h; y++)
+                fwrite(p + (size_t)y * stride0, 1, w, file);
+        }
+    } else {
+        for (y = 0; y < h; y++)
+            fwrite(virt0 + (size_t)y * stride0, 1, w * 2, file);
+    }
+
+    fclose(file);
+    file = NULL;
+    printf("Dump saved: %s (%u bytes packed, map=%u)\n", filename, packed_size, map_size);
+
+out_unmap:
+    if (virt1)
+        kd_mpi_sys_munmap(virt1, map1_size);
+    if (virt0)
+        kd_mpi_sys_munmap(virt0, map_size);
+out_release:
+    ret = kd_mpi_vicap_dump_release(dev, chn, &dump_info);
+    if (ret)
+        printf("ERROR: kd_mpi_vicap_dump_release failed, ret=%d\n", ret);
+
+    (*dump_count)++;
+}
+
+static void run_dump_loop(k_u32 auto_dump_count)
+{
+    k_u32 dump_count = 0;
+
+    printf("Preview running. CHN0 dump (ofmt=%u), CHN1 preview\n", g_ch0_format);
+
+    if (auto_dump_count > 0) {
+        sleep(1);
+        printf("Auto-dumping %u frame(s)...\n", auto_dump_count);
+        for (k_u32 i = 0; i < auto_dump_count; i++)
+            sample_vicap_dump_frame(VICAP_DEV_ID_0, VICAP_CHN_ID_0, &dump_count);
+        printf("Auto-dump done, exiting.\n");
+        return;
+    }
+
+    printf("Commands: d / d <n> dump, q quit\n");
+    while (g_app_run) {
+        char cmd_buf[64];
+
+        printf("Command: ");
+        fflush(stdout);
+        if (fgets(cmd_buf, sizeof(cmd_buf), stdin) == NULL)
+            continue;
+
+        cmd_buf[strcspn(cmd_buf, "\n")] = 0;
+        char cmd = cmd_buf[0];
+        int count = 1;
+
+        if (cmd == 'd' || cmd == 'D') {
+            char *space = strchr(cmd_buf, ' ');
+            if (space) {
+                count = atoi(space + 1);
+                if (count <= 0)
+                    count = 1;
+            }
+            printf("Dumping %d frame(s)...\n", count);
+            for (int i = 0; i < count; i++)
+                sample_vicap_dump_frame(VICAP_DEV_ID_0, VICAP_CHN_ID_0, &dump_count);
+        } else if (cmd == 'q' || cmd == 'Q') {
+            printf("Exiting...\n");
+            break;
+        } else if (cmd != '\0') {
+            printf("Unknown command: %c\n", cmd);
+        }
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* CLI                                                                        */
+/* -------------------------------------------------------------------------- */
+
+static void print_usage(const char *prog)
+{
+    printf("Usage: %s -c <connector> [options]\n", prog);
+    printf("Options:\n");
+    printf("  -c <type>        Connector type [REQUIRED]\n");
+    printf("  -r <0|90|180|270> Rotation [default: 0]\n");
+    printf("  -s <0|1|2>       CSI index [default: 2]\n");
+    printf("  -lane <2|4>      Probe lane preference [default: ANY / unset]\n");
+    printf("  -stype <id>      Force sensor type (see board list_sensor)\n");
+    printf("  -width/-height/-fps  Probe target [default: 1920x1080@30]\n");
+    printf("  -ofmt <0|1|2|3>  CHN0 format: yuv / rgb888 / rgb888p / raw [default: 0]\n");
+    printf("                   ofmt=3 (RAW) uses ONLINE work mode (unless -tile 1)\n");
+    printf("  -dump <n>        Dump n frames then quit\n");
+    printf("  -ae/-awb/-dw/-dnr3 <0|1>\n");
+    printf("  -tile <0|1>      Force SW_TILE [default: 0]\n");
+    printf("  -exp <us> / -again <x>  Manual AE (requires -ae 0)\n");
+    printf("  -mirror/-flip <0|1>\n");
+    printf("  -scene_name / -scene_path\n");
+    printf("\nExamples:\n");
+    printf("  %s -c 20 -s 0 -width 1920 -height 1080\n", prog);
+    printf("  %s -c 20 -s 0 -ofmt 3 -dump 1              # RAW ONLINE dump\n", prog);
+    printf("  %s -c 20 -s 0 -width 2592 -height 1944 -lane 4\n", prog);
+    printf("  %s -c 20 -s 0 -stype <id> -r 90 -dump 1\n", prog);
+}
+
 static k_s32 parse_parameters(int argc, char **argv, sample_params_t *params)
 {
-    memset(params, 0, sizeof(sample_params_t));
-    
-    // Set defaults
+    memset(params, 0, sizeof(*params));
+
     params->csi_idx = 2;
     params->ae_enable = K_TRUE;
     params->awb_enable = K_TRUE;
-    params->hdr_enable = K_FALSE;
     params->dw_enable = K_FALSE;
-    params->dnr3_enable = K_TRUE;  // Default enable DNR3
+    params->dnr3_enable = K_TRUE;
+    params->force_tile = K_FALSE;
     params->sensor_width = 1920;
     params->sensor_height = 1080;
     params->sensor_fps = 30;
-    params->ch0_format = 0;
-    params->again_set = K_FALSE;
+    params->ch0_format = CH0_FMT_YUV420SP;
     params->again_value = 1.0f;
-    params->scene_set = K_FALSE;
-    params->mirror_en = K_FALSE;
-    params->flip_en = K_FALSE;
-    
+    params->lane_pref = VICAP_MIPI_LANE_PREF_ANY;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             params->connector_type = (k_connector_type)atoi(argv[++i]);
@@ -290,12 +495,20 @@ static k_s32 parse_parameters(int argc, char **argv, sample_params_t *params)
             params->rot_val = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
             params->csi_idx = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-lane") == 0 && i + 1 < argc) {
+            int lane = atoi(argv[++i]);
+            if (lane == 4)
+                params->lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else if (lane == 2)
+                params->lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else {
+                printf("ERROR: Invalid -lane %d, must be 2 or 4\n", lane);
+                return -1;
+            }
         } else if (strcmp(argv[i], "-ae") == 0 && i + 1 < argc) {
             params->ae_enable = (atoi(argv[++i]) == 1) ? K_TRUE : K_FALSE;
         } else if (strcmp(argv[i], "-awb") == 0 && i + 1 < argc) {
             params->awb_enable = (atoi(argv[++i]) == 1) ? K_TRUE : K_FALSE;
-        } else if (strcmp(argv[i], "-hdr") == 0 && i + 1 < argc) {
-            params->hdr_enable = (atoi(argv[++i]) == 1) ? K_TRUE : K_FALSE;
         } else if (strcmp(argv[i], "-dw") == 0 && i + 1 < argc) {
             params->dw_enable = (atoi(argv[++i]) == 1) ? K_TRUE : K_FALSE;
         } else if (strcmp(argv[i], "-exp") == 0 && i + 1 < argc) {
@@ -307,14 +520,26 @@ static k_s32 parse_parameters(int argc, char **argv, sample_params_t *params)
             params->sensor_height = (k_u32)atoi(argv[++i]);
         } else if (strcmp(argv[i], "-fps") == 0 && i + 1 < argc) {
             params->sensor_fps = (k_u32)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-stype") == 0 && i + 1 < argc) {
+            params->sensor_type_set = K_TRUE;
+            params->sensor_type = atoi(argv[++i]);
+            if (params->sensor_type < 0) {
+                printf("ERROR: Invalid -stype %d\n", params->sensor_type);
+                return -1;
+            }
+        } else if (strcmp(argv[i], "-dump") == 0 && i + 1 < argc) {
+            int n = atoi(argv[++i]);
+            params->auto_dump_count = (n > 0) ? (k_u32)n : 1;
         } else if (strcmp(argv[i], "-ofmt") == 0 && i + 1 < argc) {
             params->ch0_format = (k_u32)atoi(argv[++i]);
-            if (params->ch0_format > 3) {
-                printf("ERROR: Invalid ofmt value, must be 0-3\n");
+            if (params->ch0_format > CH0_FMT_RAW) {
+                printf("ERROR: Invalid ofmt, must be 0-3\n");
                 return -1;
             }
         } else if (strcmp(argv[i], "-dnr3") == 0 && i + 1 < argc) {
             params->dnr3_enable = (atoi(argv[++i]) == 1) ? K_TRUE : K_FALSE;
+        } else if (strcmp(argv[i], "-tile") == 0 && i + 1 < argc) {
+            params->force_tile = (atoi(argv[++i]) == 1) ? K_TRUE : K_FALSE;
         } else if (strcmp(argv[i], "-again") == 0 && i + 1 < argc) {
             params->again_set = K_TRUE;
             params->again_value = (float)atof(argv[++i]);
@@ -326,102 +551,125 @@ static k_s32 parse_parameters(int argc, char **argv, sample_params_t *params)
             params->scene_set = K_TRUE;
         } else if (strcmp(argv[i], "-mirror") == 0 && i + 1 < argc) {
             int v = atoi(argv[++i]);
-            if (parse_bool01("-mirror", v) < 0) {
+            if (parse_bool01("-mirror", v) < 0)
                 return -1;
-            }
             params->mirror_en = (v == 1) ? K_TRUE : K_FALSE;
         } else if (strcmp(argv[i], "-flip") == 0 && i + 1 < argc) {
             int v = atoi(argv[++i]);
-            if (parse_bool01("-flip", v) < 0) {
+            if (parse_bool01("-flip", v) < 0)
                 return -1;
-            }
             params->flip_en = (v == 1) ? K_TRUE : K_FALSE;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "-help") == 0) {
-            return 1;  // Help requested
+            return 1;
         } else {
             printf("Unknown option: %s\n", argv[i]);
             return -1;
         }
     }
-    
+
     if (!params->c_set) {
-        printf("ERROR: Missing required arguments (-c)\n");
+        printf("ERROR: Missing required -c\n");
         return -1;
     }
-    
-    // If exposure is set manually, AE must be disabled
     if (params->exp_set && params->ae_enable == K_TRUE) {
-        printf("ERROR: When -exp is set, -ae must be set to 0\n");
+        printf("ERROR: When -exp is set, -ae must be 0\n");
         return -1;
     }
-    
-    // If again is set manually, AE must be disabled
     if (params->again_set && params->ae_enable == K_TRUE) {
-        printf("ERROR: When -again is set, -ae must be set to 0\n");
+        printf("ERROR: When -again is set, -ae must be 0\n");
         return -1;
     }
-    
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// VB init
-// ---------------------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* Sensor / VB / VICAP                                                        */
+/* -------------------------------------------------------------------------- */
 
-// Helper function to get sensor resolution
-static k_s32 get_sensor_resolution(k_vicap_dev dev_chn, k_u32 *width, k_u32 *height, k_u32 *fps,
-                                   k_u32 req_width, k_u32 req_height, k_u32 req_fps)
+static k_s32 get_sensor_resolution(const sample_params_t *p)
 {
     k_vicap_sensor_info sensor_info;
     k_vicap_probe_config probe_cfg;
     k_vicap_sensor_type sensor_type;
-    
+    k_s32 ret;
+
     memset(&sensor_info, 0, sizeof(sensor_info));
     memset(&probe_cfg, 0, sizeof(probe_cfg));
-    
-    probe_cfg.csi_num = dev_chn;
-    probe_cfg.width   = req_width;
-    probe_cfg.height  = req_height;
-    probe_cfg.fps     = req_fps;
-    
-    if (0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
-        printf("ERROR: kd_mpi_sensor_adapt_get failed on CSI %d\n", probe_cfg.csi_num);
-        return -1;
-    }
-    
-    sensor_type = sensor_info.sensor_type;
-    
-    k_s32 ret = kd_mpi_vicap_get_sensor_info(sensor_type, &sensor_info);
-    if (ret) {
-        printf("ERROR: kd_mpi_vicap_get_sensor_info failed, ret=%d\n", ret);
-        return ret;
-    }
-    if (width) *width = sensor_info.width;
-    if (height) *height = sensor_info.height;
-    if (fps) *fps = sensor_info.fps;
-    
-    // Save full sensor info for later use
-    memcpy(&g_sensor_info, &sensor_info, sizeof(k_vicap_sensor_info));
 
+    if (p->sensor_type_set) {
+        sensor_type = (k_vicap_sensor_type)p->sensor_type;
+        ret = kd_mpi_vicap_get_sensor_info(sensor_type, &sensor_info);
+        if (ret) {
+            printf("ERROR: kd_mpi_vicap_get_sensor_info(type=%d) failed, ret=%d\n",
+                   p->sensor_type, ret);
+            return ret;
+        }
+        if (sensor_info.csi_num != (k_vicap_csi_num)(g_vicap_csi + VICAP_CSI0)) {
+            printf("ERROR: sensor type %d is on CSI%d, but -s %d was requested\n",
+                   p->sensor_type, (int)sensor_info.csi_num - 1, g_vicap_csi);
+            return -1;
+        }
+        printf("Using forced sensor type %d: %s %ux%u@%u %s\n",
+               p->sensor_type,
+               sensor_info.sensor_name ? sensor_info.sensor_name : "unknown",
+               sensor_info.width, sensor_info.height, sensor_info.fps,
+               mipi_lanes_name(sensor_info.mipi_lanes));
+    } else {
+        probe_cfg.csi_num = g_vicap_csi;
+        probe_cfg.width = p->sensor_width;
+        probe_cfg.height = p->sensor_height;
+        probe_cfg.fps = p->sensor_fps;
+        probe_cfg.lane_pref = p->lane_pref;
+
+        if (kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info) != 0) {
+            printf("ERROR: kd_mpi_sensor_adapt_get failed on CSI %d (lane_pref=%d)\n",
+                   probe_cfg.csi_num, (int)p->lane_pref);
+            return -1;
+        }
+
+        sensor_type = sensor_info.sensor_type;
+        ret = kd_mpi_vicap_get_sensor_info(sensor_type, &sensor_info);
+        if (ret) {
+            printf("ERROR: kd_mpi_vicap_get_sensor_info failed, ret=%d\n", ret);
+            return ret;
+        }
+        printf("Probed sensor type %d: %s %ux%u@%u %s\n",
+               sensor_type,
+               sensor_info.sensor_name ? sensor_info.sensor_name : "unknown",
+               sensor_info.width, sensor_info.height, sensor_info.fps,
+               mipi_lanes_name(sensor_info.mipi_lanes));
+
+        if ((p->sensor_width && p->sensor_width != sensor_info.width) ||
+            (p->sensor_height && p->sensor_height != sensor_info.height) ||
+            (p->sensor_fps && p->sensor_fps != sensor_info.fps)) {
+            printf("WARN: requested %ux%u@%u != selected %ux%u@%u\n",
+                   p->sensor_width, p->sensor_height, p->sensor_fps,
+                   sensor_info.width, sensor_info.height, sensor_info.fps);
+        }
+    }
+
+    g_sensor_width = sensor_info.width;
+    g_sensor_height = sensor_info.height;
+    memcpy(&g_sensor_info, &sensor_info, sizeof(g_sensor_info));
     return K_SUCCESS;
 }
 
 static k_s32 sample_vb_init(void)
 {
     k_vb_config config;
+    k_vb_supplement_config supplement_config;
+    k_s32 ret;
+
     memset(&config, 0, sizeof(config));
     config.max_pool_cnt = 64;
-
-    k_s32 ret = kd_mpi_vb_set_config(&config);
+    ret = kd_mpi_vb_set_config(&config);
     if (ret) {
         printf("ERROR: kd_mpi_vb_set_config failed, ret=%d\n", ret);
         return ret;
     }
 
-    k_vb_supplement_config supplement_config;
     memset(&supplement_config, 0, sizeof(supplement_config));
     supplement_config.supplement_config |= VB_SUPPLEMENT_JPEG_MASK;
-
     ret = kd_mpi_vb_set_supplement_config(&supplement_config);
     if (ret) {
         printf("ERROR: kd_mpi_vb_set_supplement_config failed, ret=%d\n", ret);
@@ -433,145 +681,185 @@ static k_s32 sample_vb_init(void)
         printf("ERROR: kd_mpi_vb_init failed, ret=%d\n", ret);
         return ret;
     }
-
     return K_SUCCESS;
 }
 
-// ---------------------------------------------------------------------------
-// VICAP init (sensor → VICAP dev0/ch0, 输出 NV12，指定宽高)
-// ---------------------------------------------------------------------------
-
-static k_s32 sample_vicap_init(k_vicap_dev dev_chn, k_u32 out_width, k_u32 out_height,
-                                      k_bool ae_en, k_bool awb_en, k_bool hdr_en, k_bool dw_en,
-                                      k_bool dnr3_en, k_u32 ch0_format,
-                                      k_bool mirror_en, k_bool flip_en)
+static void fill_chn0_attr(k_vicap_chn_attr *chn_attr, const k_vicap_dev_attr *dev_attr,
+                           k_u32 ch0_format, k_u32 buf_num)
 {
-    k_vicap_dev_attr     dev_attr;
-    k_vicap_chn_attr     chn_attr;
-    k_vicap_sensor_info  sensor_info = {0};
-    k_s32 ret;
+    memset(chn_attr, 0, sizeof(*chn_attr));
 
-    // Width must be multiple of 8 (hardware requirement)
-    if ((out_width & 7) != 0) {
-        out_width = (out_width + 7) & ~7;  // Align to 8
-        printf("INFO: VICAP output width aligned to %u\n", out_width);
+    if (ch0_format == CH0_FMT_RAW) {
+        chn_attr->out_win.width = dev_attr->acq_win.width;
+        chn_attr->out_win.height = dev_attr->acq_win.height;
+        chn_attr->crop_win = dev_attr->acq_win;
+        chn_attr->scale_win = chn_attr->out_win;
+        chn_attr->crop_enable = K_FALSE;
+        chn_attr->scale_enable = K_FALSE;
+    } else {
+        k_u32 src_w = dev_attr->acq_win.width;
+        k_u32 src_h = dev_attr->acq_win.height;
+        k_u32 ch0_w = src_w;
+        k_u32 ch0_h = src_h;
+        k_bool need_crop = K_FALSE;
+        const k_bool unaligned = ((src_w & 15u) != 0) || ((src_h & 1u) != 0);
+        const k_bool too_large = (src_w > 1920) || (src_h > 1080);
+
+        if (unaligned || too_large) {
+            if (src_w >= 1920 && src_h >= 1080) {
+                ch0_w = 1920;
+                ch0_h = 1080;
+            } else {
+                ch0_w = src_w & ~15u;
+                ch0_h = src_h & ~1u;
+            }
+            need_crop = K_TRUE;
+        }
+
+        chn_attr->out_win.width = ch0_w;
+        chn_attr->out_win.height = ch0_h;
+        chn_attr->scale_win = chn_attr->out_win;
+        chn_attr->scale_enable = K_FALSE;
+        if (need_crop) {
+            chn_attr->crop_win.h_start =
+                (src_w > ch0_w) ? ((src_w - ch0_w) / 2) & ~1u : 0;
+            chn_attr->crop_win.v_start =
+                (src_h > ch0_h) ? ((src_h - ch0_h) / 2) & ~1u : 0;
+            chn_attr->crop_win.width = ch0_w;
+            chn_attr->crop_win.height = ch0_h;
+            chn_attr->crop_enable = K_TRUE;
+            printf("INFO: CHN0 YUV/RGB center-crop %ux%u → %ux%u\n",
+                   src_w, src_h, ch0_w, ch0_h);
+        } else {
+            chn_attr->crop_win = dev_attr->acq_win;
+            chn_attr->crop_enable = K_FALSE;
+            printf("INFO: CHN0 YUV/RGB native %ux%u\n", ch0_w, ch0_h);
+        }
     }
 
-    // Use saved sensor info (from get_sensor_resolution in main)
-    memcpy(&sensor_info, &g_sensor_info, sizeof(k_vicap_sensor_info));
+    chn_attr->chn_enable = K_TRUE;
+    switch (ch0_format) {
+    case CH0_FMT_RGB888:
+        chn_attr->pix_format = PIXEL_FORMAT_RGB_888;
+        chn_attr->buffer_size =
+            VB_ALIGN_UP(chn_attr->out_win.width * chn_attr->out_win.height * 3, 4096);
+        break;
+    case CH0_FMT_RGB888P:
+        chn_attr->pix_format = PIXEL_FORMAT_RGB_888_PLANAR;
+        chn_attr->buffer_size =
+            VB_ALIGN_UP(chn_attr->out_win.width * chn_attr->out_win.height * 3, 4096);
+        break;
+    case CH0_FMT_RAW:
+        chn_attr->pix_format = PIXEL_FORMAT_RGB_BAYER_10BPP;
+        chn_attr->buffer_size =
+            VB_ALIGN_UP(chn_attr->out_win.width * chn_attr->out_win.height * 2, 4096);
+        break;
+    case CH0_FMT_YUV420SP:
+    default:
+        chn_attr->pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+        chn_attr->buffer_size =
+            VB_ALIGN_UP(chn_attr->out_win.width * chn_attr->out_win.height * 3 / 2, 4096);
+        break;
+    }
+    chn_attr->buffer_num = buf_num;
+    chn_attr->alignment = 12;
+    chn_attr->buffer_pool_id = VB_INVALID_POOLID;
+}
 
-    if(sensor_info.sensor_name == NULL)
-    {
-        printf("no sensor find in csi %d,please check\n", sensor_info.csi_num);
+static void fill_chn1_preview_attr(k_vicap_chn_attr *chn_attr,
+                                   const k_vicap_dev_attr *dev_attr,
+                                   k_u32 out_w, k_u32 out_h, k_u32 buf_num)
+{
+    k_u32 src_w = dev_attr->acq_win.width;
+    k_u32 src_h = dev_attr->acq_win.height;
+    k_u32 crop_w = (src_w >= 1920) ? 1920 : SAMPLE_ALIGN_UP(src_w, 16);
+    k_u32 crop_h = (src_h >= 1080) ? 1080 : (src_h & ~1u);
+
+    memset(chn_attr, 0, sizeof(*chn_attr));
+    chn_attr->out_win.width = out_w;
+    chn_attr->out_win.height = out_h;
+    chn_attr->crop_win.h_start = (src_w > crop_w) ? ((src_w - crop_w) / 2) & ~1u : 0;
+    chn_attr->crop_win.v_start = (src_h > crop_h) ? ((src_h - crop_h) / 2) & ~1u : 0;
+    chn_attr->crop_win.width = crop_w;
+    chn_attr->crop_win.height = crop_h;
+    chn_attr->scale_win = chn_attr->out_win;
+    chn_attr->crop_enable = K_TRUE;
+    chn_attr->scale_enable =
+        (out_w != crop_w || out_h != crop_h) ? K_TRUE : K_FALSE;
+    chn_attr->chn_enable = K_TRUE;
+    chn_attr->pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+    chn_attr->buffer_num = buf_num;
+    chn_attr->buffer_size = VB_ALIGN_UP(out_w * out_h * 3 / 2, 4096);
+    chn_attr->alignment = 12;
+    chn_attr->buffer_pool_id = VB_INVALID_POOLID;
+
+    printf("INFO: CHN1 preview crop %ux%u@(%u,%u) → out %ux%u\n",
+           crop_w, crop_h, chn_attr->crop_win.h_start, chn_attr->crop_win.v_start,
+           out_w, out_h);
+}
+
+static k_s32 sample_vicap_init(const sample_params_t *p, k_u32 out_width, k_u32 out_height)
+{
+    k_vicap_dev_attr dev_attr;
+    k_vicap_chn_attr chn_attr;
+    k_vicap_sensor_info sensor_info = {0};
+    k_s32 ret;
+    k_u32 buf_num;
+    k_bool dnr3_use;
+
+    align_preview_size(&out_width, &out_height);
+    memcpy(&sensor_info, &g_sensor_info, sizeof(sensor_info));
+    if (sensor_info.sensor_name == NULL) {
+        printf("no sensor find in csi %d, please check\n", sensor_info.csi_num);
         return -1;
     }
 
-    /* RAW dump (ofmt 3) at 4K: fewer buffers and no 3DNR to avoid ISP tile pipeline stall */
-    k_u32 buf_num = (ch0_format == 3) ? 4 : 6;
-    k_bool dnr3_use = dnr3_en;
-    if (ch0_format == 3 && dnr3_en) {
+    buf_num = (p->ch0_format == CH0_FMT_RAW) ? 4 : 6;
+    dnr3_use = p->dnr3_enable;
+    if (p->ch0_format == CH0_FMT_RAW && dnr3_use) {
         dnr3_use = K_FALSE;
-        printf("INFO: RAW dump mode (-ofmt 3): auto disable DNR3 (use -dnr3 0)\n");
+        printf("INFO: RAW dump (-ofmt 3): auto disable DNR3\n");
     }
 
     memset(&dev_attr, 0, sizeof(dev_attr));
-    dev_attr.acq_win.width  = sensor_info.width;   // Use actual sensor width
-    dev_attr.acq_win.height = sensor_info.height;  // Use actual sensor height
-    /* width > 3072 (e.g. 4K2K 3840x2160) must use SW tile; smaller modes use online */
-    if (dev_attr.acq_win.width == 3840 && dev_attr.acq_win.height == 2160) {
-        dev_attr.mode = VICAP_WORK_SW_TILE_MODE;
-    } else {
-        dev_attr.mode = VICAP_WORK_ONLINE_MODE;
-    }
-    dev_attr.buffer_num     = buf_num;
-    dev_attr.buffer_size    = VB_ALIGN_UP(sensor_info.width * sensor_info.height * 2, 4096);
+    dev_attr.acq_win.width = sensor_info.width;
+    dev_attr.acq_win.height = sensor_info.height;
+    dev_attr.mode = select_work_mode(dev_attr.acq_win.width, dev_attr.acq_win.height,
+                                     p->ch0_format, p->force_tile);
+    printf("INFO: VICAP work mode = %s\n", work_mode_name(dev_attr.mode));
+
+    dev_attr.buffer_num = buf_num;
+    dev_attr.buffer_size =
+        VB_ALIGN_UP(sensor_info.width * sensor_info.height * 2, 4096);
     dev_attr.buffer_pool_id = VB_INVALID_POOLID;
-    memcpy(&dev_attr.sensor_info, &sensor_info, sizeof(sensor_info));  // Copy sensor info
-    
-    // Configure pipe control with AE/AWB/HDR/DNR3 settings
+    memcpy(&dev_attr.sensor_info, &sensor_info, sizeof(sensor_info));
+
     dev_attr.pipe_ctrl.data = 0xFFFFFFFF;
-    dev_attr.pipe_ctrl.bits.ae_enable = ae_en;
-    dev_attr.pipe_ctrl.bits.awb_enable = awb_en;
-    dev_attr.pipe_ctrl.bits.ahdr_enable = hdr_en;
+    dev_attr.pipe_ctrl.bits.ae_enable = p->ae_enable;
+    dev_attr.pipe_ctrl.bits.awb_enable = p->awb_enable;
+    dev_attr.pipe_ctrl.bits.ahdr_enable = K_FALSE;
     dev_attr.pipe_ctrl.bits.dnr3_enable = dnr3_use;
-    dev_attr.dw_enable = dw_en;
+    dev_attr.dw_enable = p->dw_enable;
+    /* mirror must be set before set_dev_attr / init */
+    dev_attr.mirror = mirror_flip_to_mode(p->mirror_en, p->flip_en);
 
-    /*
-     * mirror/flip 必须在 set_dev_attr + vicap_init 之前配置：
-     * mpi_vicap 在 init 时通过 g_sensor_mirror[] 调用 kd_mpi_sensor_mirror_set，
-     * 再在 sensor_init 里写寄存器；stream 启动后无法生效。
-     */
-    dev_attr.mirror = mirror_flip_to_mode(mirror_en, flip_en);
-
-    /* 简单起见：固定使用 VICAP_DEV_ID_0 做采集，CSI 从 g_vicap_dev_id 控制 */
     ret = kd_mpi_vicap_set_dev_attr(VICAP_DEV_ID_0, dev_attr);
     if (ret) {
         printf("ERROR: kd_mpi_vicap_set_dev_attr failed, ret=%d\n", ret);
         return ret;
     }
 
-    // Configure CHN0 for dump
-    memset(&chn_attr, 0, sizeof(chn_attr));
-    chn_attr.out_win.width  = dev_attr.acq_win.width;   // Sensor native width
-    chn_attr.out_win.height = dev_attr.acq_win.height;  // Sensor native height
-    chn_attr.crop_win       = dev_attr.acq_win;
-    chn_attr.scale_win      = chn_attr.out_win;
-    chn_attr.crop_enable    = K_FALSE;
-    chn_attr.scale_enable   = K_FALSE;  // Disable scaling for CHN0
-    chn_attr.chn_enable     = K_TRUE;
-    
-    // Set CHN0 format based on ofmt parameter
-    switch (ch0_format) {
-        case 0:
-            chn_attr.pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
-            chn_attr.buffer_size = VB_ALIGN_UP(dev_attr.acq_win.width * dev_attr.acq_win.height * 3 / 2, 4096);
-            break;
-        case 1:
-            chn_attr.pix_format = PIXEL_FORMAT_RGB_888;
-            chn_attr.buffer_size = VB_ALIGN_UP(dev_attr.acq_win.width * dev_attr.acq_win.height * 3, 4096);
-            break;
-        case 2:
-            chn_attr.pix_format = PIXEL_FORMAT_RGB_888_PLANAR;
-            chn_attr.buffer_size = VB_ALIGN_UP(dev_attr.acq_win.width * dev_attr.acq_win.height * 3, 4096);
-            break;
-        case 3:
-            chn_attr.pix_format = PIXEL_FORMAT_RGB_BAYER_10BPP;
-            chn_attr.buffer_size = VB_ALIGN_UP(dev_attr.acq_win.width * dev_attr.acq_win.height * 2, 4096);
-            break;
-        default:
-            chn_attr.pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
-            chn_attr.buffer_size = VB_ALIGN_UP(dev_attr.acq_win.width * dev_attr.acq_win.height * 3 / 2, 4096);
-            break;
-    }
-    chn_attr.buffer_num     = buf_num;
-    chn_attr.alignment      = 12;
-    chn_attr.buffer_pool_id = VB_INVALID_POOLID;
-
+    fill_chn0_attr(&chn_attr, &dev_attr, p->ch0_format, buf_num);
     ret = kd_mpi_vicap_set_chn_attr(VICAP_DEV_ID_0, VICAP_CHN_ID_0, chn_attr);
     if (ret) {
         printf("ERROR: kd_mpi_vicap_set_chn_attr CHN0 failed, ret=%d\n", ret);
         return ret;
     }
-    
-    // Configure CHN1 for preview (YUV420SP)
-    memset(&chn_attr, 0, sizeof(chn_attr));
-    chn_attr.out_win.width  = out_width;
-    chn_attr.out_win.height = out_height;
-    chn_attr.crop_win       = dev_attr.acq_win;
-    chn_attr.scale_win      = chn_attr.out_win;
-    chn_attr.crop_enable    = K_TRUE;
-    chn_attr.scale_enable   = (out_width != dev_attr.acq_win.width ||
-                               out_height != dev_attr.acq_win.height) ? K_TRUE : K_FALSE;
-    chn_attr.chn_enable     = K_TRUE;
-    chn_attr.pix_format     = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
-    chn_attr.buffer_num     = buf_num;
-    chn_attr.buffer_size    = VB_ALIGN_UP(out_width * out_height * 3 / 2, 4096);
-    chn_attr.alignment      = 12;
-    chn_attr.buffer_pool_id = VB_INVALID_POOLID;
 
+    fill_chn1_preview_attr(&chn_attr, &dev_attr, out_width, out_height, buf_num);
     ret = kd_mpi_vicap_set_chn_attr(VICAP_DEV_ID_0, VICAP_CHN_ID_1, chn_attr);
     if (ret) {
-        printf("ERROR: kd_mpi_vicap_set_chn_attr failed, ret=%d\n", ret);
+        printf("ERROR: kd_mpi_vicap_set_chn_attr CHN1 failed, ret=%d\n", ret);
         return ret;
     }
 
@@ -581,56 +869,43 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn, k_u32 out_width, k_u32 out_h
         return ret;
     }
 
-    // Get sensor fd for exposure control
-    k_vicap_sensor_attr sensor_attr;
-    sensor_attr.dev_num = VICAP_DEV_ID_0;
-    ret = kd_mpi_vicap_get_sensor_fd(&sensor_attr);
-    if (ret) {
-        printf("ERROR: kd_mpi_vicap_get_sensor_fd failed, ret=%d\n", ret);
-        return ret;
+    {
+        k_vicap_sensor_attr sensor_attr;
+        sensor_attr.dev_num = VICAP_DEV_ID_0;
+        ret = kd_mpi_vicap_get_sensor_fd(&sensor_attr);
+        if (ret) {
+            printf("ERROR: kd_mpi_vicap_get_sensor_fd failed, ret=%d\n", ret);
+            return ret;
+        }
+        g_sensor_fd = sensor_attr.sensor_fd;
     }
-    g_sensor_fd = sensor_attr.sensor_fd;
     return K_SUCCESS;
 }
 
-// ---------------------------------------------------------------------------
-// VICAP ↔ VO bind / unbind
-// ---------------------------------------------------------------------------
-
 static void sample_vicap_bind_vo(k_vo_layer_id layer_id)
 {
-    k_mpp_chn vi_mpp_chn;
-    k_mpp_chn vo_mpp_chn;
+    k_mpp_chn vi_mpp_chn = {0};
+    k_mpp_chn vo_mpp_chn = {0};
 
-    memset(&vi_mpp_chn, 0, sizeof(vi_mpp_chn));
-    memset(&vo_mpp_chn, 0, sizeof(vo_mpp_chn));
-
-    /* 源：VI / VICAP DEV0 CH1 (preview) */
     vi_mpp_chn.mod_id = K_ID_VI;
     vi_mpp_chn.dev_id = VICAP_DEV_ID_0;
     vi_mpp_chn.chn_id = VICAP_CHN_ID_1;
 
-    /* 目的：VO 显示设备上的指定 video layer */
     vo_mpp_chn.mod_id = K_ID_VO;
     vo_mpp_chn.dev_id = K_VO_DISPLAY_DEV_ID;
     vo_mpp_chn.chn_id = layer_id;
 
     k_s32 ret = kd_mpi_sys_bind(&vi_mpp_chn, &vo_mpp_chn);
-    if (ret) {
+    if (ret)
         printf("ERROR: kd_mpi_sys_bind VICAP->VO failed, ret=0x%x\n", ret);
-    } else {
-        printf("Bind VICAP(dev=%d, ch=1) -> VO(layer=%d) OK\n",
-               VICAP_DEV_ID_0, layer_id);
-    }
+    else
+        printf("Bind VICAP(dev0,ch1) -> VO(layer=%d) OK\n", layer_id);
 }
 
 static void sample_vicap_unbind_vo(k_vo_layer_id layer_id)
 {
-    k_mpp_chn vi_mpp_chn;
-    k_mpp_chn vo_mpp_chn;
-
-    memset(&vi_mpp_chn, 0, sizeof(vi_mpp_chn));
-    memset(&vo_mpp_chn, 0, sizeof(vo_mpp_chn));
+    k_mpp_chn vi_mpp_chn = {0};
+    k_mpp_chn vo_mpp_chn = {0};
 
     vi_mpp_chn.mod_id = K_ID_VI;
     vi_mpp_chn.dev_id = VICAP_DEV_ID_0;
@@ -641,321 +916,184 @@ static void sample_vicap_unbind_vo(k_vo_layer_id layer_id)
     vo_mpp_chn.chn_id = layer_id;
 
     k_s32 ret = kd_mpi_sys_unbind(&vi_mpp_chn, &vo_mpp_chn);
-    if (ret) {
+    if (ret)
         printf("WARN: kd_mpi_sys_unbind VICAP->VO failed, ret=0x%x\n", ret);
-    }
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
+static k_s32 apply_manual_exp_again(const sample_params_t *p)
+{
+    k_s32 ret;
+
+    if (p->exp_set) {
+        k_sensor_exposure_time_range range;
+        ret = kd_mpi_sensor_get_exposure_time_range(g_sensor_fd, &range);
+        if (ret) {
+            printf("ERROR: get_exposure_time_range failed, ret=%d\n", ret);
+            return ret;
+        }
+        if (p->exp_value_us < (k_u32)range.min_intg_time_us ||
+            p->exp_value_us > (k_u32)range.max_intg_time_us) {
+            printf("ERROR: Exposure %u us out of range [%.0f, %.0f]\n",
+                   p->exp_value_us, range.min_intg_time_us, range.max_intg_time_us);
+            return -1;
+        }
+        {
+            float exp_sec = (float)p->exp_value_us / 1000000.0f;
+            k_sensor_intg_time intg_time;
+            intg_time.intg_time[0] = exp_sec;
+            ret = kd_mpi_sensor_intg_time_set(g_sensor_fd, intg_time);
+            if (ret) {
+                printf("ERROR: intg_time_set failed, ret=%d\n", ret);
+                return ret;
+            }
+            printf("INFO: Manual exposure %u us\n", p->exp_value_us);
+        }
+    }
+
+    if (p->again_set) {
+        k_sensor_gain_info gain_range;
+        ret = kd_mpi_sensor_get_gain_range(g_sensor_fd, &gain_range);
+        if (ret) {
+            printf("ERROR: get_gain_range failed, ret=%d\n", ret);
+            return ret;
+        }
+        if (p->again_value < gain_range.min || p->again_value > gain_range.max) {
+            printf("ERROR: Again %.2f out of range [%.2f, %.2f]\n",
+                   p->again_value, gain_range.min, gain_range.max);
+            return -1;
+        }
+        {
+            k_sensor_gain gain;
+            gain.gain[0] = p->again_value;
+            ret = kd_mpi_sensor_again_set(g_sensor_fd, gain);
+            if (ret) {
+                printf("ERROR: again_set failed, ret=%d\n", ret);
+                return ret;
+            }
+            printf("INFO: Manual again %.2f\n", p->again_value);
+        }
+    }
+    return K_SUCCESS;
+}
+
+/* -------------------------------------------------------------------------- */
+/* main                                                                       */
+/* -------------------------------------------------------------------------- */
 
 int main(int argc, char **argv)
 {
-    k_s32 ret;
-    k_connector_type connector_type = 0;
-    k_u32 width = 0, height = 0;  // Auto-detected from connector
-    k_vo_layer_id layer_id = 1;
-    int rot_val = 0;
-    // offset_x and offset_y always 0 for fullscreen
-    int csi_idx = 2; // Default CSI 2
-    
-    // VICAP features
-    k_bool ae_enable = K_TRUE;    // Default enable AE
-    k_bool awb_enable = K_TRUE;   // Default enable AWB
-    k_bool hdr_enable = K_FALSE;   // Default disable HDR
-    k_bool dw_enable = K_FALSE;    // Default disable dewarp
-    k_bool dnr3_enable = K_TRUE;   // Default enable DNR3
-    
-    // Manual exposure (in microseconds)
-    k_bool exp_set = K_FALSE;
-    k_u32 exp_value_us = 0;
-    
-    // Manual again
-    k_bool again_set = K_FALSE;
-    float again_value = 1.0f;
-    
-    // Sensor configuration
-    k_u32 sensor_width = 1920;   // Default sensor width
-    k_u32 sensor_height = 1080;  // Default sensor height
-    k_u32 sensor_fps = 30;       // Default sensor FPS
-
     sample_params_t params;
-    k_s32 parse_ret = parse_parameters(argc, argv, &params);
-    if (parse_ret == 1) {
+    k_s32 ret;
+    k_u32 width = 0, height = 0;
+    k_vo_layer_id layer_id = 1;
+    k_vo_size display_resolution;
+    k_gdma_rotation_e rotate = GDMA_ROTATE_DEGREE_0;
+
+    ret = parse_parameters(argc, argv, &params);
+    if (ret == 1) {
         print_usage(argv[0]);
         return 0;
-    } else if (parse_ret < 0) {
+    }
+    if (ret < 0) {
         print_usage(argv[0]);
         return -1;
     }
-    
-    // Copy parameters to local variables
-    connector_type = params.connector_type;
-    rot_val = params.rot_val;
-    csi_idx = params.csi_idx;
-    ae_enable = params.ae_enable;
-    awb_enable = params.awb_enable;
-    hdr_enable = params.hdr_enable;
-    dw_enable = params.dw_enable;
-    dnr3_enable = params.dnr3_enable;
-    exp_set = params.exp_set;
-    exp_value_us = params.exp_value_us;
-    sensor_width = params.sensor_width;
-    sensor_height = params.sensor_height;
-    sensor_fps = params.sensor_fps;
+
     g_ch0_format = params.ch0_format;
-    again_set = params.again_set;
-    again_value = params.again_value;
-    k_bool mirror_en = params.mirror_en;
-    k_bool flip_en = params.flip_en;
+    g_vicap_csi = (k_vicap_dev)params.csi_idx;
 
-    g_vicap_dev_id = (k_vicap_dev)csi_idx;
-
-    // Get actual sensor resolution before calculating aspect ratio
-    ret = get_sensor_resolution(g_vicap_dev_id, &g_sensor_width, &g_sensor_height, NULL, sensor_width, sensor_height, sensor_fps);
+    ret = get_sensor_resolution(&params);
     if (ret != K_SUCCESS) {
         printf("ERROR: Failed to get sensor resolution\n");
         return -1;
     }
-       /* 1. 初始化 VB */
+
+    printf("sensor_info: type=%d name=%s phy_freq=%d hdr_mode=%d lanes=%s\n",
+           g_sensor_info.sensor_type, g_sensor_info.sensor_name,
+           g_sensor_info.phy_freq, g_sensor_info.hdr_mode,
+           mipi_lanes_name(g_sensor_info.mipi_lanes));
+
     ret = sample_vb_init();
-    if (ret != K_SUCCESS) {
-        printf("ERROR: sample_vb_init failed, ret=%d\n", ret);
+    if (ret != K_SUCCESS)
         return -1;
-    }
 
-    // Initialize display first to get correct resolution
-    k_gdma_rotation_e rotate = GDMA_ROTATE_DEGREE_0;
-    if (rot_val == 90) rotate = GDMA_ROTATE_DEGREE_90;
-    else if (rot_val == 180) rotate = GDMA_ROTATE_DEGREE_180;
-    else if (rot_val == 270) rotate = GDMA_ROTATE_DEGREE_270;
+    if (params.rot_val == 90)
+        rotate = GDMA_ROTATE_DEGREE_90;
+    else if (params.rot_val == 180)
+        rotate = GDMA_ROTATE_DEGREE_180;
+    else if (params.rot_val == 270)
+        rotate = GDMA_ROTATE_DEGREE_270;
 
-    if(0x00 != kd_display_init(connector_type, 0, 0, rotate)) {
+    if (kd_display_init(params.connector_type, 0, 0, rotate) != 0) {
         printf("ERROR: connector init failed\n");
-        return -1;
+        goto cleanup_vb;
     }
 
-    // Get display resolution from connector (after init)
-    k_vo_size display_resolution;
     ret = kd_mpi_vo_get_resolution(&display_resolution);
     if (ret != 0) {
-        printf("WARNING: Failed to get display resolution, using default\n");
+        printf("WARNING: get display resolution failed, use 1920x1080\n");
         display_resolution.width = 1920;
         display_resolution.height = 1080;
     }
 
-    // Calculate output size maintaining sensor aspect ratio to avoid distortion
-    // Consider three cases: sensor > screen, sensor < screen, sensor == screen
-    float sensor_aspect = (float)g_sensor_width / (float)g_sensor_height;
-    float screen_aspect = (float)display_resolution.width / (float)display_resolution.height;
+    calc_preview_size(g_sensor_width, g_sensor_height,
+                      display_resolution.width, display_resolution.height,
+                      &width, &height);
 
-    // Case 1: Sensor resolution larger than screen (need downscale)
-    // Case 2: Sensor resolution smaller than screen (can upscale or fit)
-    // Case 3: Sensor resolution equals screen (direct match)
-    
-    // Always maintain aspect ratio, fit within screen bounds
-    if (sensor_aspect > screen_aspect) {
-        // Sensor is wider: fit to screen width, letterbox top/bottom
-        width = display_resolution.width;
-        height = (k_u32)((float)width / sensor_aspect);
-    } else if (sensor_aspect < screen_aspect) {
-        // Sensor is taller: fit to screen height, letterbox left/right
-        height = display_resolution.height;
-        width = (k_u32)((float)height * sensor_aspect);
-    } else {
-        // Same aspect ratio: direct match
-        width = display_resolution.width;
-        height = display_resolution.height;
-    }
-    
-    // Ensure output dimensions don't exceed screen bounds
-    if (width > display_resolution.width) {
-        width = display_resolution.width;
-        height = (k_u32)((float)width / sensor_aspect);
-    }
-    if (height > display_resolution.height) {
-        height = display_resolution.height;
-        width = (k_u32)((float)height * sensor_aspect);
-    }
-
-    // Align width to 8 pixels (hardware requirement)
-    if ((width & 7) != 0) {
-        width = (width + 7) & ~7;
-    }
-    // Align height to 8 pixels
-    if ((height & 7) != 0) {
-        height = (height + 7) & ~7;
-    }
-
-    printf("sample_vicap_sensor: connector=%d, screen_size=%ux%u, output_size=%ux%u, layer=%d, rotate=%d, csi=%d\n",
-           connector_type, display_resolution.width, display_resolution.height, width, height, layer_id, rot_val, g_vicap_dev_id);
-    printf("Aspect ratio mode: sensor=%.2f, screen=%.2f\n", sensor_aspect, screen_aspect);
-    printf("CHN0 format: %d (0=yuv, 1=rgb888, 2=rgb888p, 3=raw)\n", g_ch0_format);
-
-    printf("Fullscreen mode (offset_x=0, offset_y=0)\n");
-    printf("VICAP features: AE=%d, AWB=%d, HDR=%d, Dewarp=%d, DNR3=%d",
-           ae_enable, awb_enable, hdr_enable, dw_enable, dnr3_enable);
-    if (exp_set) {
-        printf(", Manual Exp=%u us", exp_value_us);
-    }
-    printf("\n");
+    printf("sample_vicap_sensor: connector=%d screen=%ux%u preview=%ux%u "
+           "rotate=%d csi=%d ofmt=%u\n",
+           params.connector_type, display_resolution.width, display_resolution.height,
+           width, height, params.rot_val, g_vicap_csi, g_ch0_format);
+    printf("VICAP features: AE=%d AWB=%d DW=%d DNR3=%d tile=%d\n",
+           params.ae_enable, params.awb_enable,
+           params.dw_enable, params.dnr3_enable, params.force_tile);
 
     signal(SIGINT, handle_signal);
 
-    // 如果设置了场景参数，注册并加载场景
     if (params.scene_set) {
-        printf("\nRegistering scene '%s' with path '%s'...\n", params.scene_name, params.scene_path);
+        printf("Registering scene '%s' path '%s'\n",
+               params.scene_name, params.scene_path);
         ret = kd_mpi_vicap_register_scene(params.scene_name, params.scene_path);
         if (ret < 0) {
-            printf("ERROR: Failed to register scene\n");
+            printf("ERROR: register scene failed\n");
             goto cleanup_display;
         }
-        
-        // 加载场景（在启动流之前）
-        printf("Loading scene '%s'...\n", params.scene_name);
         ret = kd_mpi_vicap_load_scene(params.scene_name);
         if (ret < 0) {
-            printf("ERROR: Failed to load scene\n");
+            printf("ERROR: load scene failed\n");
             goto cleanup_display;
         }
-        
-        const char *current = kd_mpi_vicap_get_scene();
-        printf("Current scene: %s\n", current ? current : "none");
     }
 
-    /* 2. 初始化 VICAP（sensor + dev0/ch0；mirror/flip 在 init 前经 dev_attr 下发） */
-    ret = sample_vicap_init(g_vicap_dev_id, width, height, ae_enable, awb_enable, hdr_enable,
-                            dw_enable, dnr3_enable, g_ch0_format, mirror_en, flip_en);
+    ret = sample_vicap_init(&params, width, height);
     if (ret != K_SUCCESS) {
         printf("ERROR: sample_vicap_init failed, ret=%d\n", ret);
         goto cleanup_display;
     }
 
-    // Configure layer for fullscreen (offset_x=0, offset_y=0)
-    ret = kd_display_layer_configure(layer_id, PIXEL_FORMAT_YUV_SEMIPLANAR_420, width, height, 0, 0);
-    if (0x00 != ret) {
-        printf("ERROR: failed to configure layer, ret=%d\n", ret);
+    ret = kd_display_layer_configure(layer_id, PIXEL_FORMAT_YUV_SEMIPLANAR_420,
+                                     width, height, 0, 0);
+    if (ret != 0) {
+        printf("ERROR: configure layer failed, ret=%d\n", ret);
         goto cleanup_vicap;
     }
     kd_display_layer_enable(layer_id);
-
-    /* 4. 绑定 VICAP → VO */
     sample_vicap_bind_vo(layer_id);
 
-    /* 5. 启动 VICAP 流，开始预览 */
-    printf("Starting VICAP stream on dev0 ch0 ...\n");
     ret = kd_mpi_vicap_start_stream(VICAP_DEV_ID_0);
     if (ret != K_SUCCESS) {
-        printf("ERROR: kd_mpi_vicap_start_stream failed, ret=%d\n", ret);
+        printf("ERROR: start_stream failed, ret=%d\n", ret);
         goto cleanup_bind;
     }
+    printf("VICAP stream started\n");
 
-    /* 6. 如果设置了手动曝光，在 sensor start 之后设置曝光 */
-    if (exp_set) {
-        
-        k_sensor_exposure_time_range range;
-        ret = kd_mpi_sensor_get_exposure_time_range(g_sensor_fd, &range);
-        if (ret != 0) {
-            printf("ERROR: kd_mpi_sensor_get_exposure_time_range failed, ret=%d\n", ret);
-            goto cleanup_stream;
-        }
-        
-        if (exp_value_us < (k_u32)range.min_intg_time_us || exp_value_us > (k_u32)range.max_intg_time_us) {
-            printf("ERROR: Exposure value %u us is out of range [%.0f us, %.0f us]\n", 
-                   exp_value_us, range.min_intg_time_us, range.max_intg_time_us);
-            printf("Please set -exp to a value between %.0f and %.0f (microseconds)\n", range.min_intg_time_us, range.max_intg_time_us);
-            goto cleanup_stream;
-        }
-        
-        // Convert microseconds to seconds for the API call
-        float exp_value_sec = (float)exp_value_us / 1000000.0f;
-        k_sensor_intg_time intg_time;
-        intg_time.intg_time[0] = exp_value_sec;  // SENSOR_LINEAR_PARAS = 0
-        ret = kd_mpi_sensor_intg_time_set(g_sensor_fd, intg_time);
-        if (ret != 0) {
-            printf("ERROR: kd_mpi_sensor_intg_time_set failed, ret=%d\n", ret);
-            goto cleanup_stream;
-        }
-        printf("INFO: Manual exposure set to %u us (%.6f sec), range: %.6f-%.6f sec\n", 
-               exp_value_us, exp_value_sec, (float)range.min_intg_time_us / 1000000.0f, (float)range.max_intg_time_us / 1000000.0f);
-    }
+    if (apply_manual_exp_again(&params) != K_SUCCESS)
+        goto cleanup_stream;
 
-    // Set manual again if specified
-    if (again_set) {
-        k_sensor_gain_info gain_range;
-        ret = kd_mpi_sensor_get_gain_range(g_sensor_fd, &gain_range);
-        if (ret != 0) {
-            printf("ERROR: kd_mpi_sensor_get_gain_range failed, ret=%d\n", ret);
-            goto cleanup_stream;
-        }
-        
-        if (again_value < gain_range.min || again_value > gain_range.max) {
-            printf("ERROR: Again value %.2f is out of range [%.2f, %.2f]\n", 
-                   again_value, gain_range.min, gain_range.max);
-            printf("Please set -again to a value between %.2f and %.2f\n", gain_range.min, gain_range.max);
-            goto cleanup_stream;
-        }
-        
-        k_sensor_gain gain;
-        gain.gain[0] = again_value;
-        ret = kd_mpi_sensor_again_set(g_sensor_fd, gain);
-        if (ret != 0) {
-            printf("ERROR: kd_mpi_sensor_again_set failed, ret=%d\n", ret);
-            goto cleanup_stream;
-        }
-        printf("INFO: Manual again set to %.2f (range: %.2f-%.2f, step: %.6f)\n", 
-               again_value, gain_range.min, gain_range.max, gain_range.step);
-    }
-
-    printf("Preview running.\n");
-    printf("CHN0: dump (format=%d), CHN1: preview\n", g_ch0_format);
-    printf("Commands: d=dump 1 frame, d <n>=dump n frames, q=quit\n");
-    
-    k_u32 dump_count = 0;
-    char cmd_buf[64];
-    
-    while (g_app_run) {
-        printf("\n---------------------------------------\n");
-        printf(" Input command:\n");
-        printf("   d      - Dump one frame\n");
-        printf("   d <n>  - Dump n frames\n");
-        printf("   q      - Quit\n");
-        printf("---------------------------------------\n");
-        printf("Command: ");
-        fflush(stdout);
-        
-        if (fgets(cmd_buf, sizeof(cmd_buf), stdin) == NULL) {
-            continue;
-        }
-        
-        // Remove newline
-        cmd_buf[strcspn(cmd_buf, "\n")] = 0;
-        
-        char cmd = cmd_buf[0];
-        int count = 1;
-        
-        // Parse "d <n>" format
-        if (cmd == 'd' || cmd == 'D') {
-            char *space = strchr(cmd_buf, ' ');
-            if (space) {
-                count = atoi(space + 1);
-                if (count <= 0) count = 1;
-            }
-            printf("Dumping %d frame(s)...\n", count);
-            for (int i = 0; i < count; i++) {
-                sample_vicap_dump_frame(VICAP_DEV_ID_0, VICAP_CHN_ID_0, &dump_count);
-            }
-        } else if (cmd == 'q' || cmd == 'Q') {
-            printf("Exiting...\n");
-            break;
-        } else if (cmd != '\0') {
-            printf("Unknown command: %c\n", cmd);
-        }
-    }
+    run_dump_loop(params.auto_dump_count);
 
 cleanup_stream:
-    printf("Stopping VICAP stream ...\n");
+    printf("Stopping VICAP stream...\n");
     kd_mpi_vicap_stop_stream(VICAP_DEV_ID_0);
 
 cleanup_bind:
@@ -965,12 +1103,11 @@ cleanup_display:
     kd_display_deinit();
 
 cleanup_vicap:
-    printf("Deinitializing VICAP dev0 ...\n");
+    printf("Deinit VICAP...\n");
     kd_mpi_vicap_deinit(VICAP_DEV_ID_0);
 
-    printf("Deinitializing VB ...\n");
+cleanup_vb:
+    printf("Deinit VB...\n");
     kd_mpi_vb_exit();
-
-    printf("vo_test_video exit.\n");
     return 0;
 }
