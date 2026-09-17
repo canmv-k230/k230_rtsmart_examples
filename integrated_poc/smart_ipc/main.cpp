@@ -17,7 +17,7 @@ static void sigHandler(int sig_no) {
 }
 
 static void Usage() {
-    std::cout << "Usage: ./smart_ipc.elf [-H] [-S <sensor type>] [-V <enable_audio_capture>] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>] [-D <data_source>] [-M <streaming_mode>] [-P <port>]" << std::endl;
+    std::cout << "Usage: ./smart_ipc.elf [-H] [-S <sensor type>] [-V <enable_audio_capture>] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-R <ai_fps>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>] [-D <data_source>] [-M <streaming_mode>] [-P <port>]" << std::endl;
     std::cout << "-H: display this help message" << std::endl;
     std::cout << "-S: the sensor type, default auto-detect" << std::endl;
     std::cout << "-V: enable audio capture, default 1" << std::endl;
@@ -31,6 +31,7 @@ static void Usage() {
     std::cout << "-C: the video output connector type(0:HDMI,1:LCD), default HDMI" << std::endl;
     std::cout << "-A: the AI analysis input width, default 1280" << std::endl;
     std::cout << "-I: the AI analysis input height, default 720" << std::endl;
+    std::cout << "-R: the AI analysis frame rate, default 10" << std::endl;
     std::cout << "-K: the kmodel file path,default face_detection_320.kmodel" << std::endl;
     std::cout << "-T: the face detection threshold,default 0.6" << std::endl;
     std::cout << "-N: the face detection NMS threshold,default 0.4" << std::endl;
@@ -45,7 +46,7 @@ static void Usage() {
 int parse_config(int argc, char *argv[], KdMediaInputConfig &config, StreamingMode &mode, int &port) {
     int result;
     opterr = 0;
-    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:K:T:N:E:F:G:S:V:D:M:P:")) != -1) {
+    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:R:K:T:N:E:F:G:S:V:D:M:P:")) != -1) {
         switch(result) {
         case 'H' : {
             Usage(); break;
@@ -128,6 +129,12 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config, StreamingMo
             int n = atoi(optarg);
             if (n < 0) Usage();
             config.ai_height = n;
+            break;
+        }
+        case 'R': {
+            int n = atoi(optarg);
+            if (n <= 0 || n > 30) Usage();
+            config.ai_fps = n;
             break;
         }
         case 'K': {
@@ -214,6 +221,7 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config, StreamingMo
     printf("Video output height: %d\n", config.vo_height);
     printf("AI input width: %d\n", config.ai_width);
     printf("AI input height: %d\n", config.ai_height);
+    printf("AI analysis frame rate: %d\n", config.ai_fps);
     printf("Kmodel file: %s\n", config.kmodel_file.c_str());
     printf("Face detection threshold: %f\n", config.obj_thresh);
     printf("Face detection NMS threshold: %f\n", config.nms_thresh);

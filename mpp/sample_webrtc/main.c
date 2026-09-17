@@ -14,20 +14,20 @@
  *                                                       ▼
  *   ┌────────────────────────────────────────────────────────────┐
  *   │                    WebRTC (libpeer)                         │
- *   │  peer_connection_task ── ICE/DTLS ──> browser              │
+ *   │  peer_connection_task ── ICE/DTLS ──> browsers             │
  *   └────────────────────────────────────────────────────────────┘
  *                                                       ▲
  *   ┌────────────────────────────────────────────────────────────┐
  *   │                    HTTP signaling                          │
  *   │  GET /offer  ──> create SDP offer ──> browser              │
- *   │  POST /answer <── set remote SDP  <── browser              │
+ *   │  POST /answer?session=id <── remote SDP <── browser        │
  *   └────────────────────────────────────────────────────────────┘
  *
  * Thread model:
  *   - Main thread:      signal wait loop, then orchestrates shutdown
  *   - http_server:      accepts connections, parses HTTP, calls on_http_request
- *   - peer_connection:  runs peer_connection_loop() at 1ms interval (ICE/DTLS)
- *   - venc_stream:      polls VENC for H.264 frames, sends via WebRTC
+ *   - peer_connection:  runs all peer_connection_loop() calls at 1ms interval
+ *   - venc_stream:      polls VENC and fans encoded frames out to all peers
  *
  * Shutdown sequence (triggered by SIGINT):
  *   1. g_exit_requested = 1  (signal handler, safe for async-signal-safe)
@@ -35,24 +35,27 @@
  *   3. http_server_stop()    (closes server fd, joins http thread)
  *   4. pthread_join(venc)    (waits for encode thread to finish)
  *   5. pthread_join(peer)    (waits for peer connection thread to finish)
- *   6. Free resources, destroy peer connection, deinit MPP pipeline
+ *   6. Free resources, destroy peer connections, deinit MPP pipeline
  */
 
 #include <arpa/inet.h>
-#include <net/if.h>
+#include <ctype.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/ioctl.h>
-#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "peer.h"
+#include "hal_netmgmt.h"
 #include "http_server.h"
 #include "web_page.h"
 #include "mpp_pipeline.h"
@@ -79,50 +82,26 @@ int g_interrupted = 0;
  */
 static volatile int g_exit_requested = 0;
 
-/**
- * g_pc: The single PeerConnection instance.
- *
- * Drain mechanism: Before close+create_offer, the HTTP thread waits
- * until both worker threads have exited g_pc internals (in-use flags
- * are 0). close() sets pc->state=CLOSED so the next loop/send_video
- * call skips, but a call already past the state check may still be
- * using SRTP/DTLS internals. The drain guarantees no one is inside
- * g_pc before we destroy and rebuild it.
- *
- * Flags are volatile because they are written by worker threads and
- * read by the HTTP thread. This is not a mutex — there remains a
- * tiny window between setting the flag and entering pc internals —
- * but the drain eliminates the long window (close → create_offer
- * happens while another thread is mid-call), which is the one that
- * causes use-after-free crashes.
- */
-PeerConnection* g_pc = NULL;
+#define MAX_WEBRTC_CLIENTS 4
+#define NEGOTIATION_TIMEOUT_MS 30000
+#define SESSION_ID_HEX_LEN 32
+#define PEER_NEGOTIATION_POLL_US 1000
+#define PEER_CONNECTED_POLL_US 10000
+#define PEER_IDLE_POLL_US 50000
 
-/** In-use flags: set to 1 while a worker thread is inside g_pc internals,
- *  cleared when it exits. The HTTP thread drains (busy-waits) on these
- *  after peer_connection_close() before calling create_offer(). */
-static volatile int g_peer_in_pc = 0;
-static volatile int g_venc_in_pc = 0;
+typedef struct {
+  PeerConnection* pc;
+  PeerConnectionState state;
+  char id[SESSION_ID_HEX_LEN + 1];
+  uint64_t last_activity_ms;
+  int reserved;
+  char client_ip[INET_ADDRSTRLEN];
+  char local_ip[INET_ADDRSTRLEN];
+} WebRtcSession;
 
-/**
- * g_state: Current ICE connection state.
- *
- * Written from peer_connection_task (via onconnectionstatechange callback),
- * read from http_server thread and venc_stream_task.
- * Marked volatile as a minimal safety measure.
- */
-static volatile PeerConnectionState g_state = PEER_CONNECTION_CLOSED;
-
-/* ── SDP offer / ICE candidate synchronization ──────────────────── */
-
-/** Mutex + condvar for synchronizing offer creation with ICE gathering.
- *  Flow: peer_connection_create_offer() → onicecandidate() → signal condvar
- *        ← on_http_request() waits on condvar until offer is ready
- */
-static pthread_mutex_t g_offer_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_offer_cond = PTHREAD_COND_INITIALIZER;
-static char* g_offer_sdp = NULL;  /**< Owned by offer flow, freed on next offer or shutdown */
-static int g_offer_ready = 0;     /**< Flag: 1 when ICE gathering is complete */
+static WebRtcSession g_sessions[MAX_WEBRTC_CLIENTS];
+static pthread_mutex_t g_sessions_mutex = PTHREAD_MUTEX_INITIALIZER;
+static MediaCodec g_video_codec = CODEC_H265;
 
 /* ── H.264 SPS/PPS cache ─────────────────────────────────────────── */
 
@@ -137,27 +116,12 @@ static size_t g_sps_pps_size = 0;       /**< Size of cached SPS+PPS */
 
 /* ── Callbacks ────────────────────────────────────────────────────── */
 
-/** Called by libpeer when ICE connection state changes.
- *  Updates g_state for other threads to check. */
+/** Called while g_sessions_mutex is held. */
 static void onconnectionstatechange(PeerConnectionState state, void* data) {
-  printf("State: %s\n", peer_connection_state_to_string(state));
-  g_state = state;
-}
-
-/** Called by libpeer when ICE gathering produces a candidate.
- *  Stores the complete SDP (offer + candidates) and signals the
- *  HTTP handler thread that the offer is ready. */
-static void onicecandidate(char* sdp, void* userdata) {
-  pthread_mutex_lock(&g_offer_mutex);
-  /* Free any previous offer SDP */
-  if (g_offer_sdp) {
-    free(g_offer_sdp);
-    g_offer_sdp = NULL;
-  }
-  g_offer_sdp = strdup(sdp);
-  g_offer_ready = 1;
-  pthread_cond_signal(&g_offer_cond);
-  pthread_mutex_unlock(&g_offer_mutex);
+  WebRtcSession* session = (WebRtcSession*)data;
+  printf("Session %s state: %s\n", session->id,
+         peer_connection_state_to_string(state));
+  session->state = state;
 }
 
 /** SIGINT handler: sets flag for main loop to exit.
@@ -166,6 +130,155 @@ static void onicecandidate(char* sdp, void* userdata) {
  *  orchestrates an orderly shutdown. */
 static void signal_handler(int sig) {
   g_exit_requested = 1;
+}
+
+static uint64_t get_time_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static int session_is_terminal(PeerConnectionState state) {
+  return state == PEER_CONNECTION_CLOSED || state == PEER_CONNECTION_FAILED ||
+         state == PEER_CONNECTION_DISCONNECTED;
+}
+
+/* Read time only while holding g_sessions_mutex, after any activity update. */
+static int session_negotiation_expired(const WebRtcSession* session, uint64_t now) {
+  return (session->state == PEER_CONNECTION_NEW ||
+          session->state == PEER_CONNECTION_CHECKING ||
+          session->state == PEER_CONNECTION_CONNECTED) &&
+         now >= session->last_activity_ms &&
+         now - session->last_activity_ms > NEGOTIATION_TIMEOUT_MS;
+}
+
+/** Destroy a session. The caller must hold g_sessions_mutex. */
+static void session_destroy_locked(WebRtcSession* session) {
+  if (session->pc) {
+    peer_connection_close(session->pc);
+    peer_connection_destroy(session->pc);
+    session->pc = NULL;
+  }
+  session->state = PEER_CONNECTION_CLOSED;
+  session->id[0] = '\0';
+  session->last_activity_ms = 0;
+  session->reserved = 0;
+  session->client_ip[0] = '\0';
+  session->local_ip[0] = '\0';
+}
+
+/** Find a session by ID. The caller must hold g_sessions_mutex. */
+static WebRtcSession* session_find(const char* id) {
+  for (int i = 0; i < MAX_WEBRTC_CLIENTS; i++) {
+    WebRtcSession* session = &g_sessions[i];
+    if (session->pc && strcmp(session->id, id) == 0) {
+      return session;
+    }
+  }
+  return NULL;
+}
+
+/** Reserve a free or expired slot. The caller must hold g_sessions_mutex. */
+static WebRtcSession* session_available(void) {
+  uint64_t now = get_time_ms();
+
+  for (int i = 0; i < MAX_WEBRTC_CLIENTS; i++) {
+    WebRtcSession* session = &g_sessions[i];
+    if ((!session->pc && !session->reserved) ||
+        session_is_terminal(session->state) ||
+        session_negotiation_expired(session, now)) {
+      if (session->pc) {
+        session_destroy_locked(session);
+      }
+      return session;
+    }
+  }
+  return NULL;
+}
+
+static int session_matches_client(const WebRtcSession* session,
+                                  const char* client_ip,
+                                  const char* local_ip) {
+  if (!client_ip || strcmp(session->client_ip, client_ip) != 0) {
+    return 0;
+  }
+  if (local_ip && local_ip[0] != '\0' && strcmp(local_ip, "0.0.0.0") != 0 &&
+      strcmp(session->local_ip, local_ip) != 0) {
+    return 0;
+  }
+  return 1;
+}
+
+static int secure_random_hex(char* output, size_t hex_len) {
+  static const char hex[] = "0123456789abcdef";
+  uint8_t random[32];
+  size_t byte_len = hex_len / 2;
+
+  if (!output || hex_len == 0 || (hex_len & 1) != 0 || byte_len > sizeof(random)) {
+    return -1;
+  }
+  if (peer_random_bytes(random, byte_len) != 0) {
+    return -1;
+  }
+  for (size_t i = 0; i < byte_len; i++) {
+    output[i * 2] = hex[random[i] >> 4];
+    output[i * 2 + 1] = hex[random[i] & 0x0f];
+  }
+  output[hex_len] = '\0';
+  return 0;
+}
+
+static int path_matches_route(const char* path, const char* route) {
+  size_t route_len = strlen(route);
+  return strncmp(path, route, route_len) == 0 &&
+         (path[route_len] == '\0' || path[route_len] == '?');
+}
+
+static int query_parameter(const char* path, const char* key,
+                           char* output, size_t output_size) {
+  const char* item = strchr(path, '?');
+  size_t key_len = strlen(key);
+
+  if (!item || output_size == 0) return 0;
+  item++;
+  while (*item) {
+    const char* item_end = strchr(item, '&');
+    const char* equals;
+    size_t value_len;
+    if (!item_end) item_end = item + strlen(item);
+    equals = memchr(item, '=', (size_t)(item_end - item));
+    if (equals && (size_t)(equals - item) == key_len &&
+        strncmp(item, key, key_len) == 0) {
+      value_len = (size_t)(item_end - equals - 1);
+      if (value_len == 0 || value_len >= output_size) return 0;
+      memcpy(output, equals + 1, value_len);
+      output[value_len] = '\0';
+      return 1;
+    }
+    if (*item_end == '\0') break;
+    item = item_end + 1;
+  }
+  return 0;
+}
+
+static int parse_session_id(const char* path, char* session_id) {
+  if (!query_parameter(path, "session", session_id, SESSION_ID_HEX_LEN + 1) ||
+      strlen(session_id) != SESSION_ID_HEX_LEN) {
+    return 0;
+  }
+  for (size_t i = 0; i < SESSION_ID_HEX_LEN; i++) {
+    if (!isxdigit((unsigned char)session_id[i])) return 0;
+  }
+  return 1;
+}
+
+/** Caller must hold g_sessions_mutex. */
+static int session_generate_id(char* session_id) {
+  for (int attempt = 0; attempt < 8; attempt++) {
+    if (secure_random_hex(session_id, SESSION_ID_HEX_LEN) != 0) return -1;
+    if (!session_find(session_id)) return 0;
+  }
+  return -1;
 }
 
 /** Replace mDNS host candidates with the HTTP client's IPv4 address.
@@ -252,68 +365,145 @@ static void send_venc_frame_to_webrtc(const uint8_t* data, size_t size,
     return;
   }
 
-  /* Only send video data if we have an active WebRTC connection.
-   * Mark in-use BEFORE the state check so the reconnect path (GET /offer)
-   * sees us and waits. If we checked state first, close() could happen
-   * between the check and setting the flag — the drain would miss us. */
-  g_venc_in_pc = 1;
-  if (g_state != PEER_CONNECTION_COMPLETED && g_state != PEER_CONNECTION_CONNECTED) {
-    g_venc_in_pc = 0;
-    return;
+  pthread_mutex_lock(&g_sessions_mutex);
+  for (int i = 0; i < MAX_WEBRTC_CLIENTS; i++) {
+    WebRtcSession* session = &g_sessions[i];
+    if (session->pc && session->state == PEER_CONNECTION_COMPLETED) {
+      /* Parameter sets and the frame are sent separately. Each peer owns an
+       * independent RTP sequence/timestamp state and SRTP context. */
+      if (type == K_VENC_I_FRAME && g_sps_pps_buf && g_sps_pps_size > 0) {
+        peer_connection_send_video(session->pc, g_sps_pps_buf,
+                                   g_sps_pps_size, pts);
+      }
+      peer_connection_send_video(session->pc, data, size, pts);
+    }
   }
-
-  /* I-frame: send parameter sets then I-frame as two separate video sends.
-   * WebRTC/RTP handles NAL units independently — no need
-   * to concatenate parameter sets + I-frame into a single buffer.
-   * This avoids a per-I-frame malloc/free. */
-  if (type == K_VENC_I_FRAME && g_sps_pps_buf && g_sps_pps_size > 0) {
-    peer_connection_send_video(g_pc, g_sps_pps_buf, g_sps_pps_size, pts);
-  }
-
-  /* P-frame (or I-frame with failed SPS/PPS concat): send as-is */
-  peer_connection_send_video(g_pc, data, size, pts);
-  g_venc_in_pc = 0;
+  pthread_mutex_unlock(&g_sessions_mutex);
 }
 
 /* ── Network utilities ───────────────────────────────────────────── */
 
 /**
- * Get the IPv4 address selected by RT-Smart's current default route.
- * Falls back to "0.0.0.0" if no IP is found.
+ * Format an RT-Smart network-management interface's IPv4 address.
  */
-static void get_local_ip(char* buf, int buf_len) {
-  snprintf(buf, buf_len, "0.0.0.0");
+static int get_netif_ip(enum rt_netif_t netif, char* buf, int buf_len) {
+  struct ifconfig_t config;
+  struct in_addr address;
+  char netdev_name[32];
 
-  int sock = socket(AF_INET, SOCK_DGRAM, 0);
-  if (sock < 0) {
+  if (netmgmt_utils_get_netdev_name(netif, netdev_name) != 0 || netdev_name[0] == '\0') {
+    return 0;
+  }
+  memset(&config, 0, sizeof(config));
+  if (netmgmt_utils_get_ifconfig(netif, &config) != 0 || config.ip.addr == 0) {
+    return 0;
+  }
+
+  address.s_addr = config.ip.addr;
+  return inet_ntop(AF_INET, &address, buf, buf_len) != NULL;
+}
+
+static void print_network_devices(void) {
+  int dev_num = 0;
+  char names[NET_DEV_MAX_CNT][32];
+  if (netmgmt_utils_get_dev_list(&dev_num, names) != 0) {
+    printf("Network device list unavailable\n");
     return;
   }
+  printf("Active network devices:");
+  for (int i = 0; i < dev_num && i < NET_DEV_MAX_CNT; i++) {
+    printf(" %s", names[i]);
+  }
+  printf("\n");
+}
 
-  struct ifreq ifr;
-  memset(&ifr, 0, sizeof(ifr));
-  if (ioctl(sock, SIOCGIFADDR, &ifr) == 0) {
-    struct sockaddr_in* sin = (struct sockaddr_in*)&ifr.ifr_addr;
-    if (sin->sin_addr.s_addr != htonl(INADDR_ANY)) {
-      inet_ntop(AF_INET, &sin->sin_addr, buf, buf_len);
+static int collect_http_local_ips(char local_ips[][INET_ADDRSTRLEN],
+                                  const char* interface_names[], int max_ips) {
+  static const struct {
+    enum rt_netif_t netif;
+    const char* name;
+  } interfaces[] = {
+    {RT_NET_DEV_WLAN_AP, "SoftAP"},
+    {RT_NET_DEV_WLAN_STA, "Wi-Fi STA"},
+    {RT_NET_DEV_LAN, "LAN"},
+  };
+  int count = 0;
+  int ap_active = 0;
+  for (size_t i = 0; i < sizeof(interfaces) / sizeof(interfaces[0]) && count < max_ips; i++) {
+    if (interfaces[i].netif == RT_NET_DEV_WLAN_AP &&
+        (netmgmt_wlan_ap_isactived(&ap_active) != 0 || !ap_active)) continue;
+    char ip[INET_ADDRSTRLEN] = {0};
+    if (!get_netif_ip(interfaces[i].netif, ip, sizeof(ip))) continue;
+    int duplicate = 0;
+    for (int j = 0; j < count; j++) if (strcmp(local_ips[j], ip) == 0) duplicate = 1;
+    if (!duplicate) {
+      snprintf(local_ips[count], INET_ADDRSTRLEN, "%s", ip);
+      if (interface_names) interface_names[count] = interfaces[i].name;
+      count++;
     }
   }
+  return count;
+}
 
-  close(sock);
+static int get_http_local_ips(char local_ips[][INET_ADDRSTRLEN], int max_ips,
+                              void* user_data) {
+  (void)user_data;
+  return collect_http_local_ips(local_ips, NULL, max_ips);
+}
+
+static const char* interface_name_for_ip(const char* ip) {
+  char local_ips[HTTP_MAX_LISTENERS][INET_ADDRSTRLEN] = {{0}};
+  const char* interface_names[HTTP_MAX_LISTENERS] = {0};
+  int count = collect_http_local_ips(local_ips, interface_names,
+                                     HTTP_MAX_LISTENERS);
+  for (int i = 0; i < count; i++) {
+    if (strcmp(local_ips[i], ip) == 0) {
+      return interface_names[i];
+    }
+  }
+  return "interface";
 }
 
 /* ── Worker threads ──────────────────────────────────────────────── */
 
-/** Runs peer_connection_loop() at ~1kHz.
- *  This drives ICE candidate gathering, DTLS handshake,
- *  and SRTP packet processing. Must be called frequently. */
+/** Runs peer_connection_loop() frequently during negotiation, then reduces
+ *  the polling rate once sessions are established or idle. */
 static void* peer_connection_task(void* data) {
+  (void)data;
+
   while (!g_interrupted) {
-    g_peer_in_pc = 1;
-    peer_connection_loop(g_pc);
-    g_peer_in_pc = 0;
-    usleep(1000);  /* ~1ms tick — balances responsiveness vs CPU usage */
+    unsigned int poll_delay_us = PEER_IDLE_POLL_US;
+
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < MAX_WEBRTC_CLIENTS; i++) {
+      WebRtcSession* session = &g_sessions[i];
+      if (session->pc) {
+        peer_connection_loop(session->pc);
+        uint64_t now = get_time_ms();
+        if (session_is_terminal(session->state) ||
+            session_negotiation_expired(session, now)) {
+          if (!session_is_terminal(session->state)) {
+            printf("Session %s signaling timeout after %" PRIu64 " ms\n",
+                   session->id, now - session->last_activity_ms);
+          }
+          session_destroy_locked(session);
+          continue;
+        }
+
+        if (session->state == PEER_CONNECTION_CHECKING ||
+            session->state == PEER_CONNECTION_CONNECTED) {
+          poll_delay_us = PEER_NEGOTIATION_POLL_US;
+        } else if (session->state == PEER_CONNECTION_COMPLETED) {
+          if (poll_delay_us > PEER_CONNECTED_POLL_US) {
+            poll_delay_us = PEER_CONNECTED_POLL_US;
+          }
+        }
+      }
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
+
+    usleep(poll_delay_us);
   }
-  pthread_exit(NULL);
   return NULL;
 }
 
@@ -332,6 +522,7 @@ static void* venc_stream_task(void* data) {
   k_venc_chn_status status;
   k_venc_pack static_packs[VENC_MAX_PACK_CNT];
   k_s32 ret;
+  (void)data;
 
   while (!g_interrupted) {
     memset(&output, 0, sizeof(output));
@@ -376,85 +567,186 @@ static void* venc_stream_task(void* data) {
  * Routes:
  *   GET  /           → Serve the embedded web page (web_page.h)
  *   GET  /index.html → Same as /
- *   GET  /offer      → Create a new SDP offer (closes any existing connection)
- *   POST /answer     → Set the remote SDP answer from the browser
- *   OPTIONS *        → CORS preflight
+ *   GET  /offer      → Allocate a session and create its SDP offer
+ *   POST /answer?session=<id> → Set that session's remote SDP answer
+ *   POST /disconnect?session=<id> → Release a session immediately
  *
  * Signaling flow:
  *   1. Browser calls GET /offer
  *   2. Server creates PeerConnection offer + gathers ICE candidates
- *   3. Server returns the full SDP offer (with candidates)
+ *   3. Server returns the SDP and an X-WebRTC-Session response header
  *   4. Browser calls pc.setRemoteDescription(offer)
- *   5. Browser creates answer and POSTs it to /answer
+ *   5. Browser creates answer and POSTs it with the session ID
  *   6. Server calls peer_connection_set_remote_description(answer)
  *   7. DTLS/SRTP handshake completes → video frames start flowing
  */
 static void on_http_request(const char* method, const char* path,
                             const char* body, int body_len,
                             const char* client_ip,
+                            const char* local_ip,
                             http_response_t* response) {
+  const char* request_local_ip =
+      local_ip && local_ip[0] != '\0' && strcmp(local_ip, "0.0.0.0") != 0
+          ? local_ip
+          : NULL;
+  if (strcmp(method, "OPTIONS") == 0) {
+    response->status = 204;
+    response->content_type = "text/plain";
+    response->body = NULL;
+    response->body_len = 0;
+    return;
+  }
 
   /* ── Serve web page ── */
-  if (strcmp(method, "GET") == 0 && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) {
+  if (strcmp(method, "GET") == 0 &&
+      (path_matches_route(path, "/") || path_matches_route(path, "/index.html"))) {
     response->status = 200;
     response->content_type = "text/html; charset=utf-8";
     response->body = WEB_PAGE_HTML;
     response->body_len = strlen(WEB_PAGE_HTML);
 
   /* ── Create SDP offer ── */
-  } else if (strcmp(method, "GET") == 0 && strcmp(path, "/offer") == 0) {
-    /* Close any existing peer connection before creating a new offer.
-     * This allows the browser to reconnect without refreshing the page.
-     *
-     * After close(), drain: wait for both worker threads to exit g_pc
-     * internals. close() sets pc->state=CLOSED so no new loop/send_video
-     * calls will enter the dtls_srtp code path, but a call already past
-     * the state check may still be using srtp_out. Wait until both
-     * in-use flags are 0 — guaranteed within ~1ms. */
-    if (g_state != PEER_CONNECTION_CLOSED) {
-      peer_connection_close(g_pc);
-      g_state = PEER_CONNECTION_CLOSED;
-      while (g_peer_in_pc || g_venc_in_pc) {
-        usleep(1000);
-      }
+  } else if (strcmp(method, "GET") == 0 && path_matches_route(path, "/offer")) {
+    WebRtcSession* session;
+    PeerConnection* new_pc;
+    PeerConfiguration config = {0};
+    const char* offer;
+    /* HTTP requests are serialized; keep the response independent of peer
+     * lifetime once the session lock is released. */
+    static char offer_response[8192];
+
+    if (!client_ip || client_ip[0] == '\0' || !request_local_ip ||
+        request_local_ip[0] == '\0' || strcmp(request_local_ip, "0.0.0.0") == 0) {
+      response->status = 500;
+      response->content_type = "text/plain";
+      response->body = "Failed to determine signaling interface";
+      response->body_len = strlen(response->body);
+      return;
     }
 
-    /* Reset offer state for new ICE gathering cycle */
-    g_offer_ready = 0;
-    if (g_offer_sdp) {
-      free(g_offer_sdp);
-      g_offer_sdp = NULL;
+    pthread_mutex_lock(&g_sessions_mutex);
+    session = session_available();
+    if (!session) {
+      pthread_mutex_unlock(&g_sessions_mutex);
+      response->status = 503;
+      response->content_type = "text/plain";
+      response->body = "Maximum WebRTC clients reached";
+      response->body_len = strlen(response->body);
+      return;
     }
 
-    /* Start ICE gathering — onicecandidate() will be called when done */
-    peer_connection_create_offer(g_pc);
+    if (session_generate_id(session->id) != 0) {
+      pthread_mutex_unlock(&g_sessions_mutex);
+      response->status = 500;
+      response->content_type = "text/plain";
+      response->body = "Failed to create session ID";
+      response->body_len = strlen(response->body);
+      return;
+    }
+    session->last_activity_ms = get_time_ms();
+    session->reserved = 1;
+    session->state = PEER_CONNECTION_NEW;
+    snprintf(session->client_ip, sizeof(session->client_ip), "%s", client_ip);
+    snprintf(session->local_ip, sizeof(session->local_ip), "%s", request_local_ip);
+    pthread_mutex_unlock(&g_sessions_mutex);
 
-    /* Wait for ICE gathering to complete (signaled by onicecandidate).
-     * Also wakes on g_interrupted so we don't block forever during shutdown. */
-    pthread_mutex_lock(&g_offer_mutex);
-    while (!g_offer_ready && !g_interrupted) {
-      pthread_cond_wait(&g_offer_cond, &g_offer_mutex);
+    config.datachannel = DATA_CHANNEL_NONE;
+    config.video_codec = g_video_codec;
+    config.audio_codec = CODEC_NONE;
+    config.user_data = session;
+    new_pc = peer_connection_create(&config);
+    if (!new_pc) {
+      pthread_mutex_lock(&g_sessions_mutex);
+      session_destroy_locked(session);
+      pthread_mutex_unlock(&g_sessions_mutex);
+      response->status = 500;
+      response->content_type = "text/plain";
+      response->body = "Failed to create WebRTC peer";
+      response->body_len = strlen(response->body);
+      return;
+    }
+    if (peer_connection_set_local_ip(new_pc, session->local_ip) != 0) {
+      peer_connection_destroy(new_pc);
+      pthread_mutex_lock(&g_sessions_mutex);
+      session_destroy_locked(session);
+      pthread_mutex_unlock(&g_sessions_mutex);
+      response->status = 500;
+      response->content_type = "text/plain";
+      response->body = "Failed to bind local ICE address";
+      response->body_len = strlen(response->body);
+      return;
     }
 
-    if (g_offer_sdp) {
-      response->status = 200;
-      response->content_type = "application/sdp";
-      response->body = g_offer_sdp;
-      response->body_len = strlen(g_offer_sdp);
-    } else {
+    /* Build the new peer before publishing it to the worker and encoder
+     * threads, so existing sessions continue during certificate generation. */
+    offer = peer_connection_create_offer(new_pc);
+    if (!offer || strlen(offer) >= sizeof(offer_response)) {
+      peer_connection_destroy(new_pc);
+      pthread_mutex_lock(&g_sessions_mutex);
+      session_destroy_locked(session);
+      pthread_mutex_unlock(&g_sessions_mutex);
       response->status = 500;
       response->content_type = "text/plain";
       response->body = "Failed to create offer";
       response->body_len = strlen(response->body);
+      return;
     }
-    pthread_mutex_unlock(&g_offer_mutex);
+
+    memcpy(offer_response, offer, strlen(offer) + 1);
+
+    pthread_mutex_lock(&g_sessions_mutex);
+    peer_connection_oniceconnectionstatechange(new_pc,
+                                               onconnectionstatechange);
+    session->pc = new_pc;
+    session->reserved = 0;
+    session->last_activity_ms = get_time_ms();
+
+    response->status = 200;
+    response->content_type = "application/sdp";
+    response->body = offer_response;
+    response->body_len = strlen(offer_response);
+    snprintf(response->extra_headers, sizeof(response->extra_headers),
+             "X-WebRTC-Session: %s\r\n", session->id);
+    printf("Session %s using local ICE address %s for HTTP client %s\n",
+           session->id, session->local_ip, session->client_ip);
+    pthread_mutex_unlock(&g_sessions_mutex);
 
   /* ── Set remote SDP answer ── */
-  } else if (strcmp(method, "POST") == 0 && strcmp(path, "/answer") == 0) {
+  } else if (strcmp(method, "POST") == 0 &&
+             strncmp(path, "/answer?", strlen("/answer?")) == 0) {
+    char session_id[SESSION_ID_HEX_LEN + 1];
+    WebRtcSession* session;
+
+    if (!parse_session_id(path, session_id)) {
+      response->status = 400;
+      response->content_type = "text/plain";
+      response->body = "Missing or invalid session ID";
+      response->body_len = strlen(response->body);
+      return;
+    }
     if (!body || body_len <= 0) {
       response->status = 400;
       response->content_type = "text/plain";
       response->body = "Missing SDP body";
+      response->body_len = strlen(response->body);
+      return;
+    }
+
+    pthread_mutex_lock(&g_sessions_mutex);
+    session = session_find(session_id);
+    if (!session) {
+      pthread_mutex_unlock(&g_sessions_mutex);
+      response->status = 404;
+      response->content_type = "text/plain";
+      response->body = "WebRTC session not found";
+      response->body_len = strlen(response->body);
+      return;
+    }
+    if (!session_matches_client(session, client_ip, local_ip)) {
+      pthread_mutex_unlock(&g_sessions_mutex);
+      response->status = 403;
+      response->content_type = "text/plain";
+      response->body = "WebRTC session client mismatch";
       response->body_len = strlen(response->body);
       return;
     }
@@ -476,6 +768,7 @@ static void on_http_request(const char* method, const char* path,
     size_t answer_capacity = body_len + candidate_count * INET_ADDRSTRLEN + 1;
     char* answer_copy = (char*)calloc(1, answer_capacity);
     if (!answer_copy) {
+      pthread_mutex_unlock(&g_sessions_mutex);
       response->status = 500;
       response->content_type = "text/plain";
       response->body = "Out of memory";
@@ -488,6 +781,7 @@ static void on_http_request(const char* method, const char* path,
     int mdns_replaced = replace_mdns_candidates(answer_copy, answer_capacity, client_ip);
     if (mdns_replaced < 0) {
       free(answer_copy);
+      pthread_mutex_unlock(&g_sessions_mutex);
       response->status = 500;
       response->content_type = "text/plain";
       response->body = "Failed to process SDP";
@@ -499,7 +793,20 @@ static void on_http_request(const char* method, const char* path,
              mdns_replaced, client_ip);
     }
 
-    peer_connection_set_remote_description(g_pc, answer_copy, SDP_TYPE_ANSWER);
+    peer_connection_set_remote_description(session->pc, answer_copy,
+                                           SDP_TYPE_ANSWER);
+    if (peer_connection_get_state(session->pc) == PEER_CONNECTION_FAILED) {
+      free(answer_copy);
+      session_destroy_locked(session);
+      pthread_mutex_unlock(&g_sessions_mutex);
+      response->status = 400;
+      response->content_type = "text/plain";
+      response->body = "Invalid SDP answer";
+      response->body_len = strlen(response->body);
+      return;
+    }
+    session->last_activity_ms = get_time_ms();
+    pthread_mutex_unlock(&g_sessions_mutex);
 
     response->status = 200;
     response->content_type = "text/plain";
@@ -507,6 +814,46 @@ static void on_http_request(const char* method, const char* path,
     response->body_len = strlen(response->body);
 
     free(answer_copy);
+
+  /* ── Release a WebRTC session ── */
+  } else if (strcmp(method, "POST") == 0 &&
+             strncmp(path, "/disconnect?", strlen("/disconnect?")) == 0) {
+    char session_id[SESSION_ID_HEX_LEN + 1];
+    WebRtcSession* session;
+
+    if (!parse_session_id(path, session_id)) {
+      response->status = 400;
+      response->content_type = "text/plain";
+      response->body = "Missing or invalid session ID";
+      response->body_len = strlen(response->body);
+      return;
+    }
+    pthread_mutex_lock(&g_sessions_mutex);
+    session = session_find(session_id);
+    if (!session) {
+      pthread_mutex_unlock(&g_sessions_mutex);
+      response->status = 200;
+      response->content_type = "text/plain";
+      response->body = "OK";
+      response->body_len = 2;
+      return;
+    }
+    if (!session_matches_client(session, client_ip, local_ip)) {
+      pthread_mutex_unlock(&g_sessions_mutex);
+      response->status = 403;
+      response->content_type = "text/plain";
+      response->body = "WebRTC session client mismatch";
+      response->body_len = strlen(response->body);
+      return;
+    }
+    printf("Session %s disconnected by HTTP client %s\n",
+           session->id, session->client_ip);
+    session_destroy_locked(session);
+    pthread_mutex_unlock(&g_sessions_mutex);
+    response->status = 200;
+    response->content_type = "text/plain";
+    response->body = "OK";
+    response->body_len = 2;
 
   /* ── 404 for everything else ── */
   } else {
@@ -609,19 +956,18 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  /* ── Initialize WebRTC (libpeer) ──
-   * Video-only configuration: H.264/H.265 codec, no audio, no DataChannel.
-   * DataChannel was intentionally removed — this demo only streams video. */
-  PeerConfiguration config = {
-      .datachannel = DATA_CHANNEL_NONE,
-      .video_codec = venc_type == VENC_TYPE_H265 ? CODEC_H265 : CODEC_H264,
-      .audio_codec = CODEC_NONE};
-
-  peer_init();
-  g_pc = peer_connection_create(&config);
-  peer_connection_oniceconnectionstatechange(g_pc, onconnectionstatechange);
-  peer_connection_onicecandidate(g_pc, onicecandidate);
-
+  /* Create each PeerConnection on demand so it can bind to the interface
+   * used by that browser's HTTP connection. */
+  print_network_devices();
+  g_video_codec = venc_type == VENC_TYPE_H265 ? CODEC_H265 : CODEC_H264;
+  for (int i = 0; i < MAX_WEBRTC_CLIENTS; i++) {
+    g_sessions[i].state = PEER_CONNECTION_CLOSED;
+  }
+  if (peer_init() != 0) {
+    printf("Failed to initialize libpeer\n");
+    mpp_pipeline_deinit();
+    return 1;
+  }
   /* ── Start worker threads ── */
   pthread_t peer_connection_thread;
   pthread_create(&peer_connection_thread, NULL, peer_connection_task, NULL);
@@ -630,20 +976,45 @@ int main(int argc, char* argv[]) {
   pthread_create(&venc_stream_thread, NULL, venc_stream_task, NULL);
 
   /* ── Start HTTP signaling server ── */
-  http_server_start(port, on_http_request);
+  if (http_server_start(port, on_http_request, get_http_local_ips, NULL) != 0) {
+    printf("Failed to start HTTP server\n");
+    g_interrupted = 1;
+    pthread_join(venc_stream_thread, NULL);
+    pthread_join(peer_connection_thread, NULL);
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < MAX_WEBRTC_CLIENTS; i++) {
+      session_destroy_locked(&g_sessions[i]);
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
+    peer_deinit();
+    mpp_pipeline_deinit();
+    return 1;
+  }
 
   /* Print access URL */
-  char local_ip[64];
-  get_local_ip(local_ip, sizeof(local_ip));
-
   printf("\n========================================\n");
   printf("  libpeer LAN Camera Demo\n");
   printf("========================================\n");
   printf("  CSI: %u, Connector: %d\n", csi_num, connector_type);
   printf("  Encode: %ux%u @ %ukbps %s\n", venc_width, venc_height, venc_bitrate,
          venc_type_name(venc_type));
+  printf("  Clients: up to %d concurrent sessions\n", MAX_WEBRTC_CLIENTS);
   printf("  Open in browser:\n");
-  printf("  http://%s:%d\n", local_ip, port);
+  char access_ips[HTTP_MAX_LISTENERS][INET_ADDRSTRLEN] = {{0}};
+  int access_ip_count = http_server_get_local_ips(access_ips,
+                                                  HTTP_MAX_LISTENERS);
+  if (access_ip_count == 1 && strcmp(access_ips[0], "0.0.0.0") == 0) {
+    access_ip_count = collect_http_local_ips(access_ips, NULL,
+                                             HTTP_MAX_LISTENERS);
+  }
+  if (access_ip_count == 0) {
+    printf("  No configured IPv4 interface address is available yet\n");
+  } else {
+    for (int i = 0; i < access_ip_count; i++) {
+      printf("  http://%s:%d/ (%s)\n", access_ips[i], port,
+             interface_name_for_ip(access_ips[i]));
+    }
+  }
   printf("========================================\n\n");
 
   /* ── Main loop: wait for SIGINT ──
@@ -660,8 +1031,8 @@ int main(int argc, char* argv[]) {
    * 2. Stop HTTP server (closes server socket, joins http thread)
    * 3. Join venc_stream thread (waits for it to finish current frame)
    * 4. Join peer_connection thread (waits for ICE loop to exit)
-   * 5. Free cached SPS/PPS and offer SDP
-   * 6. Destroy peer connection and deinit libpeer
+   * 5. Free cached SPS/PPS and all peer sessions
+   * 6. Deinitialize libpeer
    * 7. Deinit MPP pipeline (releases VB, VICAP, VENC, VO, connector) */
   g_interrupted = 1;
 
@@ -675,13 +1046,12 @@ int main(int argc, char* argv[]) {
     g_sps_pps_buf = NULL;
   }
 
-  /* Free any pending offer SDP */
-  if (g_offer_sdp) {
-    free(g_offer_sdp);
+  pthread_mutex_lock(&g_sessions_mutex);
+  for (int i = 0; i < MAX_WEBRTC_CLIENTS; i++) {
+    session_destroy_locked(&g_sessions[i]);
   }
+  pthread_mutex_unlock(&g_sessions_mutex);
 
-  /* Destroy WebRTC peer connection and deinit libpeer */
-  peer_connection_destroy(g_pc);
   peer_deinit();
 
   /* Deinit MPP pipeline (VB/VICAP/VENC/VO/connector) */

@@ -56,6 +56,7 @@ public:
     // ── WebRTC (public for C-linkage wrapper) ──
     static void OnHttpRequest(const char* method, const char* path,
                               const char* body, int body_len,
+                              const char* client_ip, const char* local_ip,
                               http_response_t* response);
 
 private:

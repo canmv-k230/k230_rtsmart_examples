@@ -3,12 +3,12 @@
  * @brief Minimal HTTP/1.1 server for WebRTC signaling on K230 RT-Smart
  *
  * Design constraints:
- *   - Single-threaded: handles one connection at a time (sufficient for
- *     a single-client WebRTC demo — only one browser connects at a time)
+ *   - Single-threaded request processing; WebRTC sessions continue in
+ *     independent peer connections after signaling completes
  *   - No dynamic memory allocation for request parsing (stack buffers only)
  *   - select()+timeout based accept loop (RT-Smart does NOT unblock
  *     accept() on socket close, so blocking accept would prevent shutdown)
- *   - CORS enabled for all origins (required for browser signaling)
+ *   - Signaling is same-origin; cross-origin browser access is not enabled
  *
  * Limitations:
  *   - Request body limited to RECV_BUF_SIZE (8KB)
@@ -57,13 +57,37 @@ static const char* my_strcasestr(const char* haystack, const char* needle) {
 #define RECV_BUF_SIZE 8192    /**< Max bytes to read from a single request */
 #define SEND_BUF_SIZE 16384   /**< Max bytes for response header + chunk */
 #define METHOD_MAX_LEN 8      /**< Max HTTP method length (GET/POST/OPTIONS) */
-#define PATH_MAX_LEN 256      /**< Max URL path length */
+#define PATH_MAX_LEN 256      /**< Max request-target length, including query */
 
 /* ── Module state ────────────────────────────────────────────────── */
 
-static int g_server_fd = -1;                    /**< Listening socket fd */
-static int g_running = 0;                       /**< 1 while server is active, 0 to stop */
-static http_request_handler_t g_handler = NULL; /**< User-provided request callback */
+typedef struct { int fd; char ip[INET_ADDRSTRLEN]; } HttpListener;
+static HttpListener g_listeners[HTTP_MAX_LISTENERS];
+static int g_listener_count = 0;
+static int g_running = 0;                         /**< 1 while server is active, 0 to stop */
+static http_request_handler_t g_handler = NULL;   /**< User-provided request callback */
+static http_local_ip_provider_t g_ip_provider = NULL;
+static void* g_ip_provider_data = NULL;
+static pthread_mutex_t g_start_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_start_cond = PTHREAD_COND_INITIALIZER;
+static int g_start_complete = 0;
+static int g_start_result = -1;
+
+static int server_is_running(void) {
+  return __atomic_load_n(&g_running, __ATOMIC_ACQUIRE);
+}
+
+static void server_set_running(int running) {
+  __atomic_store_n(&g_running, running, __ATOMIC_RELEASE);
+}
+
+static void server_report_start(int result) {
+  pthread_mutex_lock(&g_start_mutex);
+  g_start_result = result;
+  g_start_complete = 1;
+  pthread_cond_signal(&g_start_cond);
+  pthread_mutex_unlock(&g_start_mutex);
+}
 
 /* ── HTTP parsing ────────────────────────────────────────────────── */
 
@@ -75,7 +99,7 @@ static http_request_handler_t g_handler = NULL; /**< User-provided request callb
  * @param buf      Raw request data (null-terminated)
  * @param buf_len  Length of data in buf
  * @param method   Output: HTTP method (e.g. "GET", "POST")
- * @param path     Output: URL path (e.g. "/offer", "/answer")
+ * @param path     Output: request target (e.g. "/answer?session=1234")
  * @param body     Output: pointer into buf at the start of the body
  * @param body_len Output: length of the body in bytes
  * @return 0 on success, -1 on parse error
@@ -95,9 +119,9 @@ static int parse_http_request(const char* buf, int buf_len, char* method, char* 
   if (ptr >= end || *ptr != ' ') return -1;
   ptr++;
 
-  /* Extract path (e.g. "/offer"), stop at query string '?' */
+  /* Extract the complete request target, including any query string. */
   i = 0;
-  while (ptr < end && *ptr != ' ' && *ptr != '?' && i < PATH_MAX_LEN - 1) {
+  while (ptr < end && *ptr != ' ' && i < PATH_MAX_LEN - 1) {
     path[i++] = *ptr++;
   }
   path[i] = '\0';
@@ -119,7 +143,7 @@ static int parse_http_request(const char* buf, int buf_len, char* method, char* 
 /**
  * Send an HTTP response to the client.
  *
- * Formats the status line, Content-Type, Content-Length, and CORS headers,
+ * Formats the status line, Content-Type, Content-Length, and security headers,
  * then sends the header followed by the body in SEND_BUF_SIZE chunks.
  *
  * ⚠ NOTE: send() return values are not checked. For a LAN demo this is
@@ -134,22 +158,32 @@ static void send_response(int client_fd, http_response_t* response) {
   const char* status_text = (response->status == 200)   ? "OK"
                             : (response->status == 204) ? "No Content"
                             : (response->status == 400) ? "Bad Request"
+                            : (response->status == 403) ? "Forbidden"
                             : (response->status == 404) ? "Not Found"
+                            : (response->status == 503) ? "Service Unavailable"
                             : (response->status == 500) ? "Internal Server Error"
                                                         : "Unknown";
 
-  /* Format response headers with CORS for browser signaling */
+  /* The embedded page uses same-origin signaling, so CORS is intentionally
+   * omitted. This prevents unrelated web sites from driving the camera API. */
   int header_len = snprintf(send_buf, sizeof(send_buf),
                             "HTTP/1.1 %d %s\r\n"
                             "Content-Type: %s\r\n"
                             "Content-Length: %d\r\n"
-                            "Access-Control-Allow-Origin: *\r\n"
-                            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                            "Access-Control-Allow-Headers: Content-Type\r\n"
+                            "Cache-Control: no-store\r\n"
+                            "X-Content-Type-Options: nosniff\r\n"
+                            "Referrer-Policy: no-referrer\r\n"
+                            "Content-Security-Policy: default-src 'self'; "
+                            "script-src 'self' 'unsafe-inline'; "
+                            "style-src 'self' 'unsafe-inline'; "
+                            "media-src 'self' blob:; connect-src 'self'; "
+                            "frame-ancestors 'none'\r\n"
+                            "Connection: close\r\n"
+                            "%s"
                             "\r\n",
                             response->status, status_text,
                             response->content_type ? response->content_type : "text/plain",
-                            response->body_len);
+                            response->body_len, response->extra_headers);
 
   send(client_fd, send_buf, header_len, 0);
 
@@ -165,20 +199,6 @@ static void send_response(int client_fd, http_response_t* response) {
   }
 }
 
-/**
- * Send a 204 No Content response for CORS preflight (OPTIONS) requests.
- * Browsers send OPTIONS before cross-origin POST /answer.
- */
-static void handle_options(int client_fd) {
-  const char* resp =
-      "HTTP/1.1 204 No Content\r\n"
-      "Access-Control-Allow-Origin: *\r\n"
-      "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-      "Access-Control-Allow-Headers: Content-Type\r\n"
-      "\r\n";
-  send(client_fd, resp, strlen(resp), 0);
-}
-
 /* ── Server thread ───────────────────────────────────────────────── */
 
 /**
@@ -192,71 +212,92 @@ static void handle_options(int client_fd) {
  *    Using select() with timeout lets us check g_running every second.
  *
  * 2. Single-threaded request handling:
- *    Only one browser client at a time for this WebRTC demo.
- *    This simplifies the signaling state machine (no concurrent offers).
+ *    Signaling requests are serialized while established WebRTC sessions
+ *    continue concurrently in the sample's peer worker.
  *
  * 3. SO_RCVTIMEO on client socket:
  *    5-second timeout on recv() to avoid hanging if a client connects
  *    but never sends data.
  */
 static void* server_thread(void* data) {
-  struct sockaddr_in server_addr;
-
-  /* Create listening socket */
-  g_server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (g_server_fd < 0) {
-    perror("socket failed");
+  int port = *(int*)data;
+  char ips[HTTP_MAX_LISTENERS][INET_ADDRSTRLEN];
+  g_listener_count = 0;
+  memset(ips, 0, sizeof(ips));
+  int count = g_ip_provider ? g_ip_provider(ips, HTTP_MAX_LISTENERS, g_ip_provider_data) : 0;
+  if (g_ip_provider && count <= 0) {
+    fprintf(stderr, "HTTP server has no usable local IPv4 address\n");
+    server_set_running(0);
+    server_report_start(-1);
+    return NULL;
+  }
+  if (count <= 0) count = 1;
+  for (int i = 0; i < count && i < HTTP_MAX_LISTENERS; i++) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) continue;
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = (count == 1 && ips[0][0] == '\0') ? htonl(INADDR_ANY) : inet_addr(ips[i]);
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+      fprintf(stderr, "HTTP bind failed for %s:%d: %s\n",
+              ips[i][0] ? ips[i] : "0.0.0.0", port, strerror(errno));
+      close(fd);
+      continue;
+    }
+    if (listen(fd, 5) < 0) {
+      fprintf(stderr, "HTTP listen failed for %s:%d: %s\n",
+              ips[i][0] ? ips[i] : "0.0.0.0", port, strerror(errno));
+      close(fd);
+      continue;
+    }
+    g_listeners[g_listener_count].fd = fd;
+    const char* bind_ip = count == 1 && ips[0][0] == '\0' ? "0.0.0.0" : ips[i];
+    strncpy(g_listeners[g_listener_count].ip, bind_ip, INET_ADDRSTRLEN - 1);
+    g_listeners[g_listener_count].ip[INET_ADDRSTRLEN - 1] = '\0';
+    g_listener_count++;
+  }
+  if (g_listener_count == 0) {
+    server_set_running(0);
+    server_report_start(-1);
     return NULL;
   }
 
-  /* Allow address reuse (quick restart without TIME_WAIT blocking) */
-  int opt = 1;
-  setsockopt(g_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-  /* Bind to all interfaces on the specified port */
-  memset(&server_addr, 0, sizeof(server_addr));
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(*(int*)data);
-
-  if (bind(g_server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-    perror("bind failed");
-    close(g_server_fd);
-    g_server_fd = -1;
-    return NULL;
-  }
-
-  if (listen(g_server_fd, 5) < 0) {
-    perror("listen failed");
-    close(g_server_fd);
-    g_server_fd = -1;
-    return NULL;
-  }
-
-  printf("HTTP server listening on port %d\n", *(int*)data);
+  printf("HTTP server listening on port %d\n", port);
+  server_report_start(0);
 
   /* ── Accept loop with select() timeout ── */
-  while (g_running) {
+  while (server_is_running()) {
     fd_set read_fds;
     FD_ZERO(&read_fds);
-    FD_SET(g_server_fd, &read_fds);
+    int max_fd = -1;
+    for (int i = 0; i < g_listener_count; i++) {
+      FD_SET(g_listeners[i].fd, &read_fds);
+      if (g_listeners[i].fd > max_fd) max_fd = g_listeners[i].fd;
+    }
     struct timeval sel_tv = {1, 0};  /* 1 second timeout */
-    int sel_ret = select(g_server_fd + 1, &read_fds, NULL, NULL, &sel_tv);
+    int sel_ret = select(max_fd + 1, &read_fds, NULL, NULL, &sel_tv);
 
-    if (sel_ret <= 0) continue;  /* Timeout or error — check g_running again */
+    if (sel_ret <= 0) continue;  /* Timeout or error; check running again. */
 
     /* Accept the incoming connection */
+    int listener = -1;
+    for (int i = 0; i < g_listener_count; i++) if (FD_ISSET(g_listeners[i].fd, &read_fds)) { listener = i; break; }
+    if (listener < 0) continue;
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(g_server_fd, (struct sockaddr*)&client_addr, &client_len);
+    int client_fd = accept(g_listeners[listener].fd, (struct sockaddr*)&client_addr, &client_len);
 
     if (client_fd < 0) {
-      if (!g_running) break;
+      if (!server_is_running()) break;
       continue;
     }
 
     /* If server is stopping, reject the connection immediately */
-    if (!g_running) {
+    if (!server_is_running()) {
       close(client_fd);
       break;
     }
@@ -313,15 +354,27 @@ static void* server_thread(void* data) {
     int body_len = 0;
 
     if (parse_http_request(recv_buf, total, method, path, &body, &body_len) == 0) {
-      if (strcmp(method, "OPTIONS") == 0) {
-        handle_options(client_fd);
-      } else if (g_handler) {
+      if (g_handler) {
         char client_ip[INET_ADDRSTRLEN] = {0};
-        http_response_t response = {200, "text/plain", "OK", 2};
+        char local_ip[INET_ADDRSTRLEN] = {0};
+        struct sockaddr_in local_addr;
+        socklen_t local_len = sizeof(local_addr);
+        http_response_t response = {
+          .status = 200,
+          .content_type = "text/plain",
+          .body = "OK",
+          .body_len = 2,
+        };
         if (!inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip))) {
           client_ip[0] = '\0';
         }
-        g_handler(method, path, body, body_len, client_ip, &response);
+        memset(&local_addr, 0, sizeof(local_addr));
+        if (getsockname(client_fd, (struct sockaddr*)&local_addr, &local_len) != 0 ||
+            local_addr.sin_family != AF_INET ||
+            !inet_ntop(AF_INET, &local_addr.sin_addr, local_ip, sizeof(local_ip))) {
+          snprintf(local_ip, sizeof(local_ip), "%s", g_listeners[listener].ip);
+        }
+        g_handler(method, path, body, body_len, client_ip, local_ip, &response);
         send_response(client_fd, &response);
       }
     }
@@ -330,10 +383,8 @@ static void* server_thread(void* data) {
   }
 
   /* Clean up the listening socket */
-  if (g_server_fd >= 0) {
-    close(g_server_fd);
-    g_server_fd = -1;
-  }
+  for (int i = 0; i < g_listener_count; i++) close(g_listeners[i].fd);
+  g_listener_count = 0;
 
   return NULL;
 }
@@ -347,32 +398,63 @@ static pthread_t g_server_thread;
  *
  * @param port     TCP port number to listen on
  * @param handler  Callback function for handling HTTP requests
- * @return 0 on success (pthread_create return value)
+ * @return 0 after at least one listener is active, non-zero on failure
  */
-int http_server_start(int port, http_request_handler_t handler) {
-  static int s_port;  /* Static so it persists after this function returns */
+int http_server_start(int port, http_request_handler_t handler,
+                      http_local_ip_provider_t provider, void* user_data) {
+  static int s_port;
+  int result;
+
   s_port = port;
   g_handler = handler;
-  g_running = 1;
-  return pthread_create(&g_server_thread, NULL, server_thread, &s_port);
+  g_ip_provider = provider;
+  g_ip_provider_data = user_data;
+  pthread_mutex_lock(&g_start_mutex);
+  g_start_complete = 0;
+  g_start_result = -1;
+  pthread_mutex_unlock(&g_start_mutex);
+  server_set_running(1);
+
+  result = pthread_create(&g_server_thread, NULL, server_thread, &s_port);
+  if (result != 0) {
+    server_set_running(0);
+    return result;
+  }
+
+  pthread_mutex_lock(&g_start_mutex);
+  while (!g_start_complete) {
+    pthread_cond_wait(&g_start_cond, &g_start_mutex);
+  }
+  result = g_start_result;
+  pthread_mutex_unlock(&g_start_mutex);
+  if (result != 0) {
+    pthread_join(g_server_thread, NULL);
+  }
+  return result;
+}
+
+int http_server_get_local_ips(char local_ips[][INET_ADDRSTRLEN], int max_ips) {
+  if (!local_ips || max_ips <= 0) {
+    return 0;
+  }
+
+  int count = g_listener_count < max_ips ? g_listener_count : max_ips;
+  for (int i = 0; i < count; i++) {
+    snprintf(local_ips[i], INET_ADDRSTRLEN, "%s", g_listeners[i].ip);
+  }
+  return count;
 }
 
 /**
  * Stop the HTTP server and wait for the server thread to finish.
  *
- * Sets g_running=0 to break the accept loop, then closes the server
- * socket (in case select() is blocked), and joins the thread.
+ * Sets g_running=0 to break the accept loop and joins the thread. The server
+ * thread owns and closes all listening descriptors.
  *
- * ⚠ IMPORTANT: The server socket is closed HERE (not in the signal
- * handler) because close() from a signal handler is NOT async-signal-safe.
- * The select() timeout ensures the loop exits within 1 second even
- * if the close() doesn't wake select() on this platform.
+ * The select() timeout ensures the loop exits within one second without
+ * closing descriptors concurrently from another thread.
  */
 void http_server_stop() {
-  g_running = 0;
-  if (g_server_fd >= 0) {
-    close(g_server_fd);
-    g_server_fd = -1;
-  }
+  server_set_running(0);
   pthread_join(g_server_thread, NULL);
 }

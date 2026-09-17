@@ -74,6 +74,7 @@
 | `-C <connector_type>` | 视频输出连接类型 (0:HDMI,1:LCD)        | HDMI                        |
 | `-A <ai_input_width>` | AI 分析输入宽度                        | 1280                        |
 | `-I <ai_input_height>`| AI 分析输入高度                        | 720                         |
+| `-R <ai_fps>`         | AI 分析帧率（1-30）                    | 10                          |
 | `-K <kmodel_file>`    | kmodel 文件路径                        | face_detection_320.kmodel   |
 | `-T <obj_thresh>`     | 人脸检测阈值                           | 0.6                         |
 | `-N <nms_thresh>`     | 人脸检测 NMS 阈值                      | 0.4                         |
@@ -134,7 +135,7 @@ Chrome/Edge 默认启用 mDNS 隐私保护，会隐藏本地 IP 导致 WebRTC �
 - `smart_ipc.cpp`/`smart_ipc.h`：智能 IPC 系统核心类 `MySmartIPC`，封装 RTSP/WebRTC 推流、信令处理、编码帧转发、人脸识别调度。
 - `media.cpp`/`media.h`：媒体处理模块，封装了所有 MPI 接口，用于摄像头、显示器和音视频编解码等基础模块的初始化和启动。
 - `face_detection`：人脸检测模块，实现人脸识别功能。
-- `http_server.c`/`http_server.h`：HTTP 服务器（WebRTC 信令使用），单线程、支持 CORS。
+- `http_server.c`/`http_server.h`：HTTP 服务器（WebRTC 信令使用），单线程、同源访问并带安全响应头。
 - `web_page.h`：WebRTC 模式嵌入式前端页面。
 
 `MySmartIPC` 类封装了智能摄像头系统的所有功能。在 `main` 函数中，只需实例化该类并调用 `Init` 和 `Start` 方法即可启动系统。
@@ -209,10 +210,12 @@ cd /sdcard/app/examples/integrated_poc/smart_ipc
 1. 查看串口输出，会显示访问地址，例如：
 
     ```
-    [WebRTC] Open in browser: http://10.100.228.193:8080
+    [WebRTC] Open in browser: http://10.100.228.193:8080/
     ```
 
-1. 在 PC 浏览器中打开该地址，点击页面上的"连接"按钮即可观看实时画面。
+1. 在 PC 浏览器中打开日志打印的 URL，点击页面上的"连接"按钮即可观看实时画面。
+
+WebRTC 页面和信令接口不要求访问令牌，并拒绝跨域浏览器访问。该示例仍使用明文 HTTP，只适合受信任的局域网测试，不应直接暴露到公网。
 
 ## 依赖
 

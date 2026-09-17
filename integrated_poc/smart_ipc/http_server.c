@@ -8,7 +8,7 @@
  *   - No dynamic memory allocation for request parsing (stack buffers only)
  *   - select()+timeout based accept loop (RT-Smart does NOT unblock
  *     accept() on socket close, so blocking accept would prevent shutdown)
- *   - CORS enabled for all origins (required for browser signaling)
+ *   - Signaling is same-origin; cross-origin browser access is not enabled
  *
  * Limitations:
  *   - Request body limited to RECV_BUF_SIZE (8KB)
@@ -57,7 +57,7 @@ static const char* my_strcasestr(const char* haystack, const char* needle) {
 #define RECV_BUF_SIZE 8192    /**< Max bytes to read from a single request */
 #define SEND_BUF_SIZE 16384   /**< Max bytes for response header + chunk */
 #define METHOD_MAX_LEN 8      /**< Max HTTP method length (GET/POST/OPTIONS) */
-#define PATH_MAX_LEN 256      /**< Max URL path length */
+#define PATH_MAX_LEN 256      /**< Max request-target length, including query */
 
 /* ── Module state ────────────────────────────────────────────────── */
 
@@ -75,7 +75,7 @@ static http_request_handler_t g_handler = NULL; /**< User-provided request callb
  * @param buf      Raw request data (null-terminated)
  * @param buf_len  Length of data in buf
  * @param method   Output: HTTP method (e.g. "GET", "POST")
- * @param path     Output: URL path (e.g. "/offer", "/answer")
+ * @param path     Output: request target, including any query string
  * @param body     Output: pointer into buf at the start of the body
  * @param body_len Output: length of the body in bytes
  * @return 0 on success, -1 on parse error
@@ -95,9 +95,9 @@ static int parse_http_request(const char* buf, int buf_len, char* method, char* 
   if (ptr >= end || *ptr != ' ') return -1;
   ptr++;
 
-  /* Extract path (e.g. "/offer"), stop at query string '?' */
+  /* Extract the complete request target, including any query string. */
   i = 0;
-  while (ptr < end && *ptr != ' ' && *ptr != '?' && i < PATH_MAX_LEN - 1) {
+  while (ptr < end && *ptr != ' ' && i < PATH_MAX_LEN - 1) {
     path[i++] = *ptr++;
   }
   path[i] = '\0';
@@ -119,7 +119,7 @@ static int parse_http_request(const char* buf, int buf_len, char* method, char* 
 /**
  * Send an HTTP response to the client.
  *
- * Formats the status line, Content-Type, Content-Length, and CORS headers,
+ * Formats the status line, Content-Type, Content-Length, and security headers,
  * then sends the header followed by the body in SEND_BUF_SIZE chunks.
  *
  * ⚠ NOTE: send() return values are not checked. For a LAN demo this is
@@ -134,18 +134,27 @@ static void send_response(int client_fd, http_response_t* response) {
   const char* status_text = (response->status == 200)   ? "OK"
                             : (response->status == 204) ? "No Content"
                             : (response->status == 400) ? "Bad Request"
+                            : (response->status == 403) ? "Forbidden"
                             : (response->status == 404) ? "Not Found"
                             : (response->status == 500) ? "Internal Server Error"
                                                         : "Unknown";
 
-  /* Format response headers with CORS for browser signaling */
+  /* The embedded page uses same-origin signaling, so CORS is intentionally
+   * omitted. This prevents unrelated web sites from driving the camera API. */
   int header_len = snprintf(send_buf, sizeof(send_buf),
                             "HTTP/1.1 %d %s\r\n"
                             "Content-Type: %s\r\n"
                             "Content-Length: %d\r\n"
-                            "Access-Control-Allow-Origin: *\r\n"
-                            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                            "Access-Control-Allow-Headers: Content-Type\r\n"
+                            "Cache-Control: no-store\r\n"
+                            "X-Content-Type-Options: nosniff\r\n"
+                            "Referrer-Policy: no-referrer\r\n"
+                            "Content-Security-Policy: default-src 'self'; "
+                            "script-src 'self' 'unsafe-inline'; "
+                            "style-src 'self' 'unsafe-inline'; "
+                            "media-src 'self' blob:; connect-src 'self'; "
+                            "object-src 'none'; base-uri 'none'; "
+                            "frame-ancestors 'none'\r\n"
+                            "Connection: close\r\n"
                             "\r\n",
                             response->status, status_text,
                             response->content_type ? response->content_type : "text/plain",
@@ -163,20 +172,6 @@ static void send_response(int client_fd, http_response_t* response) {
       offset += chunk;
     }
   }
-}
-
-/**
- * Send a 204 No Content response for CORS preflight (OPTIONS) requests.
- * Browsers send OPTIONS before cross-origin POST /answer.
- */
-static void handle_options(int client_fd) {
-  const char* resp =
-      "HTTP/1.1 204 No Content\r\n"
-      "Access-Control-Allow-Origin: *\r\n"
-      "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-      "Access-Control-Allow-Headers: Content-Type\r\n"
-      "\r\n";
-  send(client_fd, resp, strlen(resp), 0);
 }
 
 /* ── Server thread ───────────────────────────────────────────────── */
@@ -313,11 +308,22 @@ static void* server_thread(void* data) {
     int body_len = 0;
 
     if (parse_http_request(recv_buf, total, method, path, &body, &body_len) == 0) {
-      if (strcmp(method, "OPTIONS") == 0) {
-        handle_options(client_fd);
-      } else if (g_handler) {
+      if (g_handler) {
+        char client_ip[INET_ADDRSTRLEN] = {0};
+        char local_ip[INET_ADDRSTRLEN] = {0};
+        struct sockaddr_in local_addr;
+        socklen_t local_len = sizeof(local_addr);
         http_response_t response = {200, "text/plain", "OK", 2};
-        g_handler(method, path, body, body_len, &response);
+        if (!inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip))) {
+          client_ip[0] = '\0';
+        }
+        memset(&local_addr, 0, sizeof(local_addr));
+        if (getsockname(client_fd, (struct sockaddr*)&local_addr, &local_len) != 0 ||
+            local_addr.sin_family != AF_INET ||
+            !inet_ntop(AF_INET, &local_addr.sin_addr, local_ip, sizeof(local_ip))) {
+          local_ip[0] = '\0';
+        }
+        g_handler(method, path, body, body_len, client_ip, local_ip, &response);
         send_response(client_fd, &response);
       }
     }

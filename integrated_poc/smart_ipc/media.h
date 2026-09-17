@@ -39,6 +39,7 @@ struct KdMediaInputConfig {
 
   int ai_width = 1280; // AI analysis width
   int ai_height = 720; // AI analysis height
+  int ai_fps = 10; // AI analysis frame rate
 
   int osd_width = 1920; // OSD width
   int osd_height = 1080; // OSD height

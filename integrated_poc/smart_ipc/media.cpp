@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -412,6 +413,13 @@ static k_s32 kd_sample_sensor_auto_detect(k_vicap_sensor_type* sensor_type)
 
 int KdMedia::configure_media_features(const KdMediaInputConfig &input_config, const KdMediaFeatureConfig &feature_config)
 {
+    if (feature_config.enable_ai_analysis &&
+        (input_config.ai_fps <= 0 || input_config.ai_fps > 30))
+    {
+        printf("AI analysis frame rate must be between 1 and 30\n");
+        return -1;
+    }
+
     input_config_ = input_config;
     feature_config_ = feature_config;
 
@@ -1739,14 +1747,30 @@ void *KdMedia::venc_stream_thread(void *arg)
 
 void *KdMedia::ai_analysis_frame_thread(void *arg)
 {
-    k_s32 ret = 0;
     KdMedia *pthis = (KdMedia*)arg;
+    const auto frame_period = std::chrono::microseconds(
+        1000000 / pthis->input_config_.ai_fps);
+    auto next_frame_at = std::chrono::steady_clock::now();
+    k_s32 ret = 0;
     k_video_frame_info dump_info;
     k_vicap_dev vicap_dev = pthis->vi_dev_id_;
     k_vicap_chn vi_chn = pthis->vi_chn_ai_id_;
 
     while (pthis->start_dump_ai_analysis_frame_)
     {
+        auto now = std::chrono::steady_clock::now();
+        if (now < next_frame_at)
+        {
+            auto delay_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                next_frame_at - now).count();
+            usleep(static_cast<useconds_t>(delay_us));
+        }
+        if (!pthis->start_dump_ai_analysis_frame_)
+        {
+            break;
+        }
+        next_frame_at = std::chrono::steady_clock::now() + frame_period;
+
         memset(&dump_info, 0, sizeof(k_video_frame_info));
         ret = kd_mpi_vicap_dump_frame(vicap_dev, vi_chn, VICAP_DUMP_YUV, &dump_info, 1000);
         if (ret)

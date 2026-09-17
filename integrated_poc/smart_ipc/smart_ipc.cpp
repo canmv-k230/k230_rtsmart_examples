@@ -18,12 +18,24 @@
 /* Global instance for C-style HTTP callback (no userdata in http_server API) */
 static MySmartIPC* g_smart_ipc_instance = nullptr;
 
+static constexpr unsigned int WEBRTC_NEGOTIATION_POLL_US = 1000;
+static constexpr unsigned int WEBRTC_CONNECTED_POLL_US = 10000;
+static constexpr unsigned int WEBRTC_IDLE_POLL_US = 50000;
+
+static int path_matches_route(const char* path, const char* route) {
+    size_t route_len = strlen(route);
+    return strncmp(path, route, route_len) == 0 &&
+           (path[route_len] == '\0' || path[route_len] == '?');
+}
+
 /* C-linkage wrapper so http_server_start gets a proper C function pointer.
  * OnHttpRequest is a C++ static member and may not be safely passed as a C callback. */
 extern "C" void http_request_handler(const char* method, const char* path,
                                       const char* body, int body_len,
+                                      const char* client_ip, const char* local_ip,
                                       http_response_t* response) {
-    MySmartIPC::OnHttpRequest(method, path, body, body_len, response);
+    MySmartIPC::OnHttpRequest(method, path, body, body_len,
+                              client_ip, local_ip, response);
 }
 
 MySmartIPC::MySmartIPC() : port_(8554) {}
@@ -188,6 +200,60 @@ static int get_valid_ip_with_retry(char *ip_str, int str_len,
     return -1;
 }
 
+static int replace_mdns_candidates(char* sdp, size_t capacity,
+                                   const char* client_ip) {
+    static const char candidate_prefix[] = "a=candidate:";
+    const size_t client_ip_len = client_ip ? strlen(client_ip) : 0;
+    char* line = sdp;
+    int replaced = 0;
+
+    if (!sdp || !client_ip_len) return 0;
+
+    while (*line) {
+        char* line_end = strstr(line, "\r\n");
+        if (!line_end) line_end = line + strlen(line);
+
+        if ((size_t)(line_end - line) > sizeof(candidate_prefix) - 1 &&
+            strncmp(line, candidate_prefix, sizeof(candidate_prefix) - 1) == 0) {
+            char* address_start = line;
+
+            for (int field = 0; field < 4 && address_start < line_end; field++) {
+                address_start = static_cast<char*>(
+                    memchr(address_start, ' ', line_end - address_start));
+                if (!address_start) break;
+                while (address_start < line_end && *address_start == ' ') address_start++;
+            }
+
+            if (address_start && address_start < line_end) {
+                char* address_end = static_cast<char*>(
+                    memchr(address_start, ' ', line_end - address_start));
+                if (!address_end) address_end = line_end;
+
+                size_t address_len = address_end - address_start;
+                if (address_len > 6 &&
+                    strncasecmp(address_end - 6, ".local", 6) == 0) {
+                    size_t sdp_len = strlen(sdp);
+                    size_t tail_len = sdp_len - (address_end - sdp) + 1;
+                    size_t new_sdp_len = sdp_len - address_len + client_ip_len;
+
+                    if (new_sdp_len + 1 > capacity) return -1;
+
+                    memmove(address_start + client_ip_len, address_end, tail_len);
+                    memcpy(address_start, client_ip, client_ip_len);
+                    line_end += static_cast<ptrdiff_t>(client_ip_len) -
+                                static_cast<ptrdiff_t>(address_len);
+                    replaced++;
+                }
+            }
+        }
+
+        if (!*line_end) break;
+        line = line_end + 2;
+    }
+
+    return replaced;
+}
+
 static char* replace_rtsp_ip(const char* original_url, const char* new_ip, char* new_url, int new_url_len) {
     if (original_url == NULL || new_ip == NULL || new_url == NULL || new_url_len <= 0) {
         return NULL;
@@ -307,32 +373,51 @@ void MySmartIPC::RtspThreadMain() {
 
 void MySmartIPC::OnHttpRequest(const char* method, const char* path,
                                const char* body, int body_len,
+                               const char* client_ip, const char* local_ip,
                                http_response_t* response) {
     extern MySmartIPC* g_smart_ipc_instance;
+    auto* ipc = g_smart_ipc_instance;
+    if (!ipc) {
+        response->status = 500;
+        response->content_type = "text/plain";
+        response->body = "No IPC instance";
+        response->body_len = strlen(response->body);
+        return;
+    }
+    if (strcmp(method, "OPTIONS") == 0) {
+        response->status = 204;
+        response->content_type = "text/plain";
+        response->body = nullptr;
+        response->body_len = 0;
+        return;
+    }
 
-    if (strcmp(method, "GET") == 0 && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) {
+    if (strcmp(method, "GET") == 0 &&
+        (path_matches_route(path, "/") || path_matches_route(path, "/index.html"))) {
         response->status = 200;
         response->content_type = "text/html; charset=utf-8";
         response->body = WEB_PAGE_HTML;
         response->body_len = strlen(WEB_PAGE_HTML);
 
-    } else if (strcmp(method, "GET") == 0 && strcmp(path, "/offer") == 0) {
-        auto* ipc = g_smart_ipc_instance;
-        if (!ipc) {
+    } else if (strcmp(method, "GET") == 0 && path_matches_route(path, "/offer")) {
+
+        if (!client_ip || client_ip[0] == '\0' || !local_ip ||
+            local_ip[0] == '\0' || strcmp(local_ip, "0.0.0.0") == 0) {
             response->status = 500;
             response->content_type = "text/plain";
-            response->body = "No IPC instance";
+            response->body = "Failed to determine signaling interface";
             response->body_len = strlen(response->body);
             return;
         }
 
-        /* Close existing connection before new offer.
+        /* Close any active or failed connection before a new offer.
          * Drain: wait for both worker threads to exit webrtc_pc_ internals.
          * close() sets pc->state=CLOSED so no new loop/send_video calls
          * will enter the dtls_srtp code path, but a call already past the
          * state check may still be using srtp_out. Wait until both
          * in-use flags are 0 — guaranteed within ~1ms. */
-        if (ipc->webrtc_state_ == PEER_CONNECTION_COMPLETED || ipc->webrtc_state_ == PEER_CONNECTION_CONNECTED) {
+        PeerConnectionState state = ipc->webrtc_state_.load();
+        if (state != PEER_CONNECTION_CLOSED && state != PEER_CONNECTION_NEW) {
             peer_connection_close(ipc->webrtc_pc_);
             ipc->webrtc_state_ = PEER_CONNECTION_CLOSED;
             while (ipc->peer_in_pc_ || ipc->venc_in_pc_) {
@@ -345,6 +430,16 @@ void MySmartIPC::OnHttpRequest(const char* method, const char* path,
             free(ipc->offer_sdp_);
             ipc->offer_sdp_ = nullptr;
         }
+
+        if (peer_connection_set_local_ip(ipc->webrtc_pc_, local_ip) != 0) {
+            response->status = 500;
+            response->content_type = "text/plain";
+            response->body = "Failed to bind local ICE address";
+            response->body_len = strlen(response->body);
+            return;
+        }
+        printf("[WebRTC] Using local ICE address %s for HTTP client %s\n",
+               local_ip, client_ip);
 
         peer_connection_create_offer(ipc->webrtc_pc_);
 
@@ -366,9 +461,8 @@ void MySmartIPC::OnHttpRequest(const char* method, const char* path,
         }
         pthread_mutex_unlock(&ipc->offer_mutex_);
 
-    } else if (strcmp(method, "POST") == 0 && strcmp(path, "/answer") == 0) {
-        auto* ipc = g_smart_ipc_instance;
-        if (!ipc || !body || body_len <= 0) {
+    } else if (strcmp(method, "POST") == 0 && path_matches_route(path, "/answer")) {
+        if (!body || body_len <= 0) {
             response->status = 400;
             response->content_type = "text/plain";
             response->body = "Missing SDP body";
@@ -376,11 +470,58 @@ void MySmartIPC::OnHttpRequest(const char* method, const char* path,
             return;
         }
 
-        char* answer_copy = (char*)calloc(1, body_len + 1);
+        size_t candidate_count = 0;
+        const char* candidate = body;
+        const char* body_end = body + body_len;
+        while (candidate < body_end &&
+               (candidate = strstr(candidate, "a=candidate:")) != nullptr &&
+               candidate < body_end) {
+            candidate_count++;
+            candidate += strlen("a=candidate:");
+        }
+
+        size_t answer_capacity = body_len + candidate_count * INET_ADDRSTRLEN + 1;
+        char* answer_copy = (char*)calloc(1, answer_capacity);
+        if (!answer_copy) {
+            response->status = 500;
+            response->content_type = "text/plain";
+            response->body = "Out of memory";
+            response->body_len = strlen(response->body);
+            return;
+        }
         memcpy(answer_copy, body, body_len);
         answer_copy[body_len] = '\0';
 
+        int mdns_replaced = replace_mdns_candidates(answer_copy, answer_capacity,
+                                                     client_ip);
+        if (mdns_replaced < 0) {
+            free(answer_copy);
+            response->status = 500;
+            response->content_type = "text/plain";
+            response->body = "Failed to process SDP";
+            response->body_len = strlen(response->body);
+            return;
+        }
+        if (mdns_replaced > 0) {
+            printf("[WebRTC] Replaced %d mDNS ICE candidate(s) with HTTP client IP %s\n",
+                   mdns_replaced, client_ip);
+        }
+
         peer_connection_set_remote_description(ipc->webrtc_pc_, answer_copy, SDP_TYPE_ANSWER);
+
+        if (ipc->webrtc_state_.load() == PEER_CONNECTION_FAILED) {
+            peer_connection_close(ipc->webrtc_pc_);
+            ipc->webrtc_state_ = PEER_CONNECTION_CLOSED;
+            while (ipc->peer_in_pc_ || ipc->venc_in_pc_) {
+                usleep(1000);
+            }
+            response->status = 400;
+            response->content_type = "text/plain";
+            response->body = "Invalid SDP answer";
+            response->body_len = strlen(response->body);
+            free(answer_copy);
+            return;
+        }
 
         response->status = 200;
         response->content_type = "text/plain";
@@ -401,14 +542,24 @@ void MySmartIPC::OnHttpRequest(const char* method, const char* path,
 
 void MySmartIPC::WebRtcThreadMain() {
     /* Initialize libpeer */
+    streaming_ready_ = false;
     PeerConfiguration config{};
     config.datachannel = DATA_CHANNEL_NONE;
     config.video_codec = (input_config_.video_type == KdMediaVideoType::kVideoTypeH265) ? CODEC_H265 : CODEC_H264;
     config.audio_codec = CODEC_NONE;
 
-    peer_init();
+    if (peer_init() != 0) {
+        fprintf(stderr, "[WebRTC] Failed to initialize libpeer\n");
+        streaming_running_ = false;
+        return;
+    }
     webrtc_pc_ = peer_connection_create(&config);
-
+    if (!webrtc_pc_) {
+        fprintf(stderr, "[WebRTC] Failed to create peer connection\n");
+        peer_deinit();
+        streaming_running_ = false;
+        return;
+    }
     /* Register callbacks — libpeer does NOT pass userdata, use g_smart_ipc_instance */
     peer_connection_oniceconnectionstatechange(webrtc_pc_,
         [](PeerConnectionState state, void* /*data*/) {
@@ -435,10 +586,21 @@ void MySmartIPC::WebRtcThreadMain() {
     /* Start peer_connection_loop in a separate thread */
     webrtc_peer_thread_ = std::thread([this]() {
         while (streaming_running_) {
+            unsigned int poll_delay_us = WEBRTC_IDLE_POLL_US;
+
             peer_in_pc_ = 1;
             peer_connection_loop(webrtc_pc_);
             peer_in_pc_ = 0;
-            usleep(1000);
+
+            PeerConnectionState state = webrtc_state_.load();
+            if (state == PEER_CONNECTION_CHECKING ||
+                state == PEER_CONNECTION_CONNECTED) {
+                poll_delay_us = WEBRTC_NEGOTIATION_POLL_US;
+            } else if (state == PEER_CONNECTION_COMPLETED) {
+                poll_delay_us = WEBRTC_CONNECTED_POLL_US;
+            }
+
+            usleep(poll_delay_us);
         }
     });
 
@@ -447,7 +609,8 @@ void MySmartIPC::WebRtcThreadMain() {
 
     char webrtc_ip[16];
     if (get_valid_ip_with_retry(webrtc_ip, sizeof(webrtc_ip), 10, 1000) == 0) {
-        printf("[WebRTC] Open in browser: http://%s:%d\n", webrtc_ip, port_);
+        printf("[WebRTC] Open in browser: http://%s:%d/\n",
+               webrtc_ip, port_);
     } else {
         printf("[WebRTC] HTTP signaling server starting on port %d (IP unavailable)\n", port_);
     }

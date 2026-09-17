@@ -9,6 +9,9 @@ K230 RT-Smart 上的 WebRTC 局域网摄像头 Demo。板载摄像头采集 → 
 - 浏览器一键连接，自带 Web UI
 - SDP offer/answer 信令（HTTP）
 - 自动处理浏览器 mDNS 隐私候选地址
+- 自动按浏览器访问的本机接口发布 ICE 地址，支持 Wi-Fi SoftAP 模式
+- 最多 4 个浏览器并发观看，每个客户端使用独立的 ICE/DTLS/SRTP 会话
+- 使用设备局域网 IP 直接打开 Web 页面和信令接口
 
 ## 快速开始
 
@@ -25,8 +28,8 @@ make
 # 3. 运行（默认 H.265、512 kbps、无音频）
 sample_webrtc.elf -p 8080 -s 2 -c 605274512 -W 1280 -H 720
 
-# 4. 浏览器访问
-# http://<设备IP>:8080
+# 4. 浏览器访问程序启动日志中打印的 URL
+# http://<设备IP>:8080/
 ```
 
 ## 命令行参数
@@ -52,6 +55,7 @@ sample_webrtc.elf -t h265 -s 2 -c 605274512 -W 1920 -H 1080 -b 4000
 
 # H.264 + 自定义码率
 sample_webrtc.elf -t h264 -s 2 -c 605274512 -b 3000
+
 ```
 
 ## 浏览器要求
@@ -59,6 +63,18 @@ sample_webrtc.elf -t h264 -s 2 -c 605274512 -b 3000
 ### mDNS 隐私保护
 
 Chrome/Edge 可以保持默认的 mDNS 隐私保护设置。信令服务器会使用 HTTP 连接的客户端地址解析浏览器的 `.local` ICE 候选地址，无需修改浏览器 flags 或启动参数。
+
+在 Wi-Fi AP 模式下，服务端会从浏览器的 HTTP 连接获取实际使用的本机 AP 地址，并将该地址写入 SDP host candidate，不依赖默认路由。
+
+启动信息会为每个可用的 SoftAP、STA 和 LAN IPv4 接口分别打印完整访问 URL。连接到开发板 AP 的浏览器应使用 SoftAP 子网对应的 URL。
+
+HTTP 服务监听所有本机接口。浏览器连接后，服务端从已接受的 HTTP socket 获取本次连接使用的本机地址，并自动将 ICE UDP socket 和 SDP host candidate 绑定到同一个地址。
+
+每个浏览器在 `GET /offer` 时获得独立的会话 ID 和 `PeerConnection`。`POST /answer` 使用该会话 ID 路由到对应连接，因此连接到 SoftAP 和 STA 接口的浏览器可以同时观看，不会重新绑定或关闭其他客户端的 ICE socket。编码器只编码一次，VENC 线程把同一编码帧发送到所有已连接会话。
+
+默认最多允许 4 个并发客户端。客户端主动断开时 Web UI 会释放会话；信令未完成或 ICE 保活超时的会话也会自动清理。达到上限时，新的 `/offer` 请求返回 HTTP `503`。
+
+Web 页面和信令接口不要求访问令牌，HTTP 响应仍不允许跨域访问。该 Demo 使用明文 HTTP，适合受信任的局域网测试，不应直接暴露到公网。需要跨不可信网络部署时，应在前端增加 HTTPS 和正式的身份认证。
 
 ### H.265 浏览器兼容性
 
@@ -90,8 +106,8 @@ VICAP (摄像头)
 
 | 文件 | 职责 |
 |------|------|
-| `main.c` | 入口、信令处理、编码帧转发 |
-| `http_server.c/.h` | HTTP 服务器（单线程、CORS） |
+| `main.c` | 入口、多客户端会话管理、信令处理、编码帧转发 |
+| `http_server.c/.h` | HTTP 服务器（单线程、同源信令、安全响应头） |
 | `mpp_pipeline.c/.h` | MPP 管线（VB/VICAP/VO/VENC） |
 | `web_page.h` | 嵌入式前端页面 |
 | `Makefile` | 构建脚本 |

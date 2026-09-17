@@ -112,7 +112,8 @@ static const char* WEB_PAGE_HTML =
     "</div>\n"
 
     "<script>\n"
-    "var pc=null,localIP='';\n"
+    "var pc=null;\n"
+    "function apiPath(path){return path}\n"
 
     "function setStatus(state){\n"
     "  var badge=document.getElementById('status-badge');\n"
@@ -125,30 +126,13 @@ static const char* WEB_PAGE_HTML =
     "  else{badge.classList.add('disconnected')}\n"
     "}\n"
 
-    "function fixMdnsSDP(sdp){\n"
-    "  if(!localIP||sdp.indexOf('.local')===-1)return sdp;\n"
-    "  return sdp.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.local/g,localIP);\n"
-    "}\n"
-
     "async function doConnect(){\n"
     "  if(pc){pc.close();pc=null}\n"
     "  var btn=document.getElementById('btn');\n"
     "  btn.disabled=true;\n"
     "  document.getElementById('btn-disconnect').style.display='none';\n"
     "  setStatus('connecting');\n"
-    "  localIP=window.location.hostname;\n"
     "  pc=new RTCPeerConnection({iceServers:[]});\n"
-
-    "  pc.onicecandidate=function(e){\n"
-    "    if(!e.candidate)return;\n"
-    "    var parts=e.candidate.candidate.split(' ');\n"
-    "    if(parts.length>4&&parts[4]&&!parts[4].includes('.local')){\n"
-    "      localIP=parts[4];\n"
-    "    }\n"
-    "    if(e.candidate.candidate&&e.candidate.candidate.includes('.local')){\n"
-    "      showMdnsWarning();\n"
-    "    }\n"
-    "  };\n"
 
     "  pc.ontrack=function(ev){\n"
     "    var ms=new MediaStream();\n"
@@ -172,7 +156,7 @@ static const char* WEB_PAGE_HTML =
     "  };\n"
 
     "  try{\n"
-    "    var resp=await fetch('/offer');\n"
+    "    var resp=await fetch(apiPath('/offer'));\n"
     "    if(!resp.ok){setStatus('failed');btn.disabled=false;return}\n"
     "    var offerSDP=await resp.text();\n"
     "    await pc.setRemoteDescription({type:'offer',sdp:offerSDP});\n"
@@ -184,10 +168,9 @@ static const char* WEB_PAGE_HTML =
     "if(pc.iceGatheringState==='complete')r()};\n"
     "      setTimeout(r,3000);}\n"
     "    });\n"
-    "    var fixedSDP=fixMdnsSDP(pc.localDescription.sdp);\n"
-    "    await fetch('/answer',{method:'POST',"
+    "    await fetch(apiPath('/answer'),{method:'POST',"
     "headers:{'Content-Type':'application/sdp'},"
-    "body:fixedSDP});\n"
+    "body:pc.localDescription.sdp});\n"
     "  }catch(e){setStatus('failed')}\n"
     "  btn.disabled=false;\n"
     "}\n"
@@ -226,19 +209,6 @@ static const char* WEB_PAGE_HTML =
     "  else{document.exitFullscreen()}\n"
     "}\n"
 
-    "var mdnsWarnShown=false;\n"
-    "function showMdnsWarning(){\n"
-    "  if(mdnsWarnShown)return;mdnsWarnShown=true;\n"
-    "  var w=document.createElement('div');\n"
-    "  w.className='mdns-warn';\n"
-    "  w.innerHTML='<b>mDNS privacy detected!</b> Local IPs are hidden with .local names. "
-    "Fix: Chrome/Edge: open <code>*://flags/#enable-webrtc-hide-local-ips-with-mdns</code> "
-    "and set to <b>Disabled</b>, then restart. "
-    "Or launch with: <code>--disable-features=WebRtcHideLocalIpsWithMdns</code>. "
-    "Firefox: no action needed. "
-    "<button onclick=\"this.parentElement.remove()\">Dismiss</button>';\n"
-    "  document.body.appendChild(w);\n"
-    "}\n"
     "</script></body></html>";
 
 #endif
