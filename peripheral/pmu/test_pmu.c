@@ -311,7 +311,7 @@ out:
 
 static int test_pmu_parse_pad(const char *text, uint32_t *pad)
 {
-    if (test_pmu_parse_u32(text, pad) < 0 || *pad < 65U || *pad > 69U)
+    if (test_pmu_parse_u32(text, pad) < 0 || *pad < 64U || *pad > 69U)
         return -1;
     return 0;
 }
