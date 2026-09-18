@@ -17,9 +17,10 @@ static void sigHandler(int sig_no) {
 }
 
 static void Usage() {
-    std::cout << "Usage: ./smart_ipc.elf [-H] [-S <sensor type>] [-V <enable_audio_capture>] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-R <ai_fps>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>] [-D <data_source>] [-M <streaming_mode>] [-P <port>]" << std::endl;
+    std::cout << "Usage: ./smart_ipc.elf [-H] [-S <sensor type>] [-L <2|4>] [-V <enable_audio_capture>] [-a <audio_sample>] [-c <channel_count>] [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-C <connector_type>] [-A <ai_input_width>] [-I <ai_input_height>] [-R <ai_fps>] [-K <kmodel_file>] [-T <obj_thresh>] [-N <nms_thresh>] [-E <enable_video_output>] [-F <enable_ai_analysis>] [-G <enable_video_encoding>] [-D <data_source>] [-M <streaming_mode>] [-P <port>]" << std::endl;
     std::cout << "-H: display this help message" << std::endl;
     std::cout << "-S: the sensor type, default auto-detect" << std::endl;
+    std::cout << "-L: MIPI lane preference (2/4), default ANY" << std::endl;
     std::cout << "-V: enable audio capture, default 1" << std::endl;
     std::cout << "-a: the audio sample rate, default 8000" << std::endl;
     std::cout << "-c: the audio channel count, default 1" << std::endl;
@@ -46,7 +47,7 @@ static void Usage() {
 int parse_config(int argc, char *argv[], KdMediaInputConfig &config, StreamingMode &mode, int &port) {
     int result;
     opterr = 0;
-    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:R:K:T:N:E:F:G:S:V:D:M:P:")) != -1) {
+    while ((result = getopt(argc, argv, "Ha:c:t:w:h:b:C:A:I:R:K:T:N:E:F:G:S:L:V:D:M:P:")) != -1) {
         switch(result) {
         case 'H' : {
             Usage(); break;
@@ -177,6 +178,16 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config, StreamingMo
             config.sensor_type = (k_vicap_sensor_type)n;
             break;
         }
+        case 'L': {
+            int lane = atoi(optarg);
+            if (lane == 2)
+                config.lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                config.lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else
+                Usage();
+            break;
+        }
         case 'V': {
             int n = atoi(optarg);
             if (n < 0) Usage();
@@ -207,6 +218,7 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config, StreamingMo
     } else {
         printf("Sensor type: %d\n", config.sensor_type);
     }
+    printf("MIPI lane preference: %d\n", config.lane_pref);
     printf("Audio capture enabled: %d\n", config.enable_capture_audio);
     printf("Audio sample rate: %d\n", config.audio_samplerate);
     printf("Audio channel count: %d\n", config.audio_channel_cnt);

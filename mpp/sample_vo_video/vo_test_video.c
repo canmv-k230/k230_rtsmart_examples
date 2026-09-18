@@ -75,6 +75,7 @@
 
 /* 简单 demo：只用 VICAP DEV0 / CHN0 做采集，CSI 默认用 2 号（可通过参数覆盖） */
 static k_vicap_dev g_vicap_dev_id = VICAP_DEV_ID_2;
+static k_vicap_mipi_lane_pref g_lane_pref = VICAP_MIPI_LANE_PREF_ANY;
 
 /* Ctrl+C 退出标志 */
 static volatile bool g_app_run = true;
@@ -128,6 +129,7 @@ static void print_usage(const char *prog)
     printf("  -x <offset> X offset\n");
     printf("  -y <offset> Y offset\n");
     printf("  -s <csi>    CSI index (0-2) [default: 2]\n");
+    printf("  -L <2|4>    MIPI lane preference [default: ANY]\n");
     printf("\nExample:\n");
     printf("  list_connector\n");
     printf("  %s -c <connector_type> -l 2 -x 10 -y 10\n", prog);
@@ -200,8 +202,8 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn, k_u32 out_width, k_u32 out_h
     probe_cfg.height  = ISP_HEIGHT;
     probe_cfg.fps     = 30;
 
-    if (0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
-        printf("ERROR: kd_mpi_sensor_adapt_get failed on CSI %d, want %dx%d@%d\n",
+    if (0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, g_lane_pref)) {
+        printf("ERROR: kd_mpi_sensor_adapt_get_ex failed on CSI %d, want %dx%d@%d\n",
                probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
         return -1;
     }
@@ -330,7 +332,7 @@ int main(int argc, char **argv)
     bool c_set = false;
 
     // Parsing args: c=connector, w=width, h=height, l=layer, r=rotate, x=offset_x, y=offset_y, s=csi
-    while ((opt = getopt(argc, argv, "c:w:h:l:r:x:y:s:")) != -1) {
+    while ((opt = getopt(argc, argv, "c:w:h:l:r:x:y:s:L:")) != -1) {
         switch (opt) {
             case 'c': connector_type = (k_connector_type)atoi(optarg); c_set = true; break;
             case 'w': width = (k_u32)atoi(optarg); break;
@@ -340,6 +342,18 @@ int main(int argc, char **argv)
             case 'x': offset_x = atoi(optarg); break;
             case 'y': offset_y = atoi(optarg); break;
             case 's': csi_idx = atoi(optarg); break;
+            case 'L': {
+                int lane = atoi(optarg);
+                if (lane == 2)
+                    g_lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+                else if (lane == 4)
+                    g_lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+                else {
+                    printf("ERROR: -L must be 2 or 4\n");
+                    return -1;
+                }
+                break;
+            }
             default: print_usage(argv[0]); return -1;
         }
     }

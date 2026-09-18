@@ -249,6 +249,7 @@ static void usage(void)
     printf("Options:\n");
     printf(" -sensor:       sensor type[see K230_Camera_Sensor_Adaptation_Guide.md]\n");
     printf(" -mirror:       vo mirror[0: no change, 1: enable vo mirror]\n");
+    printf(" -L:            MIPI lane preference [2 or 4, default ANY]\n");
     printf(" -help:         print this help\n");
 }
 
@@ -257,6 +258,7 @@ int main(int argc, char *argv[])
     k_s32 ret;
     k_s32 sensor_index = SENSOR_TYPE_MAX;
     k_bool mirror=K_FALSE;
+    k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
 
     for (int i = 1; i < argc; i += 2)
     {
@@ -273,6 +275,21 @@ int main(int argc, char *argv[])
         {
             mirror = atoi(argv[i + 1]);
         }
+        else if (strcmp(argv[i], "-L") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                printf("ERROR: -L requires 2 or 4\n");
+                return -1;
+            }
+            int lane = atoi(argv[i + 1]);
+            if (lane == 2)
+                lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else
+                return -1;
+        }
     }
 
     if(SENSOR_TYPE_MAX == sensor_index) {
@@ -284,7 +301,7 @@ int main(int argc, char *argv[])
         probe_cfg.height = 1080;
         probe_cfg.fps = 30;
 
-        if(0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
+        if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, lane_pref)) {
             printf("sample_vicap, can't probe sensor on %d, output %dx%d@%d\n", probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
 
             return -1;

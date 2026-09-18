@@ -77,7 +77,8 @@ public:
     // @param connector: 显示器连接器类型（命令行 -c/--connector 指定）
     PipeLine(int debug_mode,
              k_u32 csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI,
-             k_connector_type connector = DEFAULT_CONNECTOR_TYPE);
+             k_connector_type connector = DEFAULT_CONNECTOR_TYPE,
+             k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY);
 
     // 析构函数
     ~PipeLine();
@@ -118,6 +119,7 @@ private:
     // ============================
     k_connector_type connector_type; // 显示接口类型（MIPI、HDMI、LCD 等）
     k_u32 csi_num_;            // Sensor 所在 CSI 口（0-2）
+    k_vicap_mipi_lane_pref lane_pref_;
     int rotate_90_;            // 竖屏面板需要 90° 旋转（1=旋转，0=不旋转）
     k_u32 display_width_;      // 运行时显示分辨率（横屏，来自连接器信息）
     k_u32 display_height_;

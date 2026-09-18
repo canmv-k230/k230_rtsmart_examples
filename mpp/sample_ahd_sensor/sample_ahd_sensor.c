@@ -36,6 +36,7 @@
 typedef struct {
     k_connector_type connector;
     k_vicap_dev csi;
+    k_vicap_mipi_lane_pref lane_pref;
     k_vicap_sensor_info sensor_info;
     k_u32 screen_width;
     k_u32 screen_height;
@@ -62,9 +63,10 @@ static void signal_handler(int signo)
 
 static void print_usage(const char *program)
 {
-    printf("Usage: %s -c connector_type [-s csi_id]\n", program);
+    printf("Usage: %s -c connector_type [-s csi_id] [-L 2|4]\n", program);
     printf("  -c connector_type Display connector type from list_connector (required)\n");
     printf("  -s csi_id         XS9950 CSI id (0-%d, default: 0)\n", VICAP_DEV_ID_MAX - 1);
+    printf("  -L lane_count     MIPI lane preference (2 or 4, default: ANY)\n");
     printf("  -h                 Show this help message\n");
     printf("\nPreview one XS9950 1280x720 input. Press Ctrl+C to stop.\n");
 }
@@ -89,8 +91,9 @@ static k_s32 parse_options(int argc, char *argv[], app_context *ctx)
     int option;
 
     ctx->csi = VICAP_DEV_ID_0;
+    ctx->lane_pref = VICAP_MIPI_LANE_PREF_ANY;
     optind = 1;
-    while ((option = getopt(argc, argv, "c:hs:")) != -1) {
+    while ((option = getopt(argc, argv, "c:hs:L:")) != -1) {
         switch (option) {
         case 'c': {
             char *end;
@@ -110,6 +113,18 @@ static k_s32 parse_options(int argc, char *argv[], app_context *ctx)
                 return K_FAILED;
             }
             break;
+        case 'L': {
+            int lane = atoi(optarg);
+            if (lane == 2)
+                ctx->lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                ctx->lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else {
+                printf("ERROR: lane count must be 2 or 4\n");
+                return K_FAILED;
+            }
+            break;
+        }
         case 'h':
             print_usage(argv[0]);
             return 1;
@@ -137,7 +152,8 @@ static k_bool sensor_name_is_mcm(const char *sensor_name)
 }
 
 static k_s32 probe_sensor(k_vicap_dev csi, k_u32 width, k_u32 height, k_u32 fps,
-                          k_vicap_sensor_info *sensor_info)
+                          k_vicap_sensor_info *sensor_info,
+                          k_vicap_mipi_lane_pref lane_pref)
 {
     k_vicap_probe_config probe_config;
     k_s32 ret;
@@ -148,7 +164,7 @@ static k_s32 probe_sensor(k_vicap_dev csi, k_u32 width, k_u32 height, k_u32 fps,
     probe_config.height = height;
     probe_config.fps = fps;
 
-    ret = kd_mpi_sensor_adapt_get(&probe_config, sensor_info);
+    ret = kd_mpi_sensor_adapt_get_ex(&probe_config, sensor_info, lane_pref);
     if (ret != K_SUCCESS) {
         printf("ERROR: cannot probe a sensor on CSI %d for %ux%u@%u\n",
                csi, width, height, fps);
@@ -284,7 +300,8 @@ static k_s32 vicap_init(app_context *ctx)
     k_s32 ret;
 
     memset(&sensor_info, 0, sizeof(sensor_info));
-    ret = probe_sensor(ctx->csi, CAPTURE_WIDTH, CAPTURE_HEIGHT, SENSOR_FPS, &sensor_info);
+    ret = probe_sensor(ctx->csi, CAPTURE_WIDTH, CAPTURE_HEIGHT, SENSOR_FPS,
+                       &sensor_info, ctx->lane_pref);
     if (ret != K_SUCCESS) {
         return ret;
     }

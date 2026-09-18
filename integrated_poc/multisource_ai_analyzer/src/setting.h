@@ -55,6 +55,7 @@
 #include <string>
 #include "k_type.h"
 #include "k_connector_comm.h"
+#include "k_vicap_comm.h"
 
 // 默认连接器（显示器）类型：由编译期 DISPLAY_MODE 推导，
 // 运行时可用命令行 -c/--connector 覆盖
@@ -96,6 +97,7 @@ struct AppSettings {
 
     // 采集与显示
     int csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;              // Sensor 所在 CSI 口 (0-2)
+    k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
     k_connector_type connector_type = DEFAULT_CONNECTOR_TYPE; // 显示器连接器类型（数值）
     
     // 打印当前配置

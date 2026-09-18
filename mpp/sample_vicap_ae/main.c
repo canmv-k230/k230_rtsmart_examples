@@ -60,6 +60,7 @@ typedef struct {
     k_u32 step_x;
     k_u32 step_y;
     k_u32 interval_ms;
+    k_vicap_mipi_lane_pref lane_pref;
     int csi;
     int rotation;
     bool connector_set;
@@ -100,6 +101,7 @@ static void print_usage(const char *program)
     printf("  -width <px>     Requested sensor width [default: 1920]\n");
     printf("  -height <px>    Requested sensor height [default: 1080]\n");
     printf("  -fps <value>    Requested sensor frame rate [default: 30]\n");
+    printf("  -L <2|4>        MIPI lane preference [default: ANY]\n");
     printf("  -roi-width <px> AE ROI width in sensor pixels [default: 320]\n");
     printf("  -roi-height <px> AE ROI height in sensor pixels [default: 320]\n");
     printf("  -step-x <px>    Horizontal distance per update [default: ROI width]\n");
@@ -131,6 +133,7 @@ static int parse_options(int argc, char **argv, sample_options *options)
     options->request_width = 1920;
     options->request_height = 1080;
     options->request_fps = 30;
+    options->lane_pref = VICAP_MIPI_LANE_PREF_ANY;
     options->roi_width = 320;
     options->roi_height = 320;
     options->interval_ms = 1000;
@@ -158,6 +161,16 @@ static int parse_options(int argc, char **argv, sample_options *options)
             if (!parse_u32("-height", value, &options->request_height)) return -1;
         } else if (!strcmp(argv[i - 1], "-fps")) {
             if (!parse_u32("-fps", value, &options->request_fps)) return -1;
+        } else if (!strcmp(argv[i - 1], "-L") || !strcmp(argv[i - 1], "-lane")) {
+            int lane = atoi(value);
+            if (lane == 2)
+                options->lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                options->lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else {
+                printf("ERROR: -L must be 2 or 4\n");
+                return -1;
+            }
         } else if (!strcmp(argv[i - 1], "-roi-width")) {
             if (!parse_u32("-roi-width", value, &options->roi_width)) return -1;
         } else if (!strcmp(argv[i - 1], "-roi-height")) {
@@ -232,7 +245,7 @@ static k_s32 probe_sensor(const sample_options *options, k_vicap_sensor_info *se
     probe.height = options->request_height;
     probe.fps = options->request_fps;
 
-    k_s32 ret = kd_mpi_sensor_adapt_get(&probe, sensor_info);
+    k_s32 ret = kd_mpi_sensor_adapt_get_ex(&probe, sensor_info, options->lane_pref);
     if (ret) {
         printf("ERROR: no sensor found on CSI%d for %ux%u@%u\n", options->csi,
                options->request_width, options->request_height, options->request_fps);

@@ -4,8 +4,20 @@
 #define ALIGN_UP_16(x)  (((x) + 15) & ~15)
 
 /* 构造函数：初始化管线各模块的默认配置 */
-PipeLine::PipeLine(int debug_mode)
+PipeLine::PipeLine(int debug_mode, int csi_num, k_vicap_mipi_lane_pref lane_pref)
 {
+    csi_num_ = csi_num;
+    if (csi_num_ < 0 || csi_num_ > 2) {
+        printf("ERROR: invalid -s CSI %d, must be 0..2\n", csi_num_);
+        csi_num_ = 2;
+    }
+    lane_pref_ = lane_pref;
+    if (lane_pref_ != VICAP_MIPI_LANE_PREF_ANY &&
+        lane_pref_ != VICAP_MIPI_LANE_PREF_2LANE &&
+        lane_pref_ != VICAP_MIPI_LANE_PREF_4LANE) {
+        printf("ERROR: invalid MIPI lane preference %d, using ANY\n", lane_pref_);
+        lane_pref_ = VICAP_MIPI_LANE_PREF_ANY;
+    }
     // ------------------------ 显示接口类型选择 ------------------------
     // 根据宏 DISPLAY_MODE 选择不同屏幕（MIPI/HDMI 等）
     if(DISPLAY_MODE==0){
@@ -28,10 +40,10 @@ PipeLine::PipeLine(int debug_mode)
     osd_vo_id = K_VO_LAYER_OSD0;            // 用于叠加 OSD 的 VO layer
 
     // ------------------------ Sensor / VICAP 默认配置 ------------------------
-    // 默认使用 GC2093，start() 中会根据探测结果自动适配
-    sensor_type = GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR;
+    // sensor type 由 Create() 中 probe 得到，不写死
+    sensor_type = SENSOR_TYPE_MAX;
     // VICAP 设备 ID
-    vicap_dev = VICAP_DEV_ID_0;
+    vicap_dev = (k_vicap_dev)csi_num_;
     // VICAP → VO 通道（视频直通显示）
     vicap_chn_to_vo = VICAP_CHN_ID_0;
     // VICAP → AI 通道（用于算法推理）
@@ -252,18 +264,19 @@ int PipeLine::Create()
     // =============================================================================================
     // 自动探测 Sensor
     k_vicap_probe_config probe_cfg;
-    k_vicap_sensor_info sensor_info;
-    probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
+    k_vicap_sensor_info sensor_info = {};
+    probe_cfg.csi_num = csi_num_;
     probe_cfg.width   = ISP_WIDTH;
     probe_cfg.height  = ISP_HEIGHT;
     probe_cfg.fps     = 30;
-    if(0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
-        printf("vicap, can't probe sensor on %d, output %dx%d@%d\n",
+    if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, lane_pref_)) {
+        printf("ERROR: sensor probe failed on CSI%d (%dx%d@%d), exit\n",
                probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
         return -1;
     }
 
     sensor_type =  sensor_info.sensor_type;
+    printf("sensor probe ok, CSI%d type=%d\n", probe_cfg.csi_num, sensor_type);
     memset(&sensor_info, 0, sizeof(k_vicap_sensor_info));
     ret = kd_mpi_vicap_get_sensor_info(sensor_type, &sensor_info);
     if (ret) {

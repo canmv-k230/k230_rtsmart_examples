@@ -238,7 +238,7 @@ static void layer_exit(k_vo_layer_id layer_id) {
  *   - CHN0: Scaled to display resolution → bound to VO (preview)
  *   - CHN1: Scaled to encode resolution → bound to VENC (WebRTC)
  *
- * The sensor is auto-detected via kd_mpi_sensor_adapt_get() using
+ * The sensor is auto-detected via kd_mpi_sensor_adapt_get_ex() using
  * the specified CSI number. Both channels output NV12 format.
  *
  * @param dev_id       VICAP device ID (typically VICAP_DEV_ID_0)
@@ -249,6 +249,7 @@ static void layer_exit(k_vo_layer_id layer_id) {
  * @param venc_height  Output height for encode channel (CHN1)
  */
 static int vicap_init(k_vicap_dev dev_id, k_u32 csi_num,
+                      k_vicap_mipi_lane_pref lane_pref,
                       k_u32 vo_width, k_u32 vo_height,
                       k_u32 venc_width, k_u32 venc_height) {
   k_vicap_dev_attr dev_attr;
@@ -265,7 +266,7 @@ static int vicap_init(k_vicap_dev dev_id, k_u32 csi_num,
   probe_cfg.height = DEFAULT_ISP_HEIGHT;
   probe_cfg.fps = DEFAULT_FPS;
 
-  ret = kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info);
+  ret = kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, lane_pref);
   if (ret) {
     printf("[MPP] Sensor detect failed on CSI %u\n", csi_num);
     return ret;
@@ -592,7 +593,7 @@ int mpp_pipeline_init(const MppPipelineConfig* config) {
   if (ret != 0) { connector_exit(); vb_exit(); return ret; }
 
   /* 4. VICAP (camera capture, 2 channels: CHN0→VO, CHN1→VENC) */
-  ret = vicap_init(g_vicap_dev, config->csi_num,
+  ret = vicap_init(g_vicap_dev, config->csi_num, config->lane_pref,
                    g_display_width, g_display_height,
                    config->venc_width, config->venc_height);
   if (ret != 0) { layer_exit(g_vo_layer); connector_exit(); vb_exit(); return ret; }

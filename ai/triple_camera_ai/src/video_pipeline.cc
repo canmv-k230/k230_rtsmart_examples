@@ -41,8 +41,8 @@ PipeLine::PipeLine(int debug_mode)
 
 
     // ------------------------ Sensor / VICAP 默认配置 ------------------------
-    // 使用 GC2093
-    sensor_type_0 = GC2093_MIPI_CSI0_1920X1080_30FPS_10BIT_LINEAR;
+    // sensor type 由 Create() 中对 CSI0/1/2 分别 probe 得到，不写死
+    sensor_type_0 = SENSOR_TYPE_MAX;
     // VICAP 设备 0
     vicap_dev_0 = VICAP_DEV_ID_0;
     // VICAP DEV0 CHN0 → VO 通道（视频直通显示,绑定模式）
@@ -52,8 +52,7 @@ PipeLine::PipeLine(int debug_mode)
     // VICAP DEV0 CHN2 → VENC 通道（用于视频编码，绑定模式）
     vicap_chn_to_venc_0 = VICAP_CHN_ID_2;
 
-    // 使用 GC2093
-    sensor_type_1 = GC2093_MIPI_CSI1_1920X1080_30FPS_10BIT_LINEAR;
+    sensor_type_1 = SENSOR_TYPE_MAX;
     // VICAP 设备 1
     vicap_dev_1 = VICAP_DEV_ID_1;
     // VICAP DEV1 CHN0 → VO 通道（视频直通显示，绑定模式）
@@ -64,8 +63,7 @@ PipeLine::PipeLine(int debug_mode)
     vicap_chn_to_venc_1 = VICAP_CHN_ID_2;
 
 
-    // 使用 GC2093
-    sensor_type_2 = GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR;
+    sensor_type_2 = SENSOR_TYPE_MAX;
     // VICAP 设备 2
     vicap_dev_2 = VICAP_DEV_ID_2;
     // VICAP DEV2 CHN0 → VO 通道（视频直通显示，绑定模式）
@@ -476,7 +474,21 @@ int PipeLine::Create()
     // =============================================================================================
 
     //*********************************摄像头0设备配置和通道配置**************************************
-    k_vicap_sensor_info sensor_info_0;
+    // 自动探测 Sensor（CSI0）
+    k_vicap_probe_config probe_cfg_0 = {};
+    k_vicap_sensor_info sensor_info_0 = {};
+    probe_cfg_0.csi_num = 0;
+    probe_cfg_0.width   = ISP_WIDTH;
+    probe_cfg_0.height  = ISP_HEIGHT;
+    probe_cfg_0.fps     = 30;
+    if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg_0, &sensor_info_0,
+                                          VICAP_MIPI_LANE_PREF_2LANE)) {
+        printf("ERROR: CSI0 probe failed (%dx%d@%d), all 3 cameras required, exit\n",
+               probe_cfg_0.width, probe_cfg_0.height, probe_cfg_0.fps);
+        return -1;
+    }
+    sensor_type_0 = sensor_info_0.sensor_type;
+    printf("CSI0 probe ok, sensor_type=%d\n", sensor_type_0);
     memset(&sensor_info_0, 0, sizeof(k_vicap_sensor_info));
     ret = kd_mpi_vicap_get_sensor_info(sensor_type_0, &sensor_info_0);
     if (ret) {
@@ -570,7 +582,21 @@ int PipeLine::Create()
     }
 
     //*********************************摄像头1设备配置和通道配置**************************************
-    k_vicap_sensor_info sensor_info_1;
+    // 自动探测 Sensor（CSI1）
+    k_vicap_probe_config probe_cfg_1 = {};
+    k_vicap_sensor_info sensor_info_1 = {};
+    probe_cfg_1.csi_num = 1;
+    probe_cfg_1.width   = ISP_WIDTH;
+    probe_cfg_1.height  = ISP_HEIGHT;
+    probe_cfg_1.fps     = 30;
+    if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg_1, &sensor_info_1,
+                                          VICAP_MIPI_LANE_PREF_2LANE)) {
+        printf("ERROR: CSI1 probe failed (%dx%d@%d), all 3 cameras required, exit\n",
+               probe_cfg_1.width, probe_cfg_1.height, probe_cfg_1.fps);
+        return -1;
+    }
+    sensor_type_1 = sensor_info_1.sensor_type;
+    printf("CSI1 probe ok, sensor_type=%d\n", sensor_type_1);
     memset(&sensor_info_1, 0, sizeof(k_vicap_sensor_info));
     ret = kd_mpi_vicap_get_sensor_info(sensor_type_1, &sensor_info_1);
     if (ret) {
@@ -669,7 +695,21 @@ int PipeLine::Create()
 
 
     //*********************************摄像头2设备配置和通道配置**************************************
-    k_vicap_sensor_info sensor_info_2;
+    // 自动探测 Sensor（CSI2）
+    k_vicap_probe_config probe_cfg_2 = {};
+    k_vicap_sensor_info sensor_info_2 = {};
+    probe_cfg_2.csi_num = 2;
+    probe_cfg_2.width   = ISP_WIDTH;
+    probe_cfg_2.height  = ISP_HEIGHT;
+    probe_cfg_2.fps     = 30;
+    if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg_2, &sensor_info_2,
+                                          VICAP_MIPI_LANE_PREF_2LANE)) {
+        printf("ERROR: CSI2 probe failed (%dx%d@%d), all 3 cameras required, exit\n",
+               probe_cfg_2.width, probe_cfg_2.height, probe_cfg_2.fps);
+        return -1;
+    }
+    sensor_type_2 = sensor_info_2.sensor_type;
+    printf("CSI2 probe ok, sensor_type=%d\n", sensor_type_2);
     memset(&sensor_info_2, 0, sizeof(k_vicap_sensor_info));
     ret = kd_mpi_vicap_get_sensor_info(sensor_type_2, &sensor_info_2);
     if (ret) {

@@ -163,7 +163,7 @@ void video_proc(const AppSettings& settings)
     string video_path = settings.video_path;
     if (video_path == "realtime"){
         // 实时采集：CSI 口与显示器类型由 -s/-c 指定
-        PipeLine pl(debug_mode, settings.csi_num, settings.connector_type);
+        PipeLine pl(debug_mode, settings.csi_num, settings.connector_type, settings.lane_pref);
         process_pipeline(settings, pl);
     }
     else{

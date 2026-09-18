@@ -17,20 +17,22 @@ static void sigHandler(int sig_no) {
 }
 
 static void Usage() {
-    std::cout << "Usage: ./sample_rtspsever.elf [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-a <semitones>]" << std::endl;
+    std::cout << "Usage: ./sample_rtspsever.elf [-t <codec_type>] [-w <width>] [-h <height>] [-b <bitrate_kbps>] [-a <semitones>] [-L <2|4>]" << std::endl;
     std::cout << "-t: the video encoder type: h264/h265, default h265" << std::endl;
     std::cout << "-w: the video encoder width, default 1280" << std::endl;
     std::cout << "-h: the video encoder height, default 720" << std::endl;
     std::cout << "-b: the video encoder bitrate(kbps), default 2000" << std::endl;
     std::cout << "-a: pitch shift semitones [-12,12], default 0" << std::endl;
+    std::cout << "-L: MIPI lane preference (2/4), default ANY" << std::endl;
     exit(-1);
 }
 
-int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
+int parse_config(int argc, char *argv[], KdMediaInputConfig &config,
+                 k_vicap_mipi_lane_pref &lane_pref) {
     int result;
     opterr = 0;
     config.video_valid = true;
-    while ((result = getopt(argc, argv, "Hvn:t:w:h:b:a:")) != -1) {
+    while ((result = getopt(argc, argv, "Hvn:t:w:h:b:a:L:")) != -1) {
         switch(result) {
         case 'H' : {
             Usage(); break;
@@ -64,6 +66,16 @@ int parse_config(int argc, char *argv[], KdMediaInputConfig &config) {
             int n = atoi(optarg);
             if (n < -12 || n > 12) Usage();
             config.pitch_shift_semitones = n;
+            break;
+        }
+        case 'L': {
+            int lane = atoi(optarg);
+            if (lane == 2)
+                lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else
+                Usage();
             break;
         }
         default: Usage(); break;
@@ -113,10 +125,12 @@ class MyRtspServer : public IOnBackChannel, public IOnAEncData, public IOnVEncDa
         }
     }
 
-    int Init(KdMediaInputConfig &config, const std::string &stream_url = "test", int port = 8554) {
+    int Init(KdMediaInputConfig &config,
+             k_vicap_mipi_lane_pref lane_pref,
+             const std::string &stream_url = "test", int port = 8554) {
 
         if(SENSOR_TYPE_MAX == config.sensor_type) {
-            if (0 != media_.DetectSensor(&config.sensor_type))
+            if (0 != media_.DetectSensor(&config.sensor_type, lane_pref))
             {
                 printf("kd_sample_sensor_auto_detect failed\n");
                 return -1;
@@ -142,7 +156,7 @@ class MyRtspServer : public IOnBackChannel, public IOnAEncData, public IOnVEncDa
         if (rtsp_server_.CreateSession(stream_url, session_attr) < 0)  return -1;
         stream_url_ = stream_url;
 
-        if (media_.Init(config) < 0) return -1;
+        if (media_.Init(config, lane_pref) < 0) return -1;
         if (media_.CreateAiAEnc(this) < 0) return -1;
         if (media_.CreateADecAo() < 0) return -1;
         if (config.video_valid && media_.CreateVcapVEnc(this) < 0) return -1;
@@ -194,10 +208,11 @@ int main(int argc, char *argv[]) {
     g_exit_flag.store(false);
 
     KdMediaInputConfig config;
-    parse_config(argc, argv, config);
+    k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
+    parse_config(argc, argv, config, lane_pref);
 
     MyRtspServer *server = new MyRtspServer();
-    if (!server || server->Init(config) < 0) {
+    if (!server || server->Init(config, lane_pref) < 0) {
         std::cout << "KdRtspServer Init failed." << std::endl;
         return -1;
     }

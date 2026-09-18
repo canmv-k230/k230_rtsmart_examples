@@ -25,6 +25,7 @@ typedef enum {
 
 struct KdMediaInputConfig {
   k_vicap_sensor_type sensor_type = SENSOR_TYPE_MAX; // Sensor type
+  k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
   KdMediaVideoType video_type = KdMediaVideoType::kVideoTypeH264; // Venc type
   int venc_width = 1280; // Video encoder width
   int venc_height = 720; // Video encoder height

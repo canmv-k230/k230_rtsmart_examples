@@ -389,17 +389,18 @@ static k_s32 kd_sample_aenc_unbind_ai(k_handle ai_dev, k_handle ai_chn, k_handle
     return kd_mpi_sys_unbind(&ai_mpp_chn, &aenc_mpp_chn);
 }
 
-static k_s32 kd_sample_sensor_auto_detect(k_vicap_sensor_type* sensor_type)
+static k_s32 kd_sample_sensor_auto_detect(k_vicap_sensor_type* sensor_type,
+                                          k_vicap_mipi_lane_pref lane_pref)
 {
-    k_vicap_probe_config probe_cfg;
-    k_vicap_sensor_info sensor_info;
+    k_vicap_probe_config probe_cfg = {};
+    k_vicap_sensor_info sensor_info = {};
 
     probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
     probe_cfg.width = ISP_INPUT_WIDTH;
     probe_cfg.height = ISP_INPUT_HEIGHT;
     probe_cfg.fps = 30;
 
-    if(0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
+    if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, lane_pref)) {
         printf("sample_vicap, can't probe sensor on %d, output %dx%d@%d\n", probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
 
         return -1;
@@ -435,7 +436,7 @@ int KdMedia::configure_media_features(const KdMediaInputConfig &input_config, co
     if (input_config.sensor_type == SENSOR_TYPE_MAX)
     {
         k_vicap_sensor_type sensor_type;
-        if (0 != kd_sample_sensor_auto_detect(&sensor_type))
+        if (0 != kd_sample_sensor_auto_detect(&sensor_type, input_config.lane_pref))
         {
             printf("kd_sample_sensor_auto_detect failed\n");
             return -1;

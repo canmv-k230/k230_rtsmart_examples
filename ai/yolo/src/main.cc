@@ -42,8 +42,11 @@ int yolo_video_inference(GeneralConfig &general_config,YoloConfig &yolo_config){
     runtime_tensor input_tensor;
     // 创建一个PipeLine对象，用于处理视频流
     PipeLine pl(general_config,yolo_config.debug_mode);
-    // 初始化PipeLine对象
-    pl.Create();
+    // 初始化PipeLine（probe 失败则退出）
+    if (pl.Create() != 0) {
+        printf("PipeLine Create failed, exit\n");
+        exit(1);
+    }
     if(strcmp(yolo_config.model_type, "yolo26") == 0){
         // 创建一个Yolo26对象，用于执行yolo26的推理流程
         Yolo26 yolo26(yolo_config.task_type,yolo_config.task_mode,yolo_config.kmodel_path,yolo_config.conf_thres,yolo_config.mask_thres,labels,image_wh,yolo_config.kp_num,yolo_config.kp_dim,yolo_config.debug_mode);
@@ -272,9 +275,12 @@ void _help(){
     printf("-kp_num: default 17\n");
     printf("-kp_dim: default 3\n");
     printf("-debug_mode: default 0, 0/1\n");
+    printf("-s: default 2, sensor CSI num (0/1/2)\n");
+    printf("-L: MIPI lane preference (2/4), default ANY\n");
 }
 
 // 主函数入口，程序从这里开始执行
+
 int main(int argc, char *argv[])
 {
     // 打印程序名称、编译日期和时间
@@ -382,6 +388,33 @@ int main(int argc, char *argv[])
         {
             // 设置关键点维度
             yolo_config.kp_dim = atoi(argv[i + 1]);
+        }
+        else if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--csi") == 0)
+        {
+            if (i + 1 >= argc) {
+                printf("Error: %s requires a CSI number\n", argv[i]);
+                _help();
+                return -1;
+            }
+            general_config.CSI_NUM = atoi(argv[i + 1]);
+        }
+        else if (strcmp(argv[i], "-L") == 0 || strcmp(argv[i], "--lane") == 0 ||
+                 strcmp(argv[i], "-lane") == 0)
+        {
+            if (i + 1 >= argc) {
+                printf("Error: %s requires a lane count\n", argv[i]);
+                _help();
+                return -1;
+            }
+            int lane = atoi(argv[i + 1]);
+            if (lane == 2)
+                general_config.LANE_PREF = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                general_config.LANE_PREF = VICAP_MIPI_LANE_PREF_4LANE;
+            else {
+                printf("Error: MIPI lane preference must be 2 or 4\n");
+                return -1;
+            }
         }
         else if (strcmp(argv[i], "-debug_mode") == 0)
         {

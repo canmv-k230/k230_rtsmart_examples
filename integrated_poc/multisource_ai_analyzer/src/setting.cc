@@ -49,6 +49,7 @@ void AppSettings::print() const {
     cout << "Debug Mode: " << debug_mode << endl;
     cout << "Video Path: " << video_path << endl;
     cout << "CSI Num: " << csi_num << endl;
+    cout << "MIPI Lane Preference: " << lane_pref << endl;
     cout << "Connector Type: " << connector_type << " (display " << disp_w << "x" << disp_h << ")" << endl;
     cout << "====================" << endl;
 }
@@ -66,6 +67,7 @@ void CmdLineParser::print_usage(const char* name)
          << endl
          << "Optional:" << endl
          << "  -s, --csi <num>           Sensor 所在 CSI 口 (0-2, 默认：" << CONFIG_MPP_SENSOR_DEFAULT_CSI << ")" << endl
+         << "  -L, --lane <2|4>          MIPI lane preference (默认：ANY)" << endl
          << "  -c, --connector <type>    显示器连接器类型，数值 (默认：" << DEFAULT_CONNECTOR_TYPE << ")" << endl
          << "                              605274512  = LCD 屏 (ST7701 480x800)" << endl
          << "                              757006876  = HDMI 屏 (LT9611 1920x1080@30fps)" << endl
@@ -122,6 +124,21 @@ bool CmdLineParser::parse(int argc, char* argv[], AppSettings& settings)
                 return false;
             }
             settings.csi_num = (int)val;
+        }
+        else if (arg == "-L" || arg == "--lane") {
+            if (i + 1 >= argc) {
+                cerr << "Error: -L/--lane requires 2 or 4" << endl;
+                return false;
+            }
+            int lane = atoi(argv[++i]);
+            if (lane == 2)
+                settings.lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                settings.lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else {
+                cerr << "Error: -L/--lane requires 2 or 4" << endl;
+                return false;
+            }
         }
         else if (arg == "-c" || arg == "--connector") {
             if (i + 1 >= argc) {

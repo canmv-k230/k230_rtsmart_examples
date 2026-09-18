@@ -73,7 +73,8 @@ public:
 
     // 构造函数
     // @param debug_mode: 是否开启调试模式（影响 ScopedTiming 打印）
-    PipeLine(int debug_mode);
+    PipeLine(int debug_mode, int csi_num = 2,
+             k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY);
 
     // 析构函数
     ~PipeLine();
@@ -144,6 +145,8 @@ private:
     // ============================
     // 调试控制
     // ============================
+    int csi_num_ = 2;         // Sensor CSI 口（命令行 -s，默认 2）
+    k_vicap_mipi_lane_pref lane_pref_ = VICAP_MIPI_LANE_PREF_ANY;
     int debug_mode_ = 0;      // 是否启用调试/计时打印
 };
 

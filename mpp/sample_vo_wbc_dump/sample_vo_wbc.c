@@ -32,6 +32,7 @@
 static volatile bool g_app_run = true;
 // Global variable to hold the CSI device ID, initialized in parse_arguments
 static k_vicap_dev vicap_dev_id       = CONFIG_MPP_SENSOR_DEFAULT_CSI;
+static k_vicap_mipi_lane_pref g_lane_pref = VICAP_MIPI_LANE_PREF_ANY;
 static int         g_dump_frame_count = DEFAULT_DUMP_FRAMES;
 
 // ============================================================================
@@ -153,6 +154,7 @@ static void print_usage(const char* program_name)
     printf("Options:\n");
     printf("  -c, --csi <num>    CSI device number (0-2, default: 2)\n");
     printf("  -n, --frames <num> Number of frames to dump (default: %d)\n", DEFAULT_DUMP_FRAMES);
+    printf("  -L, --lane <2|4>  MIPI lane preference (default: ANY)\n");
     printf("  -h, --help         Show this help message\n");
 }
 
@@ -162,7 +164,7 @@ static int parse_arguments(int argc, char** argv)
     int csi_num   = 2;
     int frame_num = DEFAULT_DUMP_FRAMES;
 
-    while ((opt = getopt(argc, argv, "c:n:h")) != -1) {
+    while ((opt = getopt(argc, argv, "c:n:L:h")) != -1) {
         switch (opt) {
         case 'c':
             csi_num = atoi(optarg);
@@ -182,6 +184,18 @@ static int parse_arguments(int argc, char** argv)
             g_dump_frame_count = frame_num;
             printf("Dumping %d frames.\n", frame_num);
             break;
+        case 'L': {
+            int lane = atoi(optarg);
+            if (lane == 2)
+                g_lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                g_lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else {
+                printf("ERROR: -L must be 2 or 4\n");
+                return -1;
+            }
+            break;
+        }
         case 'h':
             print_usage(argv[0]);
             exit(0);
@@ -233,12 +247,13 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn)
     k_vicap_sensor_type  sensor_type;
 
     memset(&sensor_info, 0, sizeof(sensor_info));
+    memset(&probe_cfg, 0, sizeof(probe_cfg));
     probe_cfg.csi_num = dev_chn;
     probe_cfg.width   = ISP_WIDTH;
     probe_cfg.height  = ISP_HEIGHT;
     probe_cfg.fps     = 30;
 
-    if (0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
+    if (0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, g_lane_pref)) {
         printf("ERROR: can't probe sensor on %d, output %dx%d@%d\n", probe_cfg.csi_num, probe_cfg.width, probe_cfg.height,
                probe_cfg.fps);
         return -1;

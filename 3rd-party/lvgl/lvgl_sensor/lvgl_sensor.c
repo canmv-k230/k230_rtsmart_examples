@@ -1,4 +1,6 @@
 #include <signal.h>
+#include <getopt.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +39,14 @@ static lv_image_dsc_t sensor_dsc;
 
 static k_connector_type g_connector_type = ST7701_V1_MIPI_2LAN_480X800_30FPS;
 static k_vicap_dev g_csi_idx = VICAP_DEV_ID_2;
+static k_vicap_mipi_lane_pref g_lane_pref = VICAP_MIPI_LANE_PREF_ANY;
+static k_vo_layer_id g_osd_layer = K_VO_LAYER_OSD0;
+static lv_display_rotation_t g_display_rotation = LV_DISPLAY_ROTATION_270;
+static int g_rotation_degrees = 270;
+static k_u32 g_sensor_width = ISP_WIDTH;
+static k_u32 g_sensor_height = ISP_HEIGHT;
+static k_u32 g_sensor_fps = 60;
+static k_u32 g_sensor_buffer_size;
 
 typedef struct _frame_map {
     k_u64 pa;
@@ -122,6 +132,194 @@ static void rgb888_to_lv_rgb888_inplace(uint8_t * data, uint32_t stride,
 }
 #endif
 
+static const char* lane_pref_name(k_vicap_mipi_lane_pref lane_pref)
+{
+    switch (lane_pref) {
+    case VICAP_MIPI_LANE_PREF_2LANE:
+        return "2";
+    case VICAP_MIPI_LANE_PREF_4LANE:
+        return "4";
+    default:
+        return "ANY";
+    }
+}
+
+static void print_usage(const char* prog_name)
+{
+    printf("Usage: %s [options]\n", prog_name);
+    printf("Options:\n");
+    printf("  -c, --connector <type>  Display connector type (default: ST7701 480x800)\n");
+    printf("  -s, --csi <0|1|2>      Sensor CSI index (default: 2)\n");
+    printf("  -L, -lane, --lane <2|4> MIPI lane preference (default: ANY)\n");
+    printf("      -width, --width <px>  Sensor width (default: %d)\n", ISP_WIDTH);
+    printf("      -height, --height <px> Sensor height (default: %d)\n", ISP_HEIGHT);
+    printf("      -fps, --fps <rate>    Sensor FPS (default: 60)\n");
+    printf("  -l, --layer <id>       OSD layer index 0..3 or ID 4..7 (default: 0)\n");
+    printf("  -r, --rotate <deg>     Display rotation (0, 90, 180, 270; default: 270)\n");
+    printf("  -H, --help             Show this help message\n");
+}
+
+static int parse_integer(const char* text, int* value)
+{
+    char* end = NULL;
+    long  parsed;
+
+    if (text == NULL || text[0] == '\0') {
+        return -1;
+    }
+
+    parsed = strtol(text, &end, 10);
+    if (*end != '\0' || parsed < INT_MIN || parsed > INT_MAX) {
+        return -1;
+    }
+
+    *value = (int)parsed;
+    return 0;
+}
+
+static void normalize_long_options(int argc, char* argv[])
+{
+    static const char* single_dash_options[] = {
+        "-connector", "-csi", "-csi-num", "-lane", "-width", "-height",
+        "-fps", "-layer", "-rotate", "-help",
+    };
+    static const char* normalized_options[] = {
+        "--connector", "--csi", "--csi-num", "--lane", "--width", "--height",
+        "--fps", "--layer", "--rotate", "--help",
+    };
+
+    for (int i = 1; i < argc; ++i) {
+        for (size_t j = 0; j < sizeof(single_dash_options) / sizeof(single_dash_options[0]); ++j) {
+            if (strcmp(argv[i], single_dash_options[j]) == 0) {
+                argv[i] = (char*)normalized_options[j];
+                break;
+            }
+        }
+    }
+}
+
+static int parse_arguments(int argc, char* argv[])
+{
+    static const struct option long_options[] = {
+        { "connector", required_argument, NULL, 'c' },
+        { "csi", required_argument, NULL, 's' },
+        { "csi-num", required_argument, NULL, 's' },
+        { "lane", required_argument, NULL, 'L' },
+        { "width", required_argument, NULL, 'w' },
+        { "sensor-width", required_argument, NULL, 'w' },
+        { "height", required_argument, NULL, 'y' },
+        { "sensor-height", required_argument, NULL, 'y' },
+        { "fps", required_argument, NULL, 'f' },
+        { "sensor-fps", required_argument, NULL, 'f' },
+        { "layer", required_argument, NULL, 'l' },
+        { "rotate", required_argument, NULL, 'r' },
+        { "help", no_argument, NULL, 'H' },
+        { NULL, 0, NULL, 0 },
+    };
+    int opt;
+
+    normalize_long_options(argc, argv);
+    while ((opt = getopt_long(argc, argv, "c:s:L:w:y:f:l:r:Hh", long_options, NULL)) != -1) {
+        int value;
+
+        switch (opt) {
+        case 'c':
+            if (parse_integer(optarg, &value) != 0 || value < 0) {
+                fprintf(stderr, "Invalid connector type: %s\n", optarg);
+                return -1;
+            }
+            g_connector_type = (k_connector_type)value;
+            break;
+        case 's':
+            if (parse_integer(optarg, &value) != 0 || value < 0 || value > 2) {
+                fprintf(stderr, "CSI index must be 0, 1, or 2.\n");
+                return -1;
+            }
+            g_csi_idx = (k_vicap_dev)value;
+            break;
+        case 'L':
+            if (parse_integer(optarg, &value) != 0 || (value != 2 && value != 4)) {
+                fprintf(stderr, "Lane preference must be 2 or 4.\n");
+                return -1;
+            }
+            g_lane_pref = value == 2 ? VICAP_MIPI_LANE_PREF_2LANE : VICAP_MIPI_LANE_PREF_4LANE;
+            break;
+        case 'w':
+            if (parse_integer(optarg, &value) != 0 || value <= 0) {
+                fprintf(stderr, "Sensor width must be positive.\n");
+                return -1;
+            }
+            g_sensor_width = (k_u32)value;
+            break;
+        case 'y':
+            if (parse_integer(optarg, &value) != 0 || value <= 0) {
+                fprintf(stderr, "Sensor height must be positive.\n");
+                return -1;
+            }
+            g_sensor_height = (k_u32)value;
+            break;
+        case 'f':
+            if (parse_integer(optarg, &value) != 0 || value <= 0) {
+                fprintf(stderr, "Sensor FPS must be positive.\n");
+                return -1;
+            }
+            g_sensor_fps = (k_u32)value;
+            break;
+        case 'l':
+            if (parse_integer(optarg, &value) != 0 || value < 0) {
+                fprintf(stderr, "Invalid OSD layer: %s\n", optarg);
+                return -1;
+            }
+            if (value <= 3) {
+                g_osd_layer = (k_vo_layer_id)(K_VO_LAYER_OSD0 + value);
+            } else if (value <= K_VO_LAYER_OSD3) {
+                g_osd_layer = (k_vo_layer_id)value;
+            } else {
+                fprintf(stderr, "OSD layer must be an index 0..3 or ID 4..7.\n");
+                return -1;
+            }
+            break;
+        case 'r':
+            if (parse_integer(optarg, &value) != 0) {
+                fprintf(stderr, "Invalid rotation: %s\n", optarg);
+                return -1;
+            }
+            switch (value) {
+            case 0:
+                g_display_rotation = LV_DISPLAY_ROTATION_0;
+                g_rotation_degrees = 0;
+                break;
+            case 90:
+                g_display_rotation = LV_DISPLAY_ROTATION_90;
+                g_rotation_degrees = 90;
+                break;
+            case 180:
+                g_display_rotation = LV_DISPLAY_ROTATION_180;
+                g_rotation_degrees = 180;
+                break;
+            case 270:
+                g_display_rotation = LV_DISPLAY_ROTATION_270;
+                g_rotation_degrees = 270;
+                break;
+            default:
+                fprintf(stderr, "Rotation must be 0, 90, 180, or 270.\n");
+                return -1;
+            }
+            break;
+        case 'H':
+        case 'h':
+            print_usage(argv[0]);
+            return 1;
+        case '?':
+        default:
+            print_usage(argv[0]);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 static k_s32 sample_vicap_init(k_vicap_dev csi_idx)
 {
     k_vicap_dev_attr dev_attr;
@@ -134,12 +332,12 @@ static k_s32 sample_vicap_init(k_vicap_dev csi_idx)
 
     memset(&probe_cfg, 0, sizeof(probe_cfg));
     probe_cfg.csi_num = csi_idx;
-    probe_cfg.width = ISP_WIDTH;
-    probe_cfg.height = ISP_HEIGHT;
-    probe_cfg.fps = 60;
+    probe_cfg.width = g_sensor_width;
+    probe_cfg.height = g_sensor_height;
+    probe_cfg.fps = g_sensor_fps;
 
     memset(&sensor_info, 0, sizeof(sensor_info));
-    ret = kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info);
+    ret = kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, g_lane_pref);
     if (ret != 0) {
         return ret;
     }
@@ -154,7 +352,7 @@ static k_s32 sample_vicap_init(k_vicap_dev csi_idx)
     dev_attr.acq_win.height = sensor_info.height;
     dev_attr.mode = VICAP_WORK_ONLINE_MODE;
     dev_attr.buffer_num = 6;
-    dev_attr.buffer_size = VB_ALIGN_UP(ISP_WIDTH * ISP_HEIGHT * 2, 1024);
+    dev_attr.buffer_size = g_sensor_buffer_size;
     dev_attr.buffer_pool_id = VB_INVALID_POOLID;
     dev_attr.pipe_ctrl.data = 0xffffffff;
     dev_attr.pipe_ctrl.bits.ahdr_enable = 0;
@@ -197,11 +395,22 @@ static void sample_vicap_deinit(void)
 static k_s32 sample_vb_init(void)
 {
     k_vb_config config;
+    uint64_t sensor_buffer_size = (uint64_t)g_sensor_width * g_sensor_height * 2;
+    uint64_t default_buffer_size = (uint64_t)ISP_WIDTH * ISP_HEIGHT * 2;
+
+    if (sensor_buffer_size < default_buffer_size) {
+        sensor_buffer_size = default_buffer_size;
+    }
+    if (sensor_buffer_size > UINT32_MAX - 4095u) {
+        printf("sensor buffer size is too large\n");
+        return -1;
+    }
+    g_sensor_buffer_size = VB_ALIGN_UP((k_u32)sensor_buffer_size, 4096);
 
     memset(&config, 0, sizeof(config));
     config.max_pool_cnt = 64;
     config.comm_pool[0].blk_cnt = 10;
-    config.comm_pool[0].blk_size = VB_ALIGN_UP(ISP_WIDTH * ISP_HEIGHT * 2, 4096);
+    config.comm_pool[0].blk_size = g_sensor_buffer_size;
     config.comm_pool[1].blk_cnt = 10;
     config.comm_pool[1].blk_size = VB_ALIGN_UP(RGB888_SIZE, 4096);
 
@@ -247,8 +456,14 @@ static void create_hud_ui(void)
 
 int main(int argc, char* argv[])
 {
-    (void)argc;
-    (void)argv;
+    int parse_result = parse_arguments(argc, argv);
+    if (parse_result != 0) {
+        return parse_result > 0 ? 0 : -1;
+    }
+
+    printf("Configuration: connector=%d csi=%d sensor=%ux%u@%u lane=%s layer=%d rotate=%d\n",
+           g_connector_type, g_csi_idx, g_sensor_width, g_sensor_height, g_sensor_fps,
+           lane_pref_name(g_lane_pref), g_osd_layer, g_rotation_degrees);
 
     k_video_frame_info held_frame;
     bool frame_held = false;
@@ -283,8 +498,8 @@ int main(int argc, char* argv[])
     stream_started = 1;
 
     lv_init();
-    g_display = lv_k230_display_create(K_VO_LAYER_OSD0, 255);
-    lv_display_set_rotation(g_display, LV_DISPLAY_ROTATION_270);
+    g_display = lv_k230_display_create(g_osd_layer, 255);
+    lv_display_set_rotation(g_display, g_display_rotation);
     lv_display_set_color_format(g_display, LV_COLOR_FORMAT_ARGB8888);
 
     create_hud_ui();

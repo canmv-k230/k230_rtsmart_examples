@@ -4,7 +4,8 @@
 #define ALIGN_UP_16(x)  (((x) + 15) & ~15)
 
 /* 构造函数：初始化管线各模块的默认配置 */
-PipeLine::PipeLine(int debug_mode, k_u32 csi_num, k_connector_type connector)
+PipeLine::PipeLine(int debug_mode, k_u32 csi_num, k_connector_type connector,
+                   k_vicap_mipi_lane_pref lane_pref)
 {
     // ------------------------ 显示接口类型 ------------------------
     // 由命令行 -c/--connector 传入（默认 DEFAULT_CONNECTOR_TYPE，编译期由 DISPLAY_MODE 推导）
@@ -13,6 +14,7 @@ PipeLine::PipeLine(int debug_mode, k_u32 csi_num, k_connector_type connector)
     // ------------------------ Sensor 所在 CSI 口 ------------------------
     // 由命令行 -s/--csi 传入
     csi_num_ = csi_num;
+    lane_pref_ = lane_pref;
 
     // ------------------------ VO（视频输出）相关 ID ------------------------
     vo_dev_id = K_VO_DISPLAY_DEV_ID;        // VO 设备 ID
@@ -264,13 +266,13 @@ int PipeLine::Create()
     // 6. 传感器探测 & VICAP 设备配置
     // =============================================================================================
     // 自动探测 Sensor（CSI 口由命令行 -s/--csi 指定）
-    k_vicap_probe_config probe_cfg;
-    k_vicap_sensor_info sensor_info;
+    k_vicap_probe_config probe_cfg = {};
+    k_vicap_sensor_info sensor_info = {};
     probe_cfg.csi_num = csi_num_;
     probe_cfg.width   = ISP_WIDTH;
     probe_cfg.height  = ISP_HEIGHT;
     probe_cfg.fps     = 30;
-    if(0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
+    if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, lane_pref_)) {
         printf("vicap, can't probe sensor on %d, output %dx%d@%d\n",
                probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
         return -1;

@@ -195,9 +195,12 @@ int main(int argc, char *argv[])
 
     int debug_mode = atoi(argv[5]);
 
-    // 1. 创建视频管线
+    // 1. 创建视频管线（内部分别 probe CSI0/1/2，任一路失败则退出）
     PipeLine pl(debug_mode);
-    pl.Create();
+    if (pl.Create() != 0) {
+        cout << "PipeLine Create failed, exit" << endl;
+        return -1;
+    }
 
     // 2. 摄像头模式
     std::thread t0(face_det_video_proc, std::ref(pl),argv, 0, 4);

@@ -4,6 +4,12 @@
 
 PipeLine::PipeLine(GeneralConfig &general_config,int debug_mode)
 {
+    csi_num_ = general_config.CSI_NUM;
+    if (csi_num_ < 0 || csi_num_ > 2) {
+        printf("ERROR: invalid CSI_NUM %d, must be 0..2\n", csi_num_);
+        csi_num_ = 2;
+    }
+
     general_config_ = general_config;
     //配置屏幕类型
     if(general_config_.DISPLAY_MODE==0){
@@ -26,10 +32,10 @@ PipeLine::PipeLine(GeneralConfig &general_config,int debug_mode)
     osd_vo_id = K_VO_LAYER_OSD0;            // 用于叠加 OSD 的 VO layer
 
     // ------------------------ Sensor / VICAP 默认配置 ------------------------
-    // 默认使用 GC2093，start() 中会根据探测结果自动适配
-    sensor_type = GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR;
+    // sensor type 由 Create() 中 probe 得到，不写死
+    sensor_type = SENSOR_TYPE_MAX;
     // VICAP 设备 ID
-    vicap_dev = VICAP_DEV_ID_0;
+    vicap_dev = (k_vicap_dev)csi_num_;
     // VICAP → VO 通道（视频直通显示）
     vicap_chn_to_vo = VICAP_CHN_ID_0;
     // VICAP → AI 通道（用于算法推理）
@@ -249,16 +255,18 @@ int PipeLine::Create()
     // =============================================================================================
     // 自动探测 Sensor
     k_vicap_probe_config probe_cfg;
-    k_vicap_sensor_info sensor_info;
-    probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
+    k_vicap_sensor_info sensor_info = {};
+    probe_cfg.csi_num = csi_num_;
     probe_cfg.width = general_config_.ISP_WIDTH;
     probe_cfg.height = general_config_.ISP_HEIGHT;
     probe_cfg.fps = 30;
-    if(0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
-        printf("vicap, can't probe sensor on %d, output %dx%d@%d\n", probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
+    if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, general_config_.LANE_PREF)) {
+        printf("ERROR: sensor probe failed on CSI%d (%dx%d@%d), exit\n",
+               probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
         return -1;
     }
     sensor_type =  sensor_info.sensor_type;
+    printf("sensor probe ok, CSI%d type=%d\n", probe_cfg.csi_num, sensor_type);
     memset(&sensor_info, 0, sizeof(k_vicap_sensor_info));
     ret = kd_mpi_vicap_get_sensor_info(sensor_type, &sensor_info);
     if (ret) {

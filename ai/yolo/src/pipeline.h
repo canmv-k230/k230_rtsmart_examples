@@ -54,6 +54,8 @@ typedef struct GeneralConfig
     int OSD_WIDTH=1920;
     int OSD_HEIGHT=1080;
     int OSD_CHANNEL=4;
+    int CSI_NUM=2;          // Sensor CSI 口（-s，默认 2）
+    k_vicap_mipi_lane_pref LANE_PREF=VICAP_MIPI_LANE_PREF_ANY;
 } GeneralConfig;
 
 typedef struct YoloConfig
@@ -93,6 +95,7 @@ public:
 private:
 
     GeneralConfig general_config_;
+    int csi_num_ = 2;
     // vb相关
     k_vb_config config;
 

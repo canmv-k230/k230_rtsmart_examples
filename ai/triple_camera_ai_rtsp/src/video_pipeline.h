@@ -255,7 +255,6 @@ private:
     // ============================
     // 控制是否输出性能日志、调试信息
     int debug_mode_ = 0;
-
     EncodedRtspServer  rtsp_server_;
 };
 

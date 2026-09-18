@@ -1024,7 +1024,8 @@ k_s32 sample_venc_osd_border_h265(k_vicap_sensor_type sensor_type)
 
 void sample_venc_usage(char *sPrgNm)
 {
-    printf("Usage : %s [index] -o [filename]\n", sPrgNm);
+    printf("Usage : %s [index] -o [filename] -L [2|4]\n", sPrgNm);
+    printf("-L selects the MIPI lane preference (default: ANY).\n");
     printf("index:\n");
     printf("\t  0) H.265e.\n");
     printf("\t  1) JPEG encode.\n");
@@ -1034,17 +1035,19 @@ void sample_venc_usage(char *sPrgNm)
 }
 
 
-static k_s32 kd_sample_sensor_auto_detect(k_vicap_sensor_type* sensor_type)
+static k_s32 kd_sample_sensor_auto_detect(k_vicap_sensor_type* sensor_type,
+                                          k_vicap_mipi_lane_pref lane_pref)
 {
     k_vicap_probe_config probe_cfg;
     k_vicap_sensor_info sensor_info;
 
+    memset(&sensor_info, 0, sizeof(sensor_info));
     probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
     probe_cfg.width = 1920;
     probe_cfg.height = 1080;
     probe_cfg.fps = 30;
 
-    if(0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
+    if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, lane_pref)) {
         printf("sample_vicap, can't probe sensor on %d, output %dx%d@%d\n", probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
 
         return -1;
@@ -1062,6 +1065,7 @@ int main(int argc, char *argv[])
     pthread_t exit_thread_handle;
     int case_index = 0;
     int ret = 0;
+    k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
 
     printf("argc = %d\n", argc);
 
@@ -1102,9 +1106,25 @@ int main(int argc, char *argv[])
         {
             enc_height = atoi(argv[i + 1]);
         }
+        else if(strcmp(argv[i], "-L") == 0)
+        {
+            if (i + 1 >= argc) {
+                printf("ERROR: -L requires 2 or 4\n");
+                return K_FAILED;
+            }
+            int lane = atoi(argv[i + 1]);
+            if (lane == 2)
+                lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else {
+                printf("ERROR: -L must be 2 or 4\n");
+                return K_FAILED;
+            }
+        }
     }
 
-    if (0 != kd_sample_sensor_auto_detect(&sensor_type))
+    if (0 != kd_sample_sensor_auto_detect(&sensor_type, lane_pref))
     {
         return -1;
     }
@@ -1146,4 +1166,3 @@ int main(int argc, char *argv[])
 
     return 0;
 }
-

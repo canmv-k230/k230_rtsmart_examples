@@ -44,6 +44,7 @@ typedef struct {
     k_connector_type connector;
     k_vicap_dev mipi_csi;
     k_vicap_dev mcm_csi;
+    k_vicap_mipi_lane_pref lane_pref;
     k_vicap_sensor_info mipi_sensor_info;
     k_vicap_sensor_info mcm_sensor_info;
     k_u32 preview_width;
@@ -76,13 +77,14 @@ static void signal_handler(int signo)
 
 static void print_usage(const char *program)
 {
-    printf("Usage: %s -c connector_type [-m mipi_csi] [-a mcm_csi]\n", program);
+    printf("Usage: %s -c connector_type [-m mipi_csi] [-a mcm_csi] [-L 2|4]\n", program);
     printf("  -c connector_type Display connector type from list_connector (required)\n");
     printf("  -m mipi_csi       Normal MIPI sensor CSI id (0-%d, default: %d)\n",
            VICAP_DEV_ID_MAX - 1, DEFAULT_MIPI_CSI);
     printf("  -a mcm_csi        XS9950 CSI id (0-%d, default: %d)\n",
            VICAP_DEV_ID_MAX - 1, DEFAULT_MCM_CSI);
     printf("  -s csi_id         Alias for -m (MIPI CSI id)\n");
+    printf("  -L lane_count     MIPI lane preference (2 or 4, default: ANY)\n");
     printf("  -h, --help        Show this help message\n");
     printf("\nThe two CSI ids must be different. Each preview fills its half of the display\n");
     printf("using a centered crop followed by hardware scaling. Press Ctrl+C to stop.\n");
@@ -123,6 +125,7 @@ static k_s32 parse_options(int argc, char *argv[], app_context *ctx)
 
     ctx->mipi_csi = DEFAULT_MIPI_CSI;
     ctx->mcm_csi = DEFAULT_MCM_CSI;
+    ctx->lane_pref = VICAP_MIPI_LANE_PREF_ANY;
     for (i = 1; i < argc; ++i) {
         const char *option = argv[i];
         k_vicap_dev *csi = NULL;
@@ -137,6 +140,22 @@ static k_s32 parse_options(int argc, char *argv[], app_context *ctx)
                 return K_FAILED;
             }
             connector_set = K_TRUE;
+            continue;
+        }
+        if (strcmp(option, "-L") == 0 || strcmp(option, "--lane") == 0) {
+            if (++i >= argc) {
+                printf("ERROR: lane count is required\n");
+                return K_FAILED;
+            }
+            int lane = atoi(argv[i]);
+            if (lane == 2)
+                ctx->lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                ctx->lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else {
+                printf("ERROR: lane count must be 2 or 4\n");
+                return K_FAILED;
+            }
             continue;
         }
         if (strcmp(option, "-m") == 0 || strcmp(option, "-s") == 0 ||
@@ -175,7 +194,8 @@ static k_bool sensor_name_is_mcm(const char *sensor_name)
 }
 
 static k_s32 probe_sensor(k_vicap_dev csi, k_u32 width, k_u32 height, k_u32 fps,
-                          k_vicap_sensor_info *sensor_info)
+                          k_vicap_sensor_info *sensor_info,
+                          k_vicap_mipi_lane_pref lane_pref)
 {
     k_vicap_probe_config probe_config;
     k_s32 ret;
@@ -186,7 +206,7 @@ static k_s32 probe_sensor(k_vicap_dev csi, k_u32 width, k_u32 height, k_u32 fps,
     probe_config.height = height;
     probe_config.fps = fps;
 
-    ret = kd_mpi_sensor_adapt_get(&probe_config, sensor_info);
+    ret = kd_mpi_sensor_adapt_get_ex(&probe_config, sensor_info, lane_pref);
     if (ret != K_SUCCESS) {
         printf("ERROR: cannot probe a sensor on CSI %d for %ux%u@%u\n",
                csi, width, height, fps);
@@ -416,7 +436,7 @@ static k_s32 vicap_init_mipi(app_context *ctx)
 
     memset(&sensor_info, 0, sizeof(sensor_info));
     ret = probe_sensor(ctx->mipi_csi, MIPI_CAPTURE_WIDTH, MIPI_CAPTURE_HEIGHT,
-                       SENSOR_FPS, &sensor_info);
+                       SENSOR_FPS, &sensor_info, ctx->lane_pref);
     if (ret != K_SUCCESS)
         return ret;
     if (sensor_name_is_mcm(sensor_info.sensor_name)) {
@@ -488,7 +508,7 @@ static k_s32 vicap_init_mcm(app_context *ctx)
 
     memset(&sensor_info, 0, sizeof(sensor_info));
     ret = probe_sensor(ctx->mcm_csi, MCM_CAPTURE_WIDTH, MCM_CAPTURE_HEIGHT,
-                       SENSOR_FPS, &sensor_info);
+                       SENSOR_FPS, &sensor_info, ctx->lane_pref);
     if (ret != K_SUCCESS)
         return ret;
     if (!sensor_name_is_mcm(sensor_info.sensor_name)) {

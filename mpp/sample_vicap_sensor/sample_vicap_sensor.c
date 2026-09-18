@@ -452,7 +452,7 @@ static void print_usage(const char *prog)
     printf("  -c <type>        Connector type [REQUIRED]\n");
     printf("  -r <0|90|180|270> Rotation [default: 0]\n");
     printf("  -s <0|1|2>       CSI index [default: 2]\n");
-    printf("  -lane <2|4>      Probe lane preference [default: ANY / unset]\n");
+    printf("  -L, -lane, --lane <2|4>  Probe lane preference [default: ANY / unset]\n");
     printf("  -stype <id>      Force sensor type (see board list_sensor)\n");
     printf("  -width/-height/-fps  Probe target [default: 1920x1080@30]\n");
     printf("  -ofmt <0|1|2|3>  CHN0 format: yuv / rgb888 / rgb888p / raw [default: 0]\n");
@@ -495,7 +495,8 @@ static k_s32 parse_parameters(int argc, char **argv, sample_params_t *params)
             params->rot_val = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
             params->csi_idx = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "-lane") == 0 && i + 1 < argc) {
+        } else if ((strcmp(argv[i], "-L") == 0 || strcmp(argv[i], "-lane") == 0 ||
+                    strcmp(argv[i], "--lane") == 0) && i + 1 < argc) {
             int lane = atoi(argv[++i]);
             if (lane == 4)
                 params->lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
@@ -592,10 +593,8 @@ static k_s32 get_sensor_resolution(const sample_params_t *p)
     k_vicap_probe_config probe_cfg;
     k_vicap_sensor_type sensor_type;
     k_s32 ret;
-
     memset(&sensor_info, 0, sizeof(sensor_info));
     memset(&probe_cfg, 0, sizeof(probe_cfg));
-
     if (p->sensor_type_set) {
         sensor_type = (k_vicap_sensor_type)p->sensor_type;
         ret = kd_mpi_vicap_get_sensor_info(sensor_type, &sensor_info);
@@ -619,10 +618,8 @@ static k_s32 get_sensor_resolution(const sample_params_t *p)
         probe_cfg.width = p->sensor_width;
         probe_cfg.height = p->sensor_height;
         probe_cfg.fps = p->sensor_fps;
-        probe_cfg.lane_pref = p->lane_pref;
-
-        if (kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info) != 0) {
-            printf("ERROR: kd_mpi_sensor_adapt_get failed on CSI %d (lane_pref=%d)\n",
+        if (kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, p->lane_pref) != 0) {
+            printf("ERROR: kd_mpi_sensor_adapt_get_ex failed on CSI %d (lane_pref=%d)\n",
                    probe_cfg.csi_num, (int)p->lane_pref);
             return -1;
         }

@@ -870,6 +870,7 @@ static void print_usage(const char* prog) {
   printf("Usage: %s [OPTIONS]\n", prog);
   printf("  -p port       HTTP server port (default: 8080)\n");
   printf("  -s csi_num    CSI device number 0-2 (default: 2)\n");
+  printf("  -L lane       MIPI lane preference 2/4 (default: ANY)\n");
   printf("  -c connector  Connector type: 605274512=LCD, 757006876=HDMI (default: LCD)\n");
   printf("  -t type       Video encoder type: h264/h265 (default: h265)\n");
   printf("  -W width      VENC encode width (default: 1280)\n");
@@ -883,6 +884,7 @@ int main(int argc, char* argv[]) {
   /* Default configuration */
   int port = 8080;
   k_u32 csi_num = 2;
+  k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
   k_connector_type connector_type = ST7701_V1_MIPI_2LAN_480X800_30FPS;
   k_u32 venc_width = 1280;
   k_u32 venc_height = 720;
@@ -895,6 +897,16 @@ int main(int argc, char* argv[]) {
       port = atoi(argv[++i]);
     } else if (strcmp(argv[i], "-s") == 0 && (i + 1) < argc) {
       csi_num = (k_u32)atoi(argv[++i]);
+    } else if (strcmp(argv[i], "-L") == 0 && (i + 1) < argc) {
+      int lane = atoi(argv[++i]);
+      if (lane == 2) {
+        lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+      } else if (lane == 4) {
+        lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+      } else {
+        print_usage(argv[0]);
+        return 1;
+      }
     } else if (strcmp(argv[i], "-c") == 0 && (i + 1) < argc) {
       connector_type = (k_connector_type)atoi(argv[++i]);
     } else if (strcmp(argv[i], "-t") == 0 && (i + 1) < argc) {
@@ -938,6 +950,7 @@ int main(int argc, char* argv[]) {
  * Binds: VICAP-CHN0 → VO, VICAP-CHN1 → VENC */
   MppPipelineConfig pipeline_config = {
     .csi_num = csi_num,
+    .lane_pref = lane_pref,
     .connector_type = connector_type,
     .venc_width = venc_width,
     .venc_height = venc_height,

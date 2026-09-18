@@ -88,10 +88,11 @@ public:
         }
     }
 
-    int Init(KdMediaInputConfig &config)
+    int Init(KdMediaInputConfig &config,
+             k_vicap_mipi_lane_pref lane_pref)
     {
         if(SENSOR_TYPE_MAX == config.sensor_type) {
-            if (0 != media_.DetectSensor(&config.sensor_type))
+            if (0 != media_.DetectSensor(&config.sensor_type, lane_pref))
             {
                 printf("kd_sample_sensor_auto_detect failed\n");
                 return -1;
@@ -99,7 +100,7 @@ public:
         }
 
         mp4_muxer_init(config);
-        if (media_.Init(config) < 0)
+        if (media_.Init(config, lane_pref) < 0)
             return -1;
         if (media_.CreateAiAEnc(this) < 0)
             return -1;
@@ -249,8 +250,9 @@ private:
 
 static void show_usage(char* pname)
 {
-    printf("Usage: ./%s -o *.mp4 \n",pname);
+    printf("Usage: ./%s -o *.mp4 [-L <2|4>]\n",pname);
     printf("-o: save mp4 path file name\n");
+    printf("-L: MIPI lane preference (2/4), default ANY\n");
 }
 
 int main(int argc, char *argv[])
@@ -269,6 +271,7 @@ int main(int argc, char *argv[])
         .audio_samplerate = 44100,
         .audio_channel_cnt = 2,
         .pitch_shift_semitones = 0};
+    k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
 
     if (argc > 1)
     {
@@ -278,6 +281,19 @@ int main(int argc, char *argv[])
             {
                 memset(g_mp4_pathname,0,sizeof(g_mp4_pathname));
                 strncpy(g_mp4_pathname,argv[i + 1],sizeof(g_mp4_pathname));
+            }
+            else if (strcmp(argv[i], "-L") == 0)
+            {
+                int lane = atoi(argv[i + 1]);
+                if (lane == 2)
+                    lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+                else if (lane == 4)
+                    lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+                else
+                {
+                    show_usage(argv[0]);
+                    return -1;
+                }
             }
             else if (strcmp(argv[i], "-h") == 0)
             {
@@ -295,7 +311,7 @@ int main(int argc, char *argv[])
     printf("mp4 muxer...\n");
 
     MyMp4muxer *mp4muxer = new MyMp4muxer();
-    if (!mp4muxer || mp4muxer->Init(config) < 0)
+    if (!mp4muxer || mp4muxer->Init(config, lane_pref) < 0)
     {
         std::cout << "mp4muxer Init failed." << std::endl;
         return -1;

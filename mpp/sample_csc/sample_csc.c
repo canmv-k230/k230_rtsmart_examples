@@ -932,7 +932,8 @@ static void sample_nonai_2d()
 
 static void sample_csc_usage()
 {
-    printf("Usage : -sensor [sensor_index] -o [filename] -vo [display_type]\n");
+    printf("Usage : -sensor [sensor_index] -o [filename] -vo [display_type] -L [2|4]\n");
+    printf("-L selects the MIPI lane preference (default: ANY)\n");
     printf("\n");
     printf("sensor_index:\n");
     printf("\t  see vicap doc\n");
@@ -945,17 +946,37 @@ int main(int argc, char *argv[])
     k_u32 size=0;
 
     k_vicap_sensor_type sensor_type = SENSOR_TYPE_MAX;
+    k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-L") == 0) {
+            if (i + 1 >= argc) {
+                printf("ERROR: -L requires 2 or 4\n");
+                return K_FAILED;
+            }
+            int lane = atoi(argv[i + 1]);
+            if (lane == 2)
+                lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else {
+                printf("ERROR: -L must be 2 or 4\n");
+                return K_FAILED;
+            }
+        }
+    }
 
     if(SENSOR_TYPE_MAX == sensor_type) {
         k_vicap_probe_config probe_cfg;
         k_vicap_sensor_info sensor_info;
 
+        memset(&sensor_info, 0, sizeof(sensor_info));
         probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
         probe_cfg.width = 1920;
         probe_cfg.height = 1080;
         probe_cfg.fps = 30;
 
-        if(0x00 != kd_mpi_sensor_adapt_get(&probe_cfg, &sensor_info)) {
+        if(0x00 != kd_mpi_sensor_adapt_get_ex(&probe_cfg, &sensor_info, lane_pref)) {
             printf("sample_vicap, can't probe sensor on %d, output %dx%d@%d\n", probe_cfg.csi_num, probe_cfg.width, probe_cfg.height, probe_cfg.fps);
 
             return -1;
@@ -993,6 +1014,10 @@ int main(int argc, char *argv[])
         else if(strcmp(argv[i], "-vo") == 0)
         {
             g_nonai_2d_conf.vo = atoi(argv[i+1]);
+        }
+        else if(strcmp(argv[i], "-L") == 0)
+        {
+            i++;
         }
     }
 
@@ -1044,4 +1069,3 @@ int main(int argc, char *argv[])
 
     return 0;
 }
-

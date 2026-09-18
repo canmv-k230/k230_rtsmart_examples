@@ -42,6 +42,7 @@ static inline const char* venc_type_name(VencType t) {
  */
 typedef struct {
   k_u32 csi_num;                    /**< CSI device number (0-2, selects camera connector) */
+  k_vicap_mipi_lane_pref lane_pref; /**< MIPI lane preference (default: ANY) */
   k_connector_type connector_type;  /**< Display connector type (LCD or HDMI) */
   k_u32 venc_width;                 /**< VENC encode width in pixels (e.g. 1280) */
   k_u32 venc_height;                /**< VENC encode height in pixels (e.g. 720) */

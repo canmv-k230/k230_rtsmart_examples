@@ -54,8 +54,11 @@ void video_proc(char *argv[])
 
     // 创建一个PipeLine对象，用于处理视频流
     UVC_PipeLine pl(debug_mode);
-    // 初始化PipeLine对象
-    pl.Create();
+    // 初始化PipeLine（probe 失败则退出）
+    if (pl.Create() != 0) {
+        printf("PipeLine Create failed, exit\n");
+        exit(1);
+    }
     // 创建一个DumpRes对象，用于存储帧数据
     DumpRes dump_res;
     // 创建FaceDetection实例

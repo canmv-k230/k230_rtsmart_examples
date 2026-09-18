@@ -24,6 +24,8 @@
  */
 
 #include <iostream>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 #include "person_detect.h"
 #include "ai_utils.h"
@@ -51,11 +53,16 @@ void print_usage(const char *name)
          << " 3> nms_thresh  NMS阈值 \n"
          << " 4> input_mode       图像 (Number) or 摄像头(None) \n"
          << " 5> debug_mode      是否需要调试，0、1、2分别表示不调试、简单调试、详细调试 \n"
+         << "  -s <csi_num>    Sensor CSI口编号，默认 2\n"
+         << "  -L <2|4>        MIPI lane preference，默认 ANY\n"
          << " 6> fps         帧率 \n" 
          << " 7> buffer      容忍帧数，即超过多少帧之后无法匹配上某个track，就认为该track丢失 \n"
          << "\n"
          << endl;
 }
+
+static int g_csi_num = 2;
+static k_vicap_mipi_lane_pref g_lane_pref = VICAP_MIPI_LANE_PREF_ANY;
 
 void video_proc(char *argv[])
 {
@@ -71,9 +78,12 @@ void video_proc(char *argv[])
     dims_t in_shape { 1, AI_FRAME_CHANNEL, AI_FRAME_HEIGHT, AI_FRAME_WIDTH };
 
     // 创建一个PipeLine对象，用于处理视频流
-    PipeLine pl(debug_mode);
-    // 初始化PipeLine对象
-    pl.Create();
+    PipeLine pl(debug_mode, g_csi_num, g_lane_pref);
+    // 初始化PipeLine（probe 失败则退出）
+    if (pl.Create() != 0) {
+        printf("PipeLine Create failed, exit\n");
+        exit(1);
+    }
     // 创建一个DumpRes对象，用于存储帧数据
     DumpRes dump_res;
 
@@ -103,8 +113,42 @@ void video_proc(char *argv[])
     pl.Destroy();
 }
 
+
+/* Parse optional camera options (CSI defaults to 2, lane preference defaults to ANY); strip them so positional argc checks stay valid. */
+
+static int parse_csi_and_compact_argv(int argc, char **argv, int *csi_num,
+                                      k_vicap_mipi_lane_pref *lane_pref)
+{
+    *csi_num = 2;
+    *lane_pref = VICAP_MIPI_LANE_PREF_ANY;
+    int w = 1;
+    for (int i = 1; i < argc; ++i) {
+        if ((strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--csi") == 0) && i + 1 < argc) {
+            *csi_num = atoi(argv[++i]);
+            continue;
+        }
+        if ((strcmp(argv[i], "-L") == 0 || strcmp(argv[i], "--lane") == 0 ||
+             strcmp(argv[i], "-lane") == 0) && i + 1 < argc) {
+            int lane = atoi(argv[++i]);
+            if (lane == 2)
+                *lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
+            else if (lane == 4)
+                *lane_pref = VICAP_MIPI_LANE_PREF_4LANE;
+            else {
+                printf("ERROR: -L/--lane must be 2 or 4\n");
+                return -1;
+            }
+            continue;
+        }
+        argv[w++] = argv[i];
+    }
+    argv[w] = nullptr;
+    return w;
+}
+
 int main(int argc, char *argv[])
 {
+    argc = parse_csi_and_compact_argv(argc, argv, &g_csi_num, &g_lane_pref);
     std::cout << "case " << argv[0] << " built at " << __DATE__ << " " << __TIME__ << std::endl;
     if (argc != 8)
     {
