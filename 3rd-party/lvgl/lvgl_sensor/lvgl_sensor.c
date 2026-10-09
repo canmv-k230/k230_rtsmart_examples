@@ -41,7 +41,8 @@ static k_connector_type g_connector_type = ST7701_V1_MIPI_2LAN_480X800_30FPS;
 static k_vicap_dev g_csi_idx = VICAP_DEV_ID_2;
 static k_vicap_mipi_lane_pref g_lane_pref = VICAP_MIPI_LANE_PREF_ANY;
 static k_vo_layer_id g_osd_layer = K_VO_LAYER_OSD0;
-static lv_display_rotation_t g_display_rotation = LV_DISPLAY_ROTATION_270;
+/* Preserve the example's LVGL angle convention: GDMA rotates the other way. */
+static k_gdma_rotation_e g_display_rotation = GDMA_ROTATE_DEGREE_90;
 static int g_rotation_degrees = 270;
 static k_u32 g_sensor_width = ISP_WIDTH;
 static k_u32 g_sensor_height = ISP_HEIGHT;
@@ -286,19 +287,19 @@ static int parse_arguments(int argc, char* argv[])
             }
             switch (value) {
             case 0:
-                g_display_rotation = LV_DISPLAY_ROTATION_0;
+                g_display_rotation = GDMA_ROTATE_DEGREE_0;
                 g_rotation_degrees = 0;
                 break;
             case 90:
-                g_display_rotation = LV_DISPLAY_ROTATION_90;
+                g_display_rotation = GDMA_ROTATE_DEGREE_270;
                 g_rotation_degrees = 90;
                 break;
             case 180:
-                g_display_rotation = LV_DISPLAY_ROTATION_180;
+                g_display_rotation = GDMA_ROTATE_DEGREE_180;
                 g_rotation_degrees = 180;
                 break;
             case 270:
-                g_display_rotation = LV_DISPLAY_ROTATION_270;
+                g_display_rotation = GDMA_ROTATE_DEGREE_90;
                 g_rotation_degrees = 270;
                 break;
             default:
@@ -481,7 +482,7 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    if (K_SUCCESS != kd_display_init(g_connector_type)) {
+    if (K_SUCCESS != kd_display_init(g_connector_type, 0, 0, g_display_rotation)) {
         printf("kd_display_init failed\n");
         goto cleanup_vb;
     }
@@ -499,7 +500,6 @@ int main(int argc, char* argv[])
 
     lv_init();
     g_display = lv_k230_display_create(g_osd_layer, 255);
-    lv_display_set_rotation(g_display, g_display_rotation);
     lv_display_set_color_format(g_display, LV_COLOR_FORMAT_ARGB8888);
 
     create_hud_ui();

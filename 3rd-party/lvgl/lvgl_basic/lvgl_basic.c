@@ -290,19 +290,17 @@ static const char* color_format_to_string(lv_color_format_t format)
     }
 }
 
-// Convert degrees to LVGL display rotation type
-static lv_display_rotation_t parse_rotation(int degrees)
+static k_gdma_rotation_e parse_rotation(int degrees)
 {
-    /* gdma rotate 90 with lvgl rotate is reversed */
     switch (degrees) {
     case 90:
-        return LV_DISPLAY_ROTATION_270;
+        return GDMA_ROTATE_DEGREE_90;
     case 180:
-        return LV_DISPLAY_ROTATION_180;
+        return GDMA_ROTATE_DEGREE_180;
     case 270:
-        return LV_DISPLAY_ROTATION_90;
+        return GDMA_ROTATE_DEGREE_270;
     default:
-        return LV_DISPLAY_ROTATION_0;
+        return GDMA_ROTATE_DEGREE_0;
     }
 }
 
@@ -362,7 +360,7 @@ int main(int argc, char* argv[])
 
     vb_init();
 
-    if (0x00 != kd_display_init(connector_type)) {
+    if (0x00 != kd_display_init(connector_type, 0, 0, parse_rotation(rotation_angle))) {
         printf("failed int init connector\n");
 
         goto _failed_init_connector;
@@ -380,9 +378,6 @@ int main(int argc, char* argv[])
     g_display = disp; // Store for signal handler
 
     printf("LVGL display created successfully\n");
-
-    // Set rotation
-    lv_display_set_rotation(disp, parse_rotation(rotation_angle));
 
     // Set color format
     printf("Setting color format to %s...\n", color_format_to_string(color_format));

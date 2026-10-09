@@ -24,6 +24,9 @@
 #define CSC_BLOCK_SIZE VB_ALIGN_UP(CSC_TEST_WIDTH * CSC_TEST_HEIGHT * 4u, 4096u)
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
+bool lvgl_run_render_regressions(void);
+bool lvgl_run_display_regressions(bool rotate);
+
 typedef struct {
     uint8_t blue;
     uint8_t green;
@@ -867,6 +870,10 @@ done:
 
 static bool run_csc_tests(test_stats_t * stats)
 {
+    if (!LV_USE_DRAW_VG_LITE) {
+        printf("SKIP MPP/CSC formats: VG-Lite buffer registration is disabled\n");
+        return true;
+    }
     k_vb_pool_config config;
     memset(&config, 0, sizeof(config));
     config.blk_cnt = 1;
@@ -892,18 +899,30 @@ static bool run_csc_tests(test_stats_t * stats)
 
 static void usage(const char * program)
 {
-    printf("Usage: %s [--rvv-only|--csc-only] [--verbose]\n", program);
+    printf("Usage: %s [--rvv-only|--csc-only|--regression-only|--display-only] [--verbose]\n", program);
+    printf("Display tests: [--display-rvv] [--display-rotate90], ST7701 480x800 panel\n");
 }
 
 int main(int argc, char ** argv)
 {
     bool run_rvv = true;
     bool run_csc = true;
+    bool run_regression = true;
+    bool run_display = false;
+    bool display_rvv = false;
+    bool display_rotate = false;
     test_stats_t stats = {0};
 
     for(int i = 1; i < argc; i++) {
-        if(strcmp(argv[i], "--rvv-only") == 0) run_csc = false;
-        else if(strcmp(argv[i], "--csc-only") == 0) run_rvv = false;
+        if(strcmp(argv[i], "--rvv-only") == 0) run_csc = run_regression = false;
+        else if(strcmp(argv[i], "--csc-only") == 0) run_rvv = run_regression = false;
+        else if(strcmp(argv[i], "--regression-only") == 0) run_rvv = run_csc = false;
+        else if(strcmp(argv[i], "--display-only") == 0) {
+            run_display = true;
+            run_rvv = run_csc = run_regression = false;
+        }
+        else if(strcmp(argv[i], "--display-rvv") == 0) display_rvv = true;
+        else if(strcmp(argv[i], "--display-rotate90") == 0) display_rotate = true;
         else if(strcmp(argv[i], "--verbose") == 0) stats.verbose = true;
         else if(strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
@@ -925,10 +944,20 @@ int main(int argc, char ** argv)
         return 2;
     }
 
+    if (display_rvv) lv_k230_renderer_set(LV_K230_RENDERER_RVV);
     lv_init();
+    lv_k230_image_convert_init();
     printf("LVGL K230 image conversion test\n");
     if(run_rvv) run_rvv_tests(&stats);
     if(run_csc && !run_csc_tests(&stats)) stats.total++;
+    if(run_regression) {
+        stats.total++;
+        if(lvgl_run_render_regressions()) stats.passed++;
+    }
+    if(run_display) {
+        stats.total++;
+        if(lvgl_run_display_regressions(display_rotate)) stats.passed++;
+    }
 
     if(stats.details > 20u) {
         printf("%u additional failure details suppressed\n", stats.details - 20u);

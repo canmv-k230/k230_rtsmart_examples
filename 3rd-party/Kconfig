@@ -18,6 +18,16 @@ if RTSMART_ENABLE_3RD_PARTY_EXAMPLES
         default n
         depends on RTSMART_3RD_PARTY_ENABLE_LVGL
 
+    config RTSMART_3RD_PARTY_ENABLE_LVGL_BENCHMARK
+        bool "Enable Build LVGL Benchmark"
+        default n
+        depends on RTSMART_3RD_PARTY_ENABLE_LVGL_SAMPLES
+        select RTSMART_3RD_PARTY_ENABLE_LVGL_EXAMPLES
+        help
+            Build the LVGL benchmark application and the upstream benchmark
+            demo sources. The application prints machine-readable per-scene
+            and summary results to the RT-Smart console.
+
     config RTSMART_3RD_PARTY_ENABLE_MBEDTLS_TESTS
         bool "Enable Build MbedTLS Test Programs"
         default n

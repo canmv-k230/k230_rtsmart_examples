@@ -20,8 +20,7 @@
 #define XIAOZHI_LVGL_DEFAULT_CONNECTOR ST7701_V1_MIPI_2LAN_480X800_30FPS
 #define XIAOZHI_LVGL_DEFAULT_LAYER K_VO_LAYER_OSD0
 #define XIAOZHI_LVGL_DEFAULT_TOUCH_ID 0
-/* The K230 GDMA direction is opposite to LVGL's 90-degree enum. */
-#define XIAOZHI_LVGL_DEFAULT_ROTATION LV_DISPLAY_ROTATION_270
+#define XIAOZHI_LVGL_DEFAULT_ROTATION GDMA_ROTATE_DEGREE_90
 
 #define XIAOZHI_LVGL_CONNECTION_SIZE 32
 #define XIAOZHI_LVGL_DETAIL_SIZE 160
@@ -765,7 +764,8 @@ int xiaozhi_lvgl_start(struct xiaozhi_lvgl *ui)
 {
 	if (!ui || ui->thread_started)
 		return ui && ui->thread_started ? 0 : -1;
-	if (kd_display_init((k_connector_type)ui->config.connector)) {
+	if (kd_display_init((k_connector_type)ui->config.connector, 0, 0,
+			    XIAOZHI_LVGL_DEFAULT_ROTATION)) {
 		printf("xiaozhi: LVGL display initialization failed\n");
 		return -1;
 	}
@@ -780,8 +780,6 @@ int xiaozhi_lvgl_start(struct xiaozhi_lvgl *ui)
 		kd_display_deinit();
 		return -1;
 	}
-	/* Rotate the 480x800 panel into a 800x480 landscape workspace. */
-	lv_display_set_rotation(ui->display, XIAOZHI_LVGL_DEFAULT_ROTATION);
 	ui->touch = lv_k230_touch_init(ui->config.touch_id);
 	if (!ui->touch)
 		printf("xiaozhi: LVGL touch initialization failed; continuing without touch\n");

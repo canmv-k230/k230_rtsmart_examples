@@ -294,17 +294,17 @@ static void print_usage(const char* progname)
     printf("  -H, --help              Show this help message\n");
 }
 
-static lv_display_rotation_t parse_rotation(int degrees)
+static k_gdma_rotation_e parse_rotation(int degrees)
 {
     switch (degrees) {
     case 90:
-        return LV_DISPLAY_ROTATION_270;
+        return GDMA_ROTATE_DEGREE_90;
     case 180:
-        return LV_DISPLAY_ROTATION_180;
+        return GDMA_ROTATE_DEGREE_180;
     case 270:
-        return LV_DISPLAY_ROTATION_90;
+        return GDMA_ROTATE_DEGREE_270;
     default:
-        return LV_DISPLAY_ROTATION_0;
+        return GDMA_ROTATE_DEGREE_0;
     }
 }
 
@@ -348,7 +348,7 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    if (kd_display_init(connector_type) != 0) {
+    if (kd_display_init(connector_type, 0, 0, parse_rotation(rotation_angle)) != 0) {
         printf("failed to init connector\n");
         vb_deinit();
         return -1;
@@ -365,7 +365,6 @@ int main(int argc, char* argv[])
     }
 
     g_display = disp;
-    lv_display_set_rotation(disp, parse_rotation(rotation_angle));
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB888);
 
     g_pointer_indev = lv_k230_hid_pointer_init_auto();
