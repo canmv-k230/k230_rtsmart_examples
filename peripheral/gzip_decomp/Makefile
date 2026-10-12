@@ -6,6 +6,14 @@ include $(SDK_RTSMART_SRC_DIR)/libs/mk/toolchain_riscv64_musl.mk
 DIR := $(shell basename `pwd`)
 BUILD := $(SDK_RTSMART_BUILD_DIR)/examples/peripheral/$(DIR)
 BIN := $(RTT_PERIPHERAL_EXAMPLES_ELF_INSTALL_PATH)/$(DIR).elf
+FIXTURE_BUILD := $(BUILD)/fixtures
+FIXTURE_INSTALL := $(RTT_PERIPHERAL_EXAMPLES_ELF_INSTALL_PATH)/$(DIR)_data
+K230_GZIP := $(SDK_SRC_ROOT_DIR)/tools/image_tools/k230_priv_gzip.py
+FIXTURE_GZ := \
+	$(FIXTURE_BUILD)/empty.k230.gz \
+	$(FIXTURE_BUILD)/small.k230.gz \
+	$(FIXTURE_BUILD)/multi.k230.gz \
+	$(FIXTURE_BUILD)/max.k230.gz
 
 # Source files handling
 C_SRCS    := $(wildcard *.c)
@@ -38,10 +46,28 @@ LDFLAGS := -T $(SDK_RTSMART_SRC_DIR)/libs/mk/link.lds --static -Wl,--gc-sections
 LDFLAGS += $(LIB_LDFLAGS)
 
 # Phony targets
-.PHONY: all clean distclean .FORCE
+.PHONY: all clean distclean fixtures .FORCE
 
-all: $(BIN)
+all: $(BIN) fixtures
 	@$(ECHO) [BUILD] examples peripheral $(DIR) done.
+
+fixtures: $(FIXTURE_GZ) | $(FIXTURE_INSTALL)
+	$(Q)cp $(FIXTURE_GZ) $(FIXTURE_INSTALL)/
+
+$(FIXTURE_BUILD)/empty.bin: | $(FIXTURE_BUILD)
+	$(Q)truncate -s 0 $@
+
+$(FIXTURE_BUILD)/small.bin: | $(FIXTURE_BUILD)
+	$(Q)printf 'K230 gzip decompression small fixture\n' > $@
+
+$(FIXTURE_BUILD)/multi.bin: | $(FIXTURE_BUILD)
+	$(Q)truncate -s 393339 $@
+
+$(FIXTURE_BUILD)/max.bin: | $(FIXTURE_BUILD)
+	$(Q)truncate -s 16777216 $@
+
+$(FIXTURE_BUILD)/%.k230.gz: $(FIXTURE_BUILD)/%.bin
+	$(Q)python3 $(K230_GZIP) compress $< -o $@ -k -f -l 9
 
 .FORCE:
 
@@ -62,11 +88,12 @@ $(BUILD)/%.o: %.cpp | $(OBJ_DIRS)
 	$(Q)$(CXX) $(CXX_FLAGS) -MD -MP -MF $(@:.o=.d) -c $< -o $@
 
 # Actual directory creation rule
-$(OBJ_DIRS):
+$(OBJ_DIRS) $(FIXTURE_BUILD) $(FIXTURE_INSTALL):
 	$(Q)mkdir -p $@
 
 clean:
 	@rm -rf $(BIN)
+	@rm -rf $(FIXTURE_INSTALL)
 
 distclean: clean
 	@rm -rf $(BUILD)

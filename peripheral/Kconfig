@@ -15,6 +15,20 @@ if RTSMART_ENABLE_PERIPHERAL_EXAMPLES
         bool "Enable Build adc"
         default y
 
+    config RTSMART_PERIPHERAL_ENABLE_ACCEL_TEST
+        bool "Enable Build accelerator lifecycle regression test"
+        default y
+        help
+            Build GNNE and AI2D invalid request, poll interruption,
+            resource exhaustion, and repeated open/close coverage.
+
+    config RTSMART_PERIPHERAL_ENABLE_BUS_TEST
+        bool "Enable Build I2C/SPI regression test"
+        default y
+        help
+            Build the non-destructive I2C/SPI API, timeout recovery, and
+            repeated open/close regression test.
+
     config RTSMART_PERIPHERAL_ENABLE_FFT
         bool "Enable Build fft"
         default y
@@ -58,6 +72,12 @@ if RTSMART_ENABLE_PERIPHERAL_EXAMPLES
     config RTSMART_PERIPHERAL_ENABLE_OTA
         bool "Enable Build ota"
         default y
+
+    config RTSMART_PERIPHERAL_ENABLE_PM
+        bool "Enable Build pm"
+        default y
+        help
+            K230 power-management /dev/pm command-line sample.
 
     config RTSMART_PERIPHERAL_ENABLE_PMU
         bool "Enable Build pmu"

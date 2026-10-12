@@ -2,6 +2,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <memory>
 #include <vector>
 #include <tuple>
 #include <csignal>
@@ -17,20 +18,28 @@ using namespace std;
 std::atomic<bool> sensor0_stop(false);
 std::atomic<bool> sensor1_stop(false);
 std::atomic<bool> sensor2_stop(false);
+static volatile sig_atomic_t exit_requested = 0;
 
 // ai2d和kpu均为独占设备，添加互斥锁
 std::mutex mut;
+
+static void handle_signal(int sig)
+{
+    (void)sig;
+    exit_requested = 1;
+}
 
 // ================= 使用说明 =================
 void print_usage(const char *name)
 {
     cout << "Usage: " << name
-         << " <yolov8_kmodel_det> <yolov8_conf_thres> <yolov8_nms_thres> <debug_mode>\n"
+         << " <yolov8_kmodel_det> <yolov8_conf_thres> <yolov8_nms_thres> <debug_mode> [run_seconds]\n"
          << "Options:\n"
          << "  yolov8_kmodel_det        80分类目标检测kmodel 路径\n"
          << "  yolov8_conf_thres        80分类目标检测目标阈值\n"
          << "  yolov8_nms_thres         80分类目标检测NMS 阈值\n"
          << "  debug_mode               0/1/2：不调试 / 简单 / 详细\n"
+         << "  run_seconds              可选，运行指定秒数后正常退出\n"
          << endl;
 }
 
@@ -45,8 +54,13 @@ void yolov8_det_video_proc(PipeLine &pl,char **argv,int isp_id,int osd_id)
     DumpRes dump_res;
     dims_t in_shape = {1,AI_FRAME_CHANNEL,AI_FRAME_HEIGHT,AI_FRAME_WIDTH};
 
-    OBDet od(argv[1], atof(argv[2]), atof(argv[3]), image_size, debug_mode);
+    std::unique_ptr<OBDet> od;
+    {
+        std::lock_guard<std::mutex> lock(mut);
+        od = std::make_unique<OBDet>(argv[1], atof(argv[2]), atof(argv[3]), image_size, debug_mode);
+    }
     vector<YOLOBbox> results;
+    unsigned int frame_count = 0;
 
     int ret=0;
     while (!sensor0_stop.load())
@@ -61,18 +75,21 @@ void yolov8_det_video_proc(PipeLine &pl,char **argv,int isp_id,int osd_id)
         hrt::sync(input_tensor,sync_op_t::sync_write_back,true).expect("sync write_back failed");
         results.clear();
         {
-            mut.lock();
-            od.pre_process(input_tensor);
-            od.inference();
-            mut.unlock();
+            std::lock_guard<std::mutex> lock(mut);
+            od->pre_process(input_tensor);
+            od->inference();
         }
-        od.post_process(results);
+        od->post_process(results);
         draw_frame.setTo(cv::Scalar(0, 0, 0, 0));
-        od.draw_result(draw_frame,results);
+        od->draw_result(draw_frame,results);
         cv::putText(draw_frame, "CAM-"+std::to_string(isp_id)+" YOLOv8 Detect", {30,30}, cv::FONT_HERSHEY_COMPLEX, 1, cv::Scalar(255, 0 , 255, 255), 2, 8, 0);
         pl.InsertFrame(draw_frame.data, osd_id);
         pl.ReleaseFrame(dump_res, isp_id);
-        printf("[ISP %d] yolov8_det_video_proc_0 running normally, get %d objects\n", isp_id, results.size());
+        ++frame_count;
+        if ((frame_count % 300) == 0) {
+            printf("[ISP %d] processed %u frames, latest objects: %zu\n",
+                   isp_id, frame_count, results.size());
+        }
     }
     printf("[ISP %d] thread exit\n", isp_id);
     return;
@@ -84,13 +101,24 @@ int main(int argc, char *argv[])
     cout << "case " << argv[0]
          << " built at " << __DATE__ << " " << __TIME__ << endl;
 
-    if (argc != 5)
+    if (argc != 5 && argc != 6)
     {
         print_usage(argv[0]);
         return -1;
     }
 
     int debug_mode = atoi(argv[4]);
+    int run_seconds = 0;
+    if (argc == 6) {
+        run_seconds = atoi(argv[5]);
+        if (run_seconds <= 0) {
+            cout << "run_seconds must be greater than zero" << endl;
+            return -1;
+        }
+    }
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     // 1. 创建视频管线（内部分别 probe CSI0/1/2，任一路失败则退出）
     PipeLine pl(debug_mode);
@@ -106,18 +134,23 @@ int main(int argc, char *argv[])
 
     std::thread t2(yolov8_det_video_proc, std::ref(pl),argv, 2,6);
 
-    // 主线程等待退出指令
-    while (getchar() != 'q')
-    {
-        usleep(10000);
+    // 主线程等待退出指令或可选运行时限
+    if (run_seconds > 0) {
+        for (int elapsed = 0; elapsed < run_seconds && !exit_requested; ++elapsed) {
+            sleep(1);
+        }
+    } else {
+        while (!exit_requested && getchar() != 'q') {
+            usleep(10000);
+        }
     }
 
     // 通知线程退出
     sensor0_stop.store(true);
-    t0.join();
     sensor1_stop.store(true);
-    t1.join();
     sensor2_stop.store(true);
+    t0.join();
+    t1.join();
     t2.join();
     // 3. 销毁管线
     pl.Destroy();

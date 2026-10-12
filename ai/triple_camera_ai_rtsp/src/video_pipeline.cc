@@ -155,30 +155,23 @@ int PipeLine::Create()
     }
 
     // 打开 connector 设备
-    k_s32 connector_fd = kd_mpi_connector_open(connector_info.connector_name);
-    if (connector_fd < 0) {
+    connector_fd_ = kd_mpi_connector_open(connector_info.connector_name);
+    if (connector_fd_ < 0) {
         printf("%s, connector open failed.\n", __func__);
         return K_ERR_VO_NOTREADY;
     }
 
     // 初始化 connector（配置时序、分辨率等）
-    ret = kd_mpi_connector_init(connector_fd, connector_info);
+    ret = kd_mpi_connector_init(connector_fd_, connector_info);
     if (ret) {
         printf("ERROR: kd_mpi_connector_init failed, ret=%d\n", ret);
         return ret;
     }
 
     // 打开电源
-    ret = kd_mpi_connector_power_set(connector_fd, K_TRUE);
+    ret = kd_mpi_connector_power_set(connector_fd_, K_TRUE);
     if (ret) {
         printf("ERROR: kd_mpi_connector_power_set failed, ret=%d\n", ret);
-        return ret;
-    }
-
-    // 关闭设备句柄（配置完成即可关闭）
-    ret = kd_mpi_connector_close(connector_fd);
-    if (ret) {
-        printf("ERROR: kd_mpi_connector_close failed, ret=%d\n", ret);
         return ret;
     }
 
@@ -879,9 +872,21 @@ int PipeLine::Create()
 
     if (ENABLE_RTSP_SERVER)
     {
-        rtsp_server_.init(VENC_FRAME_WIDTH,VENC_FRAME_HEIGHT,2000,"test0",8554);
-        rtsp_server_.start();
-        rtsp_server_.bind_vi_chn(vicap_dev_2, vicap_chn_to_venc_2);
+        ret = rtsp_server_.init(VENC_FRAME_WIDTH,VENC_FRAME_HEIGHT,2000,"test0",8554);
+        if (ret) {
+            printf("rtsp server init failed, ret=%d\n", ret);
+            return ret;
+        }
+        ret = rtsp_server_.start();
+        if (ret) {
+            printf("rtsp server start failed, ret=%d\n", ret);
+            return ret;
+        }
+        ret = rtsp_server_.bind_vi_chn(vicap_dev_2, vicap_chn_to_venc_2);
+        if (ret) {
+            printf("bind VICAP dev2 to VENC failed, ret=%d\n", ret);
+            return ret;
+        }
     }
 
     return ret;
@@ -1261,7 +1266,7 @@ int PipeLine::Destroy()
                 printf("vicap dev2 kd_mpi_vb_destory_pool failed.\n");
                 return ret;
             }
-            osd_pool_id_1 = VB_INVALID_POOLID;
+            osd_pool_id_2 = VB_INVALID_POOLID;
         }
     }
 
@@ -1271,6 +1276,25 @@ int PipeLine::Destroy()
     {
         rtsp_server_.stop();
         rtsp_server_.deinit();
+    }
+
+    if (connector_fd_ >= 0) {
+        ret = kd_mpi_connector_power_set(connector_fd_, K_FALSE);
+        if (ret) {
+            printf("kd_mpi_connector_power_set off failed, ret=%d\n", ret);
+        }
+
+        k_s32 close_ret = kd_mpi_connector_close(connector_fd_);
+        connector_fd_ = -1;
+        if (close_ret) {
+            printf("kd_mpi_connector_close failed, ret=%d\n", close_ret);
+            if (!ret) {
+                ret = close_ret;
+            }
+        }
+        if (ret) {
+            return ret;
+        }
     }
 
     // ------------------ 反初始化 VB ------------------

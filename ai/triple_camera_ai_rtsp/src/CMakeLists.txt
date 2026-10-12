@@ -16,7 +16,7 @@ link_directories(${nncase_sdk_root}/riscv64/rvvlib/)
 link_directories(${k230_sdk_build}/rtsmart/mpp/middleware/lib)
 
 add_executable(${bin} ${src})
-target_link_libraries(${bin} -Wl,--start-group rvv Nncase.Runtime.Native nncase.rt_modules.k230 functional_k230 sys vicap vb isp vo venc connector sensor atomic gsdma rtsp_server liveMedia groupsock BasicUsageEnvironment UsageEnvironment -Wl,--end-group)
+target_link_libraries(${bin} -Wl,--start-group rvv Nncase.Runtime.Native nncase.rt_modules.k230 functional_k230 sys vicap vb isp vo venc codec_common connector sensor atomic gsdma rtsp_server liveMedia groupsock BasicUsageEnvironment UsageEnvironment -Wl,--end-group)
 
 target_link_libraries(${bin} -Wl,--start-group opencv_imgcodecs opencv_imgproc opencv_core zlib libjpeg-turbo libopenjp2 libpng libtiff libwebp csi_cv -Wl,--end-group)
 install(TARGETS ${bin} DESTINATION bin)

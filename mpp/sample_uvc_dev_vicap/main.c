@@ -24,8 +24,6 @@
 #define ISP_WIDTH  (1920)
 #define ISP_HEIGHT (1080)
 
-#define VENC_CH_ID_0 (0)
-
 #define VENC_WIDTH  (1920)
 #define VENC_HEIGHT (1080)
 
@@ -34,8 +32,15 @@ static volatile bool g_app_run = true;
 
 static k_vicap_dev vicap_dev_id = VICAP_DEV_ID_2;
 static k_vicap_mipi_lane_pref g_lane_pref = VICAP_MIPI_LANE_PREF_ANY;
+static k_u32 g_jpeg_quality = 45;
 
 static k_s32 venc_pool_id = VB_INVALID_POOLID;
+static k_u32 venc_chn_id = (k_u32)-1;
+static bool venc_fd_acquired;
+static bool venc_chn_requested;
+static bool venc_pool_attached;
+static bool venc_chn_created;
+static bool venc_chn_started;
 
 // ============================================================================
 // Utility Functions
@@ -167,31 +172,88 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn)
     return ret;
 }
 
+static k_s32 sample_venc_deinit(void)
+{
+    k_s32 ret;
+
+    if (venc_chn_started) {
+        ret = kd_mpi_venc_stop_chn(venc_chn_id);
+        if (ret != K_SUCCESS)
+            return ret;
+        venc_chn_started = false;
+    }
+    if (venc_pool_attached) {
+        ret = kd_mpi_venc_detach_vb_pool(venc_chn_id);
+        if (ret != K_SUCCESS)
+            return ret;
+        venc_pool_attached = false;
+    }
+    if (venc_chn_created) {
+        ret = kd_mpi_venc_destroy_chn(venc_chn_id);
+        if (ret != K_SUCCESS)
+            return ret;
+        venc_chn_created = false;
+    }
+    if (venc_pool_id != (k_s32)VB_INVALID_POOLID) {
+        ret = kd_mpi_vb_destory_pool(venc_pool_id);
+        if (ret != K_SUCCESS)
+            return ret;
+        venc_pool_id = VB_INVALID_POOLID;
+    }
+    if (venc_chn_requested) {
+        ret = kd_mpi_venc_release_chn(venc_chn_id);
+        if (ret != K_SUCCESS)
+            return ret;
+        venc_chn_requested = false;
+        venc_chn_id = (k_u32)-1;
+    }
+    if (venc_fd_acquired) {
+        ret = kd_mpi_venc_release_fd();
+        venc_fd_acquired = false;
+        if (ret != K_SUCCESS)
+            return ret;
+    }
+
+    return K_SUCCESS;
+}
+
 /**
  * @brief Initializes the Video Encoder (VENC) module for JPEG encoding.
  */
 static k_s32 sample_venc_init(void)
 {
     k_s32 poolid;
+    k_s32 ret;
 
     k_venc_chn_attr attr;
     memset(&attr, 0, sizeof(attr));
 
     venc_pool_id = VB_INVALID_POOLID;
 
+    ret = kd_mpi_venc_acquire_fd();
+    if (ret != K_SUCCESS)
+        return ret;
+    venc_fd_acquired = true;
+
+    ret = kd_mpi_venc_request_chn(&venc_chn_id);
+    if (ret != K_SUCCESS)
+        goto fail;
+    venc_chn_requested = true;
+
     poolid = kd_mpi_vb_create_pool_ex(VB_ALIGN_UP(VENC_WIDTH * VENC_HEIGHT, 4096), 4, VB_REMAP_MODE_NOCACHE);
     if (VB_INVALID_POOLID == poolid) {
         printf("ERROR: create pool failed\n");
-        return -1;
-    }
-
-    if (K_SUCCESS != kd_mpi_venc_attach_vb_pool(VENC_CH_ID_0, poolid)) {
-        printf("ERROR: attach venc pool failed\n");
-
-        kd_mpi_vb_destory_pool(poolid);
-        return -2;
+        ret = -1;
+        goto fail;
     }
     venc_pool_id = poolid;
+
+    if (K_SUCCESS != kd_mpi_venc_attach_vb_pool(venc_chn_id, poolid)) {
+        printf("ERROR: attach venc pool failed\n");
+        ret = -2;
+        goto fail;
+    }
+    venc_pool_attached = true;
 
     attr.venc_attr.type                     = K_PT_JPEG;
     attr.venc_attr.pic_width                = VENC_WIDTH;
@@ -199,18 +261,30 @@ static k_s32 sample_venc_init(void)
     attr.rc_attr.rc_mode                    = K_VENC_RC_MODE_MJPEG_FIXQP;
     attr.rc_attr.mjpeg_fixqp.src_frame_rate = 30;
     attr.rc_attr.mjpeg_fixqp.dst_frame_rate = 30;
-    attr.rc_attr.mjpeg_fixqp.q_factor       = 90; // High quality
+    attr.rc_attr.mjpeg_fixqp.q_factor       = g_jpeg_quality;
 
-    k_s32 ret = kd_mpi_venc_create_chn(VENC_CH_ID_0, &attr);
+    ret = kd_mpi_venc_create_chn(venc_chn_id, &attr);
     if (ret) {
         printf("ERROR: kd_mpi_venc_create_chn failed, ret=%d\n", ret);
-        return ret;
+        goto fail;
     }
+    venc_chn_created = true;
 
-    ret = kd_mpi_venc_start_chn(VENC_CH_ID_0);
+    ret = kd_mpi_venc_start_chn(venc_chn_id);
     if (ret) {
         printf("ERROR: kd_mpi_venc_start_chn failed, ret=%d\n", ret);
-        kd_mpi_venc_destroy_chn(VENC_CH_ID_0);
+        goto fail;
+    }
+    venc_chn_started = true;
+    return K_SUCCESS;
+
+fail:
+    {
+        k_s32 cleanup_ret = sample_venc_deinit();
+
+        if (cleanup_ret != K_SUCCESS)
+            printf("ERROR: VENC cleanup failed, ret=%d; resources retained\n",
+                   cleanup_ret);
     }
     return ret;
 }
@@ -269,7 +343,10 @@ static void sample_video_loop(void)
     uint32_t*          uvc_buffer   = NULL;
     uint32_t           uvc_max_size = 0;
     int                uvc_opened   = 0;
-    unsigned long long frame_count  = 0;
+    unsigned long long frame_count   = 0;
+    unsigned long long changed_count = 0;
+    unsigned long long total_bytes   = 0;
+    uint32_t           previous_hash  = 0;
 
     printf("Starting video pipeline loop...\n");
 
@@ -284,7 +361,7 @@ static void sample_video_loop(void)
         }
 
         // 2. Send the captured frame to VENC for encoding
-        ret = kd_mpi_venc_send_frame(VENC_CH_ID_0, &vicap_frame, 1000);
+        ret = kd_mpi_venc_send_frame(venc_chn_id, &vicap_frame, 1000);
         // We must release the VICAP frame regardless of whether the send succeeded
         kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, VICAP_CHN_ID_0, &vicap_frame);
         if (ret != K_SUCCESS) {
@@ -292,7 +369,7 @@ static void sample_video_loop(void)
             continue;
         }
 
-        ret = kd_mpi_venc_query_status(VENC_CH_ID_0, &venc_status);
+        ret = kd_mpi_venc_query_status(venc_chn_id, &venc_status);
         if (ret != K_SUCCESS) {
             printf("ERROR: kd_mpi_venc_query_status failed, ret=%d\n", ret);
             continue;
@@ -306,7 +383,7 @@ static void sample_video_loop(void)
             printf("ERROR: Failed to allocate memory for VENC packs\n");
             continue;
         }
-        ret = kd_mpi_venc_get_stream(VENC_CH_ID_0, &venc_stream, 1000);
+        ret = kd_mpi_venc_get_stream(venc_chn_id, &venc_stream, 1000);
         if (ret != K_SUCCESS) {
             printf("WARN: Failed to get stream from VENC, ret=%d\n", ret);
             free(venc_stream.pack);
@@ -316,7 +393,7 @@ static void sample_video_loop(void)
         // 4. Check if UVC is ready and get a buffer to write to
         if (uvc_device_get_state(&uvc_opened) != 0 || !uvc_opened) {
             // UVC host is not connected or ready, drop this frame
-            kd_mpi_venc_release_stream(VENC_CH_ID_0, &venc_stream);
+            kd_mpi_venc_release_stream(venc_chn_id, &venc_stream);
             free(venc_stream.pack);
             usleep(10000); // Wait a bit before trying again
             continue;
@@ -325,16 +402,18 @@ static void sample_video_loop(void)
         ret = uvc_device_get_buf(&uvc_buffer, &uvc_max_size);
         if (ret != 0 || uvc_buffer == NULL) {
             // UVC buffers might be full, drop this frame
-            kd_mpi_venc_release_stream(VENC_CH_ID_0, &venc_stream);
+            kd_mpi_venc_release_stream(venc_chn_id, &venc_stream);
             free(venc_stream.pack);
             continue;
         }
 
         // 5. Copy encoded JPEG data to the UVC buffer
         uint32_t total_len = 0;
+        bool     valid_jpeg = true;
         for (int i = 0; i < venc_stream.pack_cnt; i++) {
             if ((total_len + venc_stream.pack[i].len) > uvc_max_size) {
-                printf("WARN: Encoded data too large for UVC buffer. Truncating.\n");
+                printf("WARN: Encoded data too large for UVC buffer; dropping frame.\n");
+                valid_jpeg = false;
                 break;
             }
             k_u8* src_data = (k_u8*)kd_mpi_sys_mmap(venc_stream.pack[i].phys_addr, venc_stream.pack[i].len);
@@ -342,22 +421,45 @@ static void sample_video_loop(void)
                 memcpy((k_u8*)uvc_buffer + total_len, src_data, venc_stream.pack[i].len);
                 total_len += venc_stream.pack[i].len;
                 kd_mpi_sys_munmap(src_data, venc_stream.pack[i].len);
+            } else {
+                printf("WARN: Failed to map VENC pack; dropping frame.\n");
+                valid_jpeg = false;
+                break;
             }
         }
 
         // 6. Release the VENC stream buffer
-        kd_mpi_venc_release_stream(VENC_CH_ID_0, &venc_stream);
+        kd_mpi_venc_release_stream(venc_chn_id, &venc_stream);
         free(venc_stream.pack);
+
+        if (!valid_jpeg || total_len < 4 || ((k_u8*)uvc_buffer)[0] != 0xff || ((k_u8*)uvc_buffer)[1] != 0xd8
+            || ((k_u8*)uvc_buffer)[total_len - 2] != 0xff || ((k_u8*)uvc_buffer)[total_len - 1] != 0xd9) {
+            printf("WARN: Invalid JPEG frame (%u bytes); dropping frame.\n", total_len);
+            uvc_device_put_buf(uvc_buffer, 0);
+            continue;
+        }
+
+        uint32_t frame_hash = 2166136261U;
+        for (uint32_t i = 0; i < total_len; i++) {
+            frame_hash ^= ((k_u8*)uvc_buffer)[i];
+            frame_hash *= 16777619U;
+        }
 
         // 7. Send the filled buffer to the UVC host
         ret = uvc_device_put_buf(uvc_buffer, total_len);
         if (ret != 0) {
-            printf("ERROR: uvc_device_put_buf failed\n");
+            printf("ERROR: uvc_device_put_buf failed, ret=%d\n", ret);
+            continue;
         }
 
+        if (frame_count > 0 && frame_hash != previous_hash)
+            changed_count++;
+        previous_hash = frame_hash;
         frame_count++;
+        total_bytes += total_len;
         if (frame_count % 100 == 0) {
-            printf("Sent %llu frames via UVC\n", frame_count);
+            printf("Queued %llu UVC frames: latest=%u bytes, average=%llu bytes, changed=%llu/%llu, hash=%08x\n",
+                   frame_count, total_len, total_bytes / frame_count, changed_count, frame_count - 1, frame_hash);
         }
     }
 
@@ -370,6 +472,7 @@ static void print_usage(const char* program_name)
     printf("Options:\n");
     printf("  -c, --csi <num>    CSI device number (0-2, default: 2)\n");
     printf("  -L, --lane <2|4>   MIPI lane preference (default: ANY)\n");
+    printf("  -q <1-99>          JPEG quality (default: 45)\n");
     printf("  -h, --help         Show this help message\n");
 }
 
@@ -379,7 +482,7 @@ static int parse_arguments(int argc, char** argv)
     int csi_num = 0;
 
     // Use simpler getopt instead of getopt_long for better compatibility
-    while ((opt = getopt(argc, argv, "c:L:h")) != -1) {
+    while ((opt = getopt(argc, argv, "c:L:q:h")) != -1) {
         switch (opt) {
         case 'c':
             csi_num = atoi(optarg);
@@ -400,6 +503,15 @@ static int parse_arguments(int argc, char** argv)
                 printf("ERROR: -L must be 2 or 4\n");
                 return -1;
             }
+            break;
+        }
+        case 'q': {
+            int quality = atoi(optarg);
+            if (quality < 1 || quality > 99) {
+                printf("ERROR: JPEG quality must be between 1 and 99\n");
+                return -1;
+            }
+            g_jpeg_quality = (k_u32)quality;
             break;
         }
         case 'h':
@@ -430,8 +542,11 @@ int main(int argc, char** argv)
         goto cleanup_none;
     if (sample_vicap_init(vicap_dev_id) != K_SUCCESS)
         goto cleanup_vb;
-    if (sample_venc_init() != K_SUCCESS)
+    if (sample_venc_init() != K_SUCCESS) {
+        if (venc_fd_acquired)
+            goto cleanup_venc;
         goto cleanup_vicap;
+    }
     if (sample_uvc_init() != K_SUCCESS)
         goto cleanup_venc;
 
@@ -454,10 +569,8 @@ cleanup_uvc:
     uvc_device_deinit();
 cleanup_venc:
     printf("Deinitializing VENC...\n");
-    kd_mpi_venc_stop_chn(VENC_CH_ID_0);
-    kd_mpi_venc_destroy_chn(VENC_CH_ID_0);
-    kd_mpi_venc_detach_vb_pool(VENC_CH_ID_0);
-    kd_mpi_vb_destory_pool(venc_pool_id);
+    if (sample_venc_deinit() != K_SUCCESS)
+        printf("ERROR: VENC cleanup failed; resources retained\n");
 cleanup_vicap:
     printf("Deinitializing VICAP...\n");
     kd_mpi_vicap_deinit(VICAP_DEV_ID_0);

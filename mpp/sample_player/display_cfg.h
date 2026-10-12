@@ -37,7 +37,7 @@ extern "C" {
 
 k_s32 vo_init();
 k_s32 vo_deinit();
-void display_layer_init(k_u32 width,k_u32 height);
+k_s32 display_layer_init(k_u32 width,k_u32 height);
 void display_set_connector_type(k_connector_type type);
 void display_layer_deinit();
 

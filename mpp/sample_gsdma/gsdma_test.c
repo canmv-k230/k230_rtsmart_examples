@@ -23,6 +23,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -1460,8 +1461,27 @@ static k_s32 sdma_run_memset_test_case(sdma_memset_test_case_t *test_case, k_u32
     uint64_t end_us = utils_cpu_ticks_us();
     double xfer_ms = (end_us >= start_us) ? (end_us - start_us) / 1000.0 : 0.0;
 
-    /* Verify result */
-    if (ret == K_SUCCESS) {
+    k_bool expect_failure = K_FALSE;
+    k_u32 required_alignment = 1;
+
+    if (test_case->data_size == SDMA_DATA_SIZE_2_BYTE)
+        required_alignment = 2;
+    else if (test_case->data_size == SDMA_DATA_SIZE_4_BYTE)
+        required_alignment = 4;
+    expect_failure = (test_case->size % required_alignment) != 0;
+
+    /* Treat invalid-width requests as expected validation tests. */
+    if (expect_failure) {
+        if (ret == K_ERR_DMA_ILLEGAL_PARAM) {
+            printf("PASSED (correctly rejected unaligned size, ret=%d, xfer=%.2f ms)\n", ret, xfer_ms);
+            g_test_stats.passed_tests++;
+            ret = K_SUCCESS;
+        } else {
+            printf("FAILED (should reject unaligned size, xfer=%.2f ms)\n", xfer_ms);
+            g_test_stats.failed_tests++;
+            ret = K_FAILED;
+        }
+    } else if (ret == K_SUCCESS) {
         uint64_t verify_start_us = utils_cpu_ticks_us();
         k_bool verify_ok = sdma_verify_memset(aligned_virt, test_case->size, test_case->data,
                                              test_case->data_size);
@@ -1488,7 +1508,149 @@ static k_s32 sdma_run_memset_test_case(sdma_memset_test_case_t *test_case, k_u32
     return ret;
 }
 
-int main(void)
+static void record_expected_result(const char *name, k_s32 actual, k_s32 expected)
+{
+    g_test_stats.total_tests++;
+    printf("Running negative test: %-42s ... ", name);
+    if (actual == expected) {
+        printf("PASSED (ret=%d)\n", actual);
+        g_test_stats.passed_tests++;
+    } else {
+        printf("FAILED (expected=%d, ret=%d)\n", expected, actual);
+        g_test_stats.failed_tests++;
+    }
+}
+
+static void run_negative_and_timeout_tests(k_u32 pool_id)
+{
+    const k_u32 buffer_size = 32768;
+    k_vb_blk_handle src_handle = VB_INVALID_HANDLE;
+    k_vb_blk_handle dst_handle = VB_INVALID_HANDLE;
+    k_u8 *src = NULL;
+    k_u8 *dst = NULL;
+    k_u64 src_phys;
+    k_u64 dst_phys;
+    k_s32 ret;
+
+    printf("Starting invalid descriptor and timeout/retry tests...\n");
+    printf("========================================\n");
+
+    record_expected_result("NULL SDMA transfer descriptor",
+                           kd_mpi_gsdma_mem_transfer(NULL), K_ERR_DMA_NULL_PTR);
+    record_expected_result("NULL SDMA memcpy descriptor",
+                           kd_mpi_gsdma_sdma_memcpy(NULL), K_ERR_DMA_NULL_PTR);
+    record_expected_result("NULL SDMA memset descriptor",
+                           kd_mpi_gsdma_sdma_memset(NULL), K_ERR_DMA_NULL_PTR);
+
+    src_handle = kd_mpi_vb_get_block(pool_id, buffer_size, NULL);
+    dst_handle = kd_mpi_vb_get_block(pool_id, buffer_size, NULL);
+    if (src_handle == VB_INVALID_HANDLE || dst_handle == VB_INVALID_HANDLE) {
+        record_expected_result("negative-test buffer allocation", K_FAILED, K_SUCCESS);
+        goto cleanup;
+    }
+
+    src_phys = kd_mpi_vb_handle_to_phyaddr(src_handle);
+    dst_phys = kd_mpi_vb_handle_to_phyaddr(dst_handle);
+    src = (k_u8 *)kd_mpi_sys_mmap(src_phys, buffer_size);
+    dst = (k_u8 *)kd_mpi_sys_mmap(dst_phys, buffer_size);
+    if (!src || !dst) {
+        record_expected_result("negative-test buffer mapping", K_FAILED, K_SUCCESS);
+        goto cleanup;
+    }
+    sdma_init_pattern_1d(src, buffer_size);
+    memset(dst, 0, buffer_size);
+
+    k_sdma_transfer_cfg_t transfer_cfg;
+    memset(&transfer_cfg, 0, sizeof(transfer_cfg));
+    transfer_cfg.src_addr = (void *)(intptr_t)src_phys;
+    transfer_cfg.dst_addr = (void *)(intptr_t)dst_phys;
+    transfer_cfg.dimension = 0xff;
+    transfer_cfg.line_size = buffer_size;
+    transfer_cfg.line_num = 1;
+    transfer_cfg.timeout_ms = SDMA_TEST_TIMEOUT_MS;
+    record_expected_result("invalid SDMA dimension",
+                           kd_mpi_gsdma_mem_transfer(&transfer_cfg), K_FAILED);
+
+    k_gdma_chn_cfg_t gdma_cfg;
+    k_video_frame_info src_frame;
+    k_video_frame_info dst_frame;
+    memset(&gdma_cfg, 0, sizeof(gdma_cfg));
+    memset(&src_frame, 0, sizeof(src_frame));
+    memset(&dst_frame, 0, sizeof(dst_frame));
+    gdma_setup_frame_info(&src_frame, PIXEL_FORMAT_YUV_400, src_phys,
+                          (k_u64)(intptr_t)src, 64, 64);
+    record_expected_result("invalid GDMA destination handle",
+                           kd_mpi_gsdma_send_frame(&gdma_cfg, &src_frame, &dst_frame,
+                                                  VB_INVALID_HANDLE, GDMA_TEST_TIMEOUT_MS),
+                           K_ERR_DMA_ILLEGAL_PARAM);
+
+    transfer_cfg.dimension = DIMENSION1;
+    transfer_cfg.timeout_ms = 0;
+    k_bool timeout_observed = K_FALSE;
+    for (k_u32 attempt = 0; attempt < 10 && !timeout_observed; attempt++) {
+        ret = kd_mpi_gsdma_mem_transfer(&transfer_cfg);
+        timeout_observed = ret != K_SUCCESS;
+        usleep(20000);
+    }
+    g_test_stats.total_tests++;
+    printf("Running negative test: %-42s ... ", "zero-timeout SDMA transfer");
+    if (timeout_observed) {
+        printf("PASSED (timeout observed)\n");
+        g_test_stats.passed_tests++;
+    } else {
+        printf("FAILED (operation always completed before timeout)\n");
+        g_test_stats.failed_tests++;
+    }
+
+    memset(dst, 0, buffer_size);
+    transfer_cfg.timeout_ms = SDMA_TEST_TIMEOUT_MS;
+    ret = kd_mpi_gsdma_mem_transfer(&transfer_cfg);
+    g_test_stats.total_tests++;
+    printf("Running negative test: %-42s ... ", "SDMA retry after timeout");
+    if (ret == K_SUCCESS && memcmp(src, dst, buffer_size) == 0) {
+        printf("PASSED (data verified)\n");
+        g_test_stats.passed_tests++;
+    } else {
+        printf("FAILED (ret=%d or data mismatch)\n", ret);
+        g_test_stats.failed_tests++;
+    }
+
+cleanup:
+    if (src)
+        kd_mpi_sys_munmap(src, buffer_size);
+    if (dst)
+        kd_mpi_sys_munmap(dst, buffer_size);
+    if (dst_handle != VB_INVALID_HANDLE)
+        kd_mpi_vb_release_block(dst_handle);
+    if (src_handle != VB_INVALID_HANDLE)
+        kd_mpi_vb_release_block(src_handle);
+    printf("========================================\n");
+    printf("Invalid descriptor and timeout/retry tests completed\n\n");
+}
+
+static int run_open_close_test(k_u32 count)
+{
+    k_gsdma_dev_attr_t attr;
+
+    for (k_u32 i = 0; i < count; i++) {
+        k_s32 ret = kd_mpi_gsdma_init();
+        if (ret != K_SUCCESS) {
+            printf("GSDMA open/close cycle %u init failed: %d\n", i + 1, ret);
+            return -1;
+        }
+        ret = kd_mpi_gsdma_get_dev_attr(&attr);
+        kd_mpi_gsdma_deinit();
+        if (ret != K_SUCCESS) {
+            printf("GSDMA open/close cycle %u query failed: %d\n", i + 1, ret);
+            return -1;
+        }
+    }
+
+    printf("GSDMA open/close cycles: %u/%u passed\n", count, count);
+    return 0;
+}
+
+int main(int argc, char **argv)
 {
     k_s32 ret;
     k_u32 i;
@@ -1496,6 +1658,21 @@ int main(void)
     k_vb_pool_config pool_config;
     k_u32 pool_id;
     k_gsdma_dev_attr_t dev_attr;
+
+    if (argc == 3 && strcmp(argv[1], "--open-close") == 0) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long count = strtoul(argv[2], &end, 10);
+        if (errno != 0 || end == argv[2] || *end != '\0' || count == 0 || count > UINT32_MAX) {
+            fprintf(stderr, "Invalid open/close count: %s\n", argv[2]);
+            return -1;
+        }
+        return run_open_close_test((k_u32)count);
+    }
+    if (argc != 1) {
+        fprintf(stderr, "Usage: %s [--open-close count]\n", argv[0]);
+        return -1;
+    }
 
     printf("========================================\n");
     printf("GSDMA Comprehensive Test Suite\n");
@@ -1572,6 +1749,8 @@ int main(void)
     }
 
     printf("GDMA initialized successfully\n\n");
+
+    run_negative_and_timeout_tests(pool_id);
 
     /* -------- GDMA 图像测试 -------- */
     printf("Starting GDMA test execution...\n");

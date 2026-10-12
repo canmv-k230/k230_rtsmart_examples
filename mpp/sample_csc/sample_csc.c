@@ -48,13 +48,12 @@
 #include "k_venc_comm.h"
 #include "mpi_vicap_api.h"
 #include "mpi_vo_api.h"
-#include "k_connector_comm.h"
-#include "mpi_connector_api.h"
+#include "kd_display.h"
 
 #define MAX_WIDTH 1920
 #define MAX_HEIGHT 1080
 #define VICAP_BUF_CNT 4
-#define NONAI_2D_BUF_CNT 10
+#define NONAI_2D_BUF_CNT 16
 #define VENC_BUF_CNT  6
 #define OSD_BUF_CNT   1
 #define ISP_CHN0_WIDTH  (1280)
@@ -65,6 +64,7 @@
 #define NONAI_2D_BIND_CH     0
 #define NONAI_2D_RGB888_CH   1
 #define NONAI_2D_RGB565_CH   2
+#define CSC_WARMUP_FRAMES    30
 
 typedef struct
 {
@@ -73,12 +73,12 @@ typedef struct
     k_vicap_sensor_type sensor_type;
     k_connector_type vo;
     pthread_t dump_tid;
-    pthread_t dump_tid_1;
     pthread_t output_tid;
     char out_filename[50];
     FILE *output_file;
     k_u64 osd_phys_addr;
     k_vb_blk_handle osd_blk_handle;
+    k_bool auto_dump;
 } nonai_2d_conf_t;
 
 static nonai_2d_conf_t g_nonai_2d_conf;
@@ -92,11 +92,192 @@ static k_u32 nonai_2d_attach_pool_id[3] = {0};
 static k_u32 osd_attach_pool_id = 0;
 static volatile k_bool g_output_stop = K_FALSE;
 static volatile k_bool g_dump_stop = K_FALSE;
+static k_bool g_display_initialized = K_FALSE;
+static volatile k_bool g_rgb888_ready = K_FALSE;
+static volatile k_bool g_rgb565_ready = K_FALSE;
 
 static inline void CHECK_RET(k_s32 ret, const char *func, const int line)
 {
     if (ret)
         printf("error ret %d, func %s line %d\n", ret, func, line);
+}
+
+static k_u64 sample_fnv1a64(const k_u8 *data, size_t size)
+{
+    k_u64 hash = 14695981039346656037ULL;
+
+    for (size_t i = 0; i < size; i++) {
+        hash ^= data[i];
+        hash *= 1099511628211ULL;
+    }
+
+    return hash;
+}
+
+static void sample_print_rgb888_stats(const k_u8 *data)
+{
+    const size_t pixels = g_nonai_2d_conf.width * g_nonai_2d_conf.height;
+    k_u64 sum[3] = {0};
+    k_u8 min[3] = {255, 255, 255};
+    k_u8 max[3] = {0};
+
+    for (size_t channel = 0; channel < 3; channel++) {
+        const k_u8 *plane = data + channel * pixels;
+
+        for (size_t i = 0; i < pixels; i++) {
+            k_u8 value = plane[i];
+            sum[channel] += value;
+            if (value < min[channel])
+                min[channel] = value;
+            if (value > max[channel])
+                max[channel] = value;
+        }
+    }
+
+    printf("RGB888_PLANAR fnv1a64=%016lx R=%u/%lu/%u G=%u/%lu/%u B=%u/%lu/%u\n",
+           (unsigned long)sample_fnv1a64(data, pixels * 3),
+           min[0], (unsigned long)(sum[0] / pixels), max[0],
+           min[1], (unsigned long)(sum[1] / pixels), max[1],
+           min[2], (unsigned long)(sum[2] / pixels), max[2]);
+}
+
+static void sample_print_rgb565_stats(const k_u8 *data)
+{
+    const size_t pixels = g_nonai_2d_conf.width * g_nonai_2d_conf.height;
+    k_u64 sum[3] = {0};
+    k_u8 min[3] = {255, 255, 255};
+    k_u8 max[3] = {0};
+
+    for (size_t i = 0; i < pixels; i++) {
+        k_u16 pixel = ((k_u16)data[i * 2 + 1] << 8) | data[i * 2];
+        k_u8 value[3] = {
+            (k_u8)(((pixel >> 11) & 0x1f) * 255 / 31),
+            (k_u8)(((pixel >> 5) & 0x3f) * 255 / 63),
+            (k_u8)((pixel & 0x1f) * 255 / 31),
+        };
+
+        for (size_t channel = 0; channel < 3; channel++) {
+            sum[channel] += value[channel];
+            if (value[channel] < min[channel])
+                min[channel] = value[channel];
+            if (value[channel] > max[channel])
+                max[channel] = value[channel];
+        }
+    }
+
+    printf("RGB565 fnv1a64=%016lx R=%u/%lu/%u G=%u/%lu/%u B=%u/%lu/%u\n",
+           (unsigned long)sample_fnv1a64(data, pixels * 2),
+           min[0], (unsigned long)(sum[0] / pixels), max[0],
+           min[1], (unsigned long)(sum[1] / pixels), max[1],
+           min[2], (unsigned long)(sum[2] / pixels), max[2]);
+}
+
+static k_s32 sample_compare_rgb_outputs(const k_u8 *rgb888, const k_u8 *rgb565)
+{
+    const size_t pixels = g_nonai_2d_conf.width * g_nonai_2d_conf.height;
+    static const k_u8 permutations[][3] = {
+        {0, 1, 2}, {0, 2, 1}, {1, 0, 2},
+        {1, 2, 0}, {2, 0, 1}, {2, 1, 0},
+    };
+    static const char *permutation_names[] = {
+        "RGB", "RBG", "GRB", "GBR", "BRG", "BGR",
+    };
+    k_u64 best_sum[3] = {0};
+    k_u8 best_max[3] = {0};
+    k_u64 best_total = ~(k_u64)0;
+    size_t best_permutation = 0;
+    k_bool best_little_endian = K_FALSE;
+    k_bool best_bgr_bits = K_FALSE;
+
+    for (size_t little_endian = 0; little_endian < 2; little_endian++) {
+        for (size_t bgr_bits = 0; bgr_bits < 2; bgr_bits++) {
+            for (size_t permutation = 0;
+                 permutation < sizeof(permutations) / sizeof(permutations[0]);
+                 permutation++) {
+                k_u64 error_sum[3] = {0};
+                k_u8 max_error[3] = {0};
+
+                for (size_t i = 0; i < pixels; i++) {
+                    k_u16 pixel = little_endian ?
+                        ((k_u16)rgb565[i * 2 + 1] << 8) | rgb565[i * 2] :
+                        ((k_u16)rgb565[i * 2] << 8) | rgb565[i * 2 + 1];
+                    k_u8 value[3] = {
+                        (k_u8)(((pixel >> 11) & 0x1f) * 255 / 31),
+                        (k_u8)(((pixel >> 5) & 0x3f) * 255 / 63),
+                        (k_u8)((pixel & 0x1f) * 255 / 31),
+                    };
+
+                    if (bgr_bits) {
+                        k_u8 swap = value[0];
+                        value[0] = value[2];
+                        value[2] = swap;
+                    }
+
+                    for (size_t channel = 0; channel < 3; channel++) {
+                        k_u8 reference = rgb888[
+                            permutations[permutation][channel] * pixels + i];
+                        k_u8 error = reference > value[channel] ?
+                            reference - value[channel] : value[channel] - reference;
+
+                        error_sum[channel] += error;
+                        if (error > max_error[channel])
+                            max_error[channel] = error;
+                    }
+                }
+
+                k_u64 total = error_sum[0] + error_sum[1] + error_sum[2];
+                if (total < best_total) {
+                    best_total = total;
+                    memcpy(best_sum, error_sum, sizeof(best_sum));
+                    memcpy(best_max, max_error, sizeof(best_max));
+                    best_permutation = permutation;
+                    best_little_endian = little_endian;
+                    best_bgr_bits = bgr_bits;
+                }
+            }
+        }
+    }
+
+    printf("RGB888/RGB565 cross-check pixels=%lu layout=%s-endian/%s-bits/planes-%s "
+           "MAE=%lu/%lu/%lu max=%u/%u/%u\n",
+           (unsigned long)pixels,
+           best_little_endian ? "little" : "big",
+           best_bgr_bits ? "BGR" : "RGB",
+           permutation_names[best_permutation],
+           (unsigned long)(best_sum[0] / pixels),
+           (unsigned long)(best_sum[1] / pixels),
+           (unsigned long)(best_sum[2] / pixels),
+           best_max[0], best_max[1], best_max[2]);
+
+    if (best_max[0] > 8 || best_max[1] > 4 || best_max[2] > 8) {
+        printf("ERROR: RGB output formats disagree on color or pixel geometry\n");
+        return K_FAILED;
+    }
+
+    printf("RGB output color and geometry cross-check passed\n");
+    return K_SUCCESS;
+}
+
+static k_s32 sample_write_file(const char *path, const k_u8 *data, size_t size)
+{
+    FILE *file = fopen(path, "wb");
+
+    if (!file) {
+        printf("ERROR: cannot open %s\n", path);
+        return K_FAILED;
+    }
+    if (fwrite(data, 1, size, file) != size) {
+        printf("ERROR: short write to %s\n", path);
+        fclose(file);
+        return K_FAILED;
+    }
+    if (fclose(file) != 0) {
+        printf("ERROR: cannot close %s\n", path);
+        return K_FAILED;
+    }
+
+    printf("wrote %s (%lu bytes)\n", path, (unsigned long)size);
+    return K_SUCCESS;
 }
 
 static void sample_vicap_config()
@@ -176,72 +357,66 @@ typedef struct {
 
 static k_s32 sample_vo_init_ex(sample_vo_info* vo_info)
 {
-    k_u32 ret = 0;
-    k_s32 connector_fd;
-    k_connector_type connector_type = vo_info->type;
-    k_connector_info connector_info;
+    k_s32 ret;
+    k_u32 display_width;
+    k_u32 display_height;
+    k_gdma_rotation_e rotate = vo_info->ratation_90 ? GDMA_ROTATE_DEGREE_90 : GDMA_ROTATE_DEGREE_0;
 
-    memset(&connector_info, 0, sizeof(k_connector_info));
+    ret = kd_display_init(vo_info->type, 0, 0, rotate);
+    if (ret != K_SUCCESS) {
+        printf("ERROR: kd_display_init failed, ret=%d\n", ret);
+        return ret;
+    }
+    g_display_initialized = K_TRUE;
 
-    //connector get sensor info
-    ret = kd_mpi_get_connector_info(connector_type, &connector_info);
-    if (ret) {
-        printf("sample_vicap, the sensor type not supported!\n");
+    ret = kd_display_get_resolution(&display_width, &display_height);
+    if (ret != K_SUCCESS) {
+        printf("ERROR: kd_display_get_resolution failed, ret=%d\n", ret);
+        kd_display_deinit();
+        g_display_initialized = K_FALSE;
         return ret;
     }
 
-    connector_fd = kd_mpi_connector_open(connector_info.connector_name);
-    if (connector_fd < 0) {
-        printf("%s, connector open failed.\n", __func__);
-        return K_ERR_VO_NOTREADY;
+    if (g_nonai_2d_conf.width > display_width ||
+        g_nonai_2d_conf.height > display_height) {
+        printf("CSC frame resized from %ux%u to display %ux%u\n",
+               g_nonai_2d_conf.width, g_nonai_2d_conf.height,
+               display_width, display_height);
+        g_nonai_2d_conf.width = display_width;
+        g_nonai_2d_conf.height = display_height;
+        vo_info->width = display_width;
+        vo_info->height = display_height;
     }
-
-    // connector init
-    kd_mpi_connector_init(connector_fd, connector_info);
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
-
-    kd_mpi_vo_disable_layer(vo_info->layer_id);
 
     printf("%s>vo init width %d height %d\n", __func__, vo_info->width, vo_info->height);
 
-    k_vo_layer_attr vo_layer_attr;
-    memset(&vo_layer_attr, 0, sizeof(vo_layer_attr));
-    vo_layer_attr.layer_id           = vo_info->layer_id;
-    vo_layer_attr.position.x         = 0;
-    vo_layer_attr.position.y         = 0;
-    vo_layer_attr.img_size.width     = vo_info->width;
-    vo_layer_attr.img_size.height    = vo_info->height;
-    vo_layer_attr.pixel_format       = PIXEL_FORMAT_YUV_SEMIPLANAR_420; /* NV12 / YUV420SP */
-    vo_layer_attr.func               = (vo_info->ratation_90 == 1) ? GDMA_ROTATE_DEGREE_90 :GDMA_ROTATE_DEGREE_0;
-    vo_layer_attr.rot_buf_nr         = (vo_info->ratation_90 == 1) ? 2:0; /* 旋转时使用少量 GSDMA buffer */
-    vo_layer_attr.global_alpha       = 0xff;
-    vo_layer_attr.rot_buf_bpp        = 0;
-
-    printf("sample_vo_init: layer_id %d, width %d, height %d, pixel_format %d, func %d,buf_nr:%d\n",
-           vo_layer_attr.layer_id, vo_layer_attr.img_size.width, vo_layer_attr.img_size.height,
-           vo_layer_attr.pixel_format, vo_layer_attr.func,vo_layer_attr.rot_buf_nr);
-
-    ret = kd_mpi_vo_set_layer_attr(vo_info->layer_id,&vo_layer_attr);
+    ret = kd_display_layer_configure_ex(vo_info->layer_id, PIXEL_FORMAT_YUV_SEMIPLANAR_420,
+                                        vo_info->width, vo_info->height, 0, 0, 0xff, rotate,
+                                        vo_info->ratation_90 ? 2 : 0, 0);
     if (ret != K_SUCCESS) {
-        printf("ERROR: kd_mpi_vo_set_layer_attr failed, ret=%d\n", ret);
+        printf("ERROR: kd_display_layer_configure failed, ret=%d\n", ret);
+        kd_display_deinit();
+        g_display_initialized = K_FALSE;
         return ret;
     }
 
-    ret = kd_mpi_vo_enable_layer(vo_info->layer_id);
+    ret = kd_display_layer_enable(vo_info->layer_id);
     if (ret != K_SUCCESS) {
-        printf("ERROR: kd_mpi_vo_enable_layer failed, ret=%d\n", ret);
+        printf("ERROR: kd_display_layer_enable failed, ret=%d\n", ret);
+        kd_display_deinit();
+        g_display_initialized = K_FALSE;
         return ret;
     }
-    //exit ;
+
+    printf("enable vo layer:%d\n", vo_info->layer_id);
     return 0;
 }
 
-static void sample_vo_init(k_connector_type type)
+static k_s32 sample_vo_init(k_connector_type type)
 {
-    int width;
-    int height;
-    int ratation_90;
+    int width = g_nonai_2d_conf.width;
+    int height = g_nonai_2d_conf.height;
+    int ratation_90 = 0;
     if(type == HX8377_V2_MIPI_4LAN_1080X1920_30FPS)
     {
         width = ISP_CHN0_WIDTH ;//1080;//640;//1080;
@@ -269,7 +444,7 @@ static void sample_vo_init(k_connector_type type)
     vo_info.height = height;
     vo_info.ratation_90 = ratation_90;
 
-    sample_vo_init_ex(&vo_info);
+    return sample_vo_init_ex(&vo_info);
 }
 
 void sample_vicap_start()
@@ -317,11 +492,11 @@ static k_u32 nonai_2d_vb_create_pool(int chn)
 
     if (chn == 0){
         pool_config.blk_cnt =  NONAI_2D_BUF_CNT;
-        pool_config.blk_size = VICAP_ALIGN_UP(g_nonai_2d_conf.width*g_nonai_2d_conf.height*3, 0x1000);
+        pool_config.blk_size = VICAP_ALIGN_UP(g_nonai_2d_conf.width*g_nonai_2d_conf.height*3/2, 0x1000);
     }
     else if (chn == 1){
         pool_config.blk_cnt =  NONAI_2D_BUF_CNT;
-        pool_config.blk_size = VICAP_ALIGN_UP(g_nonai_2d_conf.width*g_nonai_2d_conf.height*3/2, 0x1000);
+        pool_config.blk_size = VICAP_ALIGN_UP(g_nonai_2d_conf.width*g_nonai_2d_conf.height*3, 0x1000);
     }
     else if (chn == 2){
         pool_config.blk_cnt =  NONAI_2D_BUF_CNT;
@@ -354,8 +529,11 @@ static k_u32 osd_vb_create_pool()
 
 static k_s32 vb_destory_pool(k_u32 pool_id)
 {
-    kd_mpi_vb_destory_pool(pool_id);
-    return 0;
+    k_s32 ret;
+
+    ret = kd_mpi_vb_destory_pool(pool_id);
+    CHECK_RET(ret, __func__, __LINE__);
+    return ret;
 }
 
 static k_s32 sample_vb_init()
@@ -568,11 +746,19 @@ static void *dump_thread(void *arg)
 {
     k_s32 ret;
     k_video_frame_info dumm_vf_info;
-    k_video_frame_info nonai_2d_vf_info;
+    k_video_frame_info rgb888_vf_info;
+    k_video_frame_info rgb565_vf_info;
     k_u32 dump_cnt=0;
-    k_u32 size = ISP_CHN0_WIDTH * ISP_CHN0_HEIGHT * 3;
+    k_u32 rgb888_size = g_nonai_2d_conf.width * g_nonai_2d_conf.height * 3;
+    k_u32 rgb565_size = g_nonai_2d_conf.width * g_nonai_2d_conf.height * 2;
 
-    dump_buf_rgb888 = malloc(size);
+    dump_buf_rgb888 = malloc(rgb888_size);
+    dump_buf_rgb565 = malloc(rgb565_size);
+    if (!dump_buf_rgb888 || !dump_buf_rgb565) {
+        printf("ERROR: cannot allocate CSC dump buffers\n");
+        g_dump_stop = K_TRUE;
+        return arg;
+    }
 
     while (!g_dump_stop)
     {
@@ -595,92 +781,62 @@ static void *dump_thread(void *arg)
             continue;
         }
 
-        ret = kd_mpi_nonai_2d_get_frame(NONAI_2D_RGB888_CH, &nonai_2d_vf_info, 1000);
+        ret = kd_mpi_nonai_2d_get_frame(NONAI_2D_RGB888_CH, &rgb888_vf_info, 1000);
         if (ret) {
             printf("kd_mpi_nonai_2d_get_frame failed. %d\n", ret);
             kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, VICAP_CHN_ID_1, &dumm_vf_info);
             continue;
         }
 
-        if(ret == K_SUCCESS && dump_cnt == 0)
-        {
-            k_u8 *pData;
-
-            pData = (k_u8 *)kd_mpi_sys_mmap(nonai_2d_vf_info.v_frame.phys_addr[0], size);
-            memcpy(dump_buf_rgb888, pData, size);
-            kd_mpi_sys_munmap(pData, size);
-            printf("dump 2D rgb888 output done\n");
-        }
-
-        kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, VICAP_CHN_ID_1, &dumm_vf_info);
-
-        ret = kd_mpi_nonai_2d_release_frame(NONAI_2D_RGB888_CH, &nonai_2d_vf_info);
-        if (ret) {
-            printf("kd_mpi_nonai_2d_release_frame failed. %d\n", ret);
-        }
-
-        usleep(30000);
-        dump_cnt++;
-    }
-
-    printf("%s>done\n", __func__);
-    return arg;
-}
-
-static void *dump_thread_1(void *arg)
-{
-    k_s32 ret;
-    k_video_frame_info dumm_vf_info;
-    k_video_frame_info nonai_2d_vf_info;
-    k_u32 dump_cnt=0;
-    k_u32 size = ISP_CHN0_WIDTH * ISP_CHN0_HEIGHT * 2;
-
-    dump_buf_rgb565 = malloc(size);
-
-    while (!g_dump_stop)
-    {
-        if(!vicap_started)
-        {
-            usleep(30000);
-            continue;
-        }
-
-        ret = kd_mpi_vicap_dump_frame(VICAP_DEV_ID_0, VICAP_CHN_ID_0, VICAP_DUMP_RGB, &dumm_vf_info, 1000);
-        if (ret) {
-            printf("sample_vicap, chn(0) dump frame failed.\n");
-            continue;
-        }
-
         ret = kd_mpi_nonai_2d_send_frame(NONAI_2D_RGB565_CH, &dumm_vf_info, 1000);
         if (ret) {
             printf("kd_mpi_nonai_2d_send_frame failed. %d\n", ret);
-            kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, VICAP_CHN_ID_0, &dumm_vf_info);
+            kd_mpi_nonai_2d_release_frame(NONAI_2D_RGB888_CH, &rgb888_vf_info);
+            kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, VICAP_CHN_ID_1, &dumm_vf_info);
             continue;
         }
 
-        ret = kd_mpi_nonai_2d_get_frame(NONAI_2D_RGB565_CH, &nonai_2d_vf_info, 1000);
+        ret = kd_mpi_nonai_2d_get_frame(NONAI_2D_RGB565_CH, &rgb565_vf_info, 1000);
         if (ret) {
             printf("kd_mpi_nonai_2d_get_frame failed. %d\n", ret);
-            kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, VICAP_CHN_ID_0, &dumm_vf_info);
+            kd_mpi_nonai_2d_release_frame(NONAI_2D_RGB888_CH, &rgb888_vf_info);
+            kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, VICAP_CHN_ID_1, &dumm_vf_info);
             continue;
         }
 
-        if(ret == K_SUCCESS && dump_cnt == 0)
-        {
-            k_u8 *pData;
+        if (dump_cnt == CSC_WARMUP_FRAMES) {
+            k_u8 *rgb565 = (k_u8 *)kd_mpi_sys_mmap(
+                rgb565_vf_info.v_frame.phys_addr[0], rgb565_size);
 
-            pData = (k_u8 *)kd_mpi_sys_mmap(nonai_2d_vf_info.v_frame.phys_addr[0], size);
-            memcpy(dump_buf_rgb565, pData, size);
-            kd_mpi_sys_munmap(pData, size);
+            for (size_t plane = 0; plane < 3; plane++) {
+                k_u8 *rgb888 = (k_u8 *)kd_mpi_sys_mmap(
+                    rgb888_vf_info.v_frame.phys_addr[plane],
+                    g_nonai_2d_conf.width * g_nonai_2d_conf.height);
+
+                memcpy(dump_buf_rgb888 +
+                       plane * g_nonai_2d_conf.width * g_nonai_2d_conf.height,
+                       rgb888,
+                       g_nonai_2d_conf.width * g_nonai_2d_conf.height);
+                kd_mpi_sys_munmap(
+                    rgb888, g_nonai_2d_conf.width * g_nonai_2d_conf.height);
+            }
+            memcpy(dump_buf_rgb565, rgb565, rgb565_size);
+            kd_mpi_sys_munmap(rgb565, rgb565_size);
+            g_rgb888_ready = K_TRUE;
+            g_rgb565_ready = K_TRUE;
+            printf("dump 2D rgb888 output done\n");
             printf("dump 2D rgb565 output done\n");
         }
 
-        kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, VICAP_CHN_ID_0, &dumm_vf_info);
-
-        ret = kd_mpi_nonai_2d_release_frame(NONAI_2D_RGB565_CH, &nonai_2d_vf_info);
+        ret = kd_mpi_nonai_2d_release_frame(NONAI_2D_RGB565_CH, &rgb565_vf_info);
         if (ret) {
             printf("kd_mpi_nonai_2d_release_frame failed. %d\n", ret);
         }
+        ret = kd_mpi_nonai_2d_release_frame(NONAI_2D_RGB888_CH, &rgb888_vf_info);
+        if (ret) {
+            printf("kd_mpi_nonai_2d_release_frame failed. %d\n", ret);
+        }
+        kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, VICAP_CHN_ID_1, &dumm_vf_info);
 
         usleep(30000);
         dump_cnt++;
@@ -711,8 +867,10 @@ static void sample_bind()
     ret = kd_mpi_sys_bind(&vi_mpp_chn, &nonai_2d_mpp_chn);
     CHECK_RET(ret, __func__, __LINE__);
 
-    ret = kd_mpi_sys_bind(&nonai_2d_mpp_chn, &venc_mpp_chn);
-    CHECK_RET(ret, __func__, __LINE__);
+    if (g_nonai_2d_conf.output_file) {
+        ret = kd_mpi_sys_bind(&nonai_2d_mpp_chn, &venc_mpp_chn);
+        CHECK_RET(ret, __func__, __LINE__);
+    }
 
     k_mpp_chn vo_mpp_chn;
     vo_mpp_chn.mod_id = K_ID_VO;
@@ -744,8 +902,10 @@ static void sample_unbind()
     ret = kd_mpi_sys_unbind(&vi_mpp_chn, &nonai_2d_mpp_chn);
     CHECK_RET(ret, __func__, __LINE__);
 
-    ret = kd_mpi_sys_unbind(&nonai_2d_mpp_chn, &venc_mpp_chn);
-    CHECK_RET(ret, __func__, __LINE__);
+    if (g_nonai_2d_conf.output_file) {
+        ret = kd_mpi_sys_unbind(&nonai_2d_mpp_chn, &venc_mpp_chn);
+        CHECK_RET(ret, __func__, __LINE__);
+    }
 
     k_mpp_chn vo_mpp_chn;
     vo_mpp_chn.mod_id = K_ID_VO;
@@ -761,48 +921,58 @@ k_s32 sample_exit()
 {
     int ch = 0;
     int ret = 0;
-
-    sample_vicap_stop();
-
-    kd_mpi_vo_disable_layer(K_VO_LAYER1);
-
-    kd_mpi_nonai_2d_stop_chn(NONAI_2D_RGB888_CH);
-    kd_mpi_nonai_2d_detach_vb_pool(NONAI_2D_RGB888_CH);
-    kd_mpi_nonai_2d_destroy_chn(NONAI_2D_RGB888_CH);
-    kd_mpi_nonai_2d_stop_chn(NONAI_2D_BIND_CH);
-    kd_mpi_nonai_2d_detach_vb_pool(NONAI_2D_BIND_CH);
-    kd_mpi_nonai_2d_destroy_chn(NONAI_2D_BIND_CH);
-    kd_mpi_nonai_2d_stop_chn(NONAI_2D_RGB565_CH);
-    kd_mpi_nonai_2d_detach_vb_pool(NONAI_2D_RGB565_CH);
-    kd_mpi_nonai_2d_destroy_chn(NONAI_2D_RGB565_CH);
-
-    kd_mpi_venc_detach_2d(ch);
-    kd_mpi_venc_stop_chn(ch);
-    kd_mpi_venc_detach_vb_pool(ch);
-    kd_mpi_venc_destroy_chn(ch);
-
-    sample_unbind(ch);
-
-    g_output_stop = K_TRUE;
-    pthread_join(g_nonai_2d_conf.output_tid, NULL);
+    int i;
 
     g_dump_stop = K_TRUE;
-    pthread_join(g_nonai_2d_conf.dump_tid, NULL);
+    sample_vicap_stop();
+    sample_unbind();
 
-    pthread_join(g_nonai_2d_conf.dump_tid_1, NULL);
+    pthread_join(g_nonai_2d_conf.dump_tid, NULL);
+    if (g_nonai_2d_conf.output_file) {
+        g_output_stop = K_TRUE;
+        pthread_join(g_nonai_2d_conf.output_tid, NULL);
+    }
+
+    kd_display_layer_disable(K_VO_LAYER1);
+
+    kd_mpi_nonai_2d_stop_chn(NONAI_2D_RGB888_CH);
+    kd_mpi_nonai_2d_destroy_chn(NONAI_2D_RGB888_CH);
+    kd_mpi_nonai_2d_detach_vb_pool(NONAI_2D_RGB888_CH);
+    kd_mpi_nonai_2d_stop_chn(NONAI_2D_BIND_CH);
+    kd_mpi_nonai_2d_destroy_chn(NONAI_2D_BIND_CH);
+    kd_mpi_nonai_2d_detach_vb_pool(NONAI_2D_BIND_CH);
+    kd_mpi_nonai_2d_stop_chn(NONAI_2D_RGB565_CH);
+    kd_mpi_nonai_2d_destroy_chn(NONAI_2D_RGB565_CH);
+    kd_mpi_nonai_2d_detach_vb_pool(NONAI_2D_RGB565_CH);
+
+    if (g_nonai_2d_conf.output_file) {
+        kd_mpi_venc_detach_2d(ch);
+        kd_mpi_venc_stop_chn(ch);
+        kd_mpi_venc_destroy_chn(ch);
+        kd_mpi_venc_detach_vb_pool(ch);
+
+        ret = kd_mpi_venc_close_fd();
+        CHECK_RET(ret, __func__, __LINE__);
+    }
 
     ret = kd_mpi_nonai_2d_close();
     CHECK_RET(ret, __func__, __LINE__);
 
-    ret = kd_mpi_venc_close_fd();
-    CHECK_RET(ret, __func__, __LINE__);
+    if (g_nonai_2d_conf.output_file) {
+        ret = kd_mpi_vb_release_block(g_nonai_2d_conf.osd_blk_handle);
+        CHECK_RET(ret, __func__, __LINE__);
+        vb_destory_pool(venc_attach_pool_id);
+        vb_destory_pool(osd_attach_pool_id);
+    }
 
-    ret = kd_mpi_vb_release_block(g_nonai_2d_conf.osd_blk_handle);
-    CHECK_RET(ret, __func__, __LINE__);
+    for (i = 0; i < 3; i++)
+        vb_destory_pool(nonai_2d_attach_pool_id[i]);
 
-    vb_destory_pool(venc_attach_pool_id);
-
-    vb_destory_pool(osd_attach_pool_id);
+    if (g_display_initialized) {
+        ret = kd_display_deinit();
+        CHECK_RET(ret, __func__, __LINE__);
+        g_display_initialized = K_FALSE;
+    }
 
     sample_vb_exit();
 
@@ -927,13 +1097,14 @@ static void sample_nonai_2d()
     CHECK_RET(ret, __func__, __LINE__);
 
     pthread_create(&g_nonai_2d_conf.dump_tid, NULL, dump_thread, NULL);
-    pthread_create(&g_nonai_2d_conf.dump_tid_1, NULL, dump_thread_1, NULL);
 }
 
 static void sample_csc_usage()
 {
-    printf("Usage : -sensor [sensor_index] -o [filename] -vo [display_type] -L [2|4]\n");
+    printf("Usage : [-c 0|1|2] [-sensor sensor_index] [-o filename] [-vo display_type] [-L 2|4] [-dump 1]\n");
+    printf("-c selects the CSI index to probe (default: board configuration)\n");
     printf("-L selects the MIPI lane preference (default: ANY)\n");
+    printf("-dump 1 exits after capturing one frame from each CSC output\n");
     printf("\n");
     printf("sensor_index:\n");
     printf("\t  see vicap doc\n");
@@ -942,19 +1113,67 @@ static void sample_csc_usage()
 
 int main(int argc, char *argv[])
 {
-    FILE *output_file=NULL;
-    k_u32 size=0;
-
     k_vicap_sensor_type sensor_type = SENSOR_TYPE_MAX;
     k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
+    k_u32 csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
+    k_bool csi_set = K_FALSE;
+    k_s32 result = K_SUCCESS;
+
+    memset(&g_nonai_2d_conf, 0, sizeof(nonai_2d_conf_t));
+    g_nonai_2d_conf.width = 1280;
+    g_nonai_2d_conf.height = 720;
+    g_nonai_2d_conf.vo = LT9611_MIPI_4LAN_1920X1080_30FPS;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-L") == 0) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "-help") == 0) {
+            sample_csc_usage();
+            return K_SUCCESS;
+        } else if (strcmp(argv[i], "-c") == 0) {
+            if (i + 1 >= argc) {
+                printf("ERROR: -c requires 0, 1, or 2\n");
+                return K_FAILED;
+            }
+            csi_num = atoi(argv[++i]);
+            if (csi_num > 2) {
+                printf("ERROR: -c must be 0, 1, or 2\n");
+                return K_FAILED;
+            }
+            csi_set = K_TRUE;
+        } else if (strcmp(argv[i], "-sensor") == 0) {
+            if (i + 1 >= argc) {
+                printf("ERROR: -sensor requires a sensor index\n");
+                return K_FAILED;
+            }
+            sensor_type = (k_vicap_sensor_type)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-o") == 0) {
+            if (i + 1 >= argc) {
+                printf("ERROR: -o requires a filename\n");
+                return K_FAILED;
+            }
+            if (snprintf(g_nonai_2d_conf.out_filename,
+                         sizeof(g_nonai_2d_conf.out_filename), "%s", argv[++i]) >=
+                (int)sizeof(g_nonai_2d_conf.out_filename)) {
+                printf("ERROR: output filename is too long\n");
+                return K_FAILED;
+            }
+        } else if (strcmp(argv[i], "-vo") == 0) {
+            if (i + 1 >= argc) {
+                printf("ERROR: -vo requires a display type\n");
+                return K_FAILED;
+            }
+            g_nonai_2d_conf.vo = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-dump") == 0) {
+            if (i + 1 >= argc || atoi(argv[++i]) != 1) {
+                printf("ERROR: -dump currently supports only 1\n");
+                return K_FAILED;
+            }
+            g_nonai_2d_conf.auto_dump = K_TRUE;
+        } else if (strcmp(argv[i], "-L") == 0) {
             if (i + 1 >= argc) {
                 printf("ERROR: -L requires 2 or 4\n");
                 return K_FAILED;
             }
-            int lane = atoi(argv[i + 1]);
+            int lane = atoi(argv[++i]);
             if (lane == 2)
                 lane_pref = VICAP_MIPI_LANE_PREF_2LANE;
             else if (lane == 4)
@@ -963,6 +1182,10 @@ int main(int argc, char *argv[])
                 printf("ERROR: -L must be 2 or 4\n");
                 return K_FAILED;
             }
+        } else {
+            printf("ERROR: unknown option %s\n", argv[i]);
+            sample_csc_usage();
+            return K_FAILED;
         }
     }
 
@@ -971,7 +1194,7 @@ int main(int argc, char *argv[])
         k_vicap_sensor_info sensor_info;
 
         memset(&sensor_info, 0, sizeof(sensor_info));
-        probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
+        probe_cfg.csi_num = csi_num;
         probe_cfg.width = 1920;
         probe_cfg.height = 1080;
         probe_cfg.fps = 30;
@@ -983,89 +1206,100 @@ int main(int argc, char *argv[])
         }
 
         sensor_type = sensor_info.sensor_type;
+    } else if (csi_set) {
+        k_vicap_sensor_info sensor_info;
+
+        memset(&sensor_info, 0, sizeof(sensor_info));
+        if (kd_mpi_vicap_get_sensor_info(sensor_type, &sensor_info) != K_SUCCESS) {
+            printf("ERROR: invalid sensor type %d\n", sensor_type);
+            return K_FAILED;
+        }
+        if (sensor_info.csi_num != (k_vicap_csi_num)(csi_num + VICAP_CSI0)) {
+            printf("ERROR: sensor type %d is not on CSI%u\n", sensor_type, csi_num);
+            return K_FAILED;
+        }
     }
 
-    memset(&g_nonai_2d_conf, 0, sizeof(nonai_2d_conf_t));
-    g_nonai_2d_conf.width = 1280;
-    g_nonai_2d_conf.height = 720;
     g_nonai_2d_conf.sensor_type = sensor_type;
-    g_nonai_2d_conf.vo = LT9611_MIPI_4LAN_1920X1080_30FPS;
-
-    for (int i = 1; i < argc; i++)
-    {
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "-help") == 0)
-        {
-            sample_csc_usage();
-            return K_SUCCESS;
+    if (g_nonai_2d_conf.out_filename[0]) {
+        g_nonai_2d_conf.output_file = fopen(g_nonai_2d_conf.out_filename, "wb");
+        if (!g_nonai_2d_conf.output_file) {
+            printf("ERROR: cannot open output file %s\n", g_nonai_2d_conf.out_filename);
+            return K_FAILED;
         }
-        else if (strcmp(argv[i], "-sensor") == 0)
-        {
-            g_nonai_2d_conf.sensor_type = (k_vicap_sensor_type)atoi(argv[i + 1]);
-        }
-        else if (strcmp(argv[i], "-o") == 0)
-        {
-            strcpy(g_nonai_2d_conf.out_filename, argv[i + 1]);
-            if ((g_nonai_2d_conf.output_file = fopen(g_nonai_2d_conf.out_filename, "wb")) == NULL)
-            {
-                printf("Cannot open output file\n");
-            }
-            printf("out_filename: %s\n", g_nonai_2d_conf.out_filename);
-        }
-        else if(strcmp(argv[i], "-vo") == 0)
-        {
-            g_nonai_2d_conf.vo = atoi(argv[i+1]);
-        }
-        else if(strcmp(argv[i], "-L") == 0)
-        {
-            i++;
-        }
+        printf("out_filename: %s\n", g_nonai_2d_conf.out_filename);
     }
 
     printf("-----------csc sample test---------------------\n");
 
-    sample_vb_init();
+    if (sample_vb_init() != K_SUCCESS)
+    {
+        return -1;
+    }
+
+    if (sample_vo_init(g_nonai_2d_conf.vo) != K_SUCCESS)
+    {
+        printf("sample_vo_init failed\n");
+        sample_vb_exit();
+        return -1;
+    }
+
     sample_nonai_2d();
-    sample_venc_osd_h265();
-    sample_vo_init(g_nonai_2d_conf.vo);
+    if (g_nonai_2d_conf.output_file)
+        sample_venc_osd_h265();
     sample_vicap_config();
     sample_bind();
     sample_vicap_start();
 
-    printf("press 'q' to exit application!!\n");
+    if (g_nonai_2d_conf.auto_dump) {
+        int timeout = 300;
 
-    while (getchar() != 'q')
-    {
-        usleep(50000);
+        while (timeout-- > 0 && (!g_rgb888_ready || !g_rgb565_ready))
+            usleep(50000);
+        if (!g_rgb888_ready || !g_rgb565_ready) {
+            printf("ERROR: timed out waiting for CSC output frames\n");
+            result = K_FAILED;
+        }
+    } else {
+        printf("press 'q' to exit application!!\n");
+        while (getchar() != 'q')
+            usleep(50000);
     }
     sample_exit();
 
-    if(dump_buf_rgb888)
-    {
-        if(g_nonai_2d_conf.output_file)
-        {
-            size = ISP_CHN0_WIDTH * ISP_CHN0_HEIGHT * 3;
-            output_file = fopen("/data/out_2d_rgb888.rgb", "wb");
-            fwrite(dump_buf_rgb888, 1, size, output_file);
-            fclose(output_file);
-            printf("write 2D rgb888 output done\n");
+    if (g_rgb888_ready && g_rgb565_ready &&
+        sample_compare_rgb_outputs(dump_buf_rgb888, dump_buf_rgb565) != K_SUCCESS)
+        result = K_FAILED;
+
+    if (dump_buf_rgb888) {
+        size_t size = g_nonai_2d_conf.width * g_nonai_2d_conf.height * 3;
+
+        if (g_rgb888_ready) {
+            sample_print_rgb888_stats(dump_buf_rgb888);
+            if (sample_write_file("/data/out_2d_rgb888.rgb", dump_buf_rgb888, size) != K_SUCCESS)
+                result = K_FAILED;
+        } else {
+            printf("ERROR: RGB888 conversion produced no frame\n");
+            result = K_FAILED;
         }
         free(dump_buf_rgb888);
     }
 
-    if(dump_buf_rgb565)
-    {
-        if(g_nonai_2d_conf.output_file)
-        {
-            size = ISP_CHN0_WIDTH * ISP_CHN0_HEIGHT * 2;
-            output_file = fopen("/data/out_2d_rgb565.rgb", "wb");
-            fwrite(dump_buf_rgb565, 1, size, output_file);
-            fclose(output_file);
-            printf("write 2D rgb565 output done\n");
+    if (dump_buf_rgb565) {
+        size_t size = g_nonai_2d_conf.width * g_nonai_2d_conf.height * 2;
+
+        if (g_rgb565_ready) {
+            sample_print_rgb565_stats(dump_buf_rgb565);
+            if (sample_write_file("/data/out_2d_rgb565.rgb", dump_buf_rgb565, size) != K_SUCCESS)
+                result = K_FAILED;
+        } else {
+            printf("ERROR: RGB565 conversion produced no frame\n");
+            result = K_FAILED;
         }
         free(dump_buf_rgb565);
     }
 
     printf("sample csc done!\n");
 
-    return 0;
+    return result;
 }

@@ -42,9 +42,7 @@
 #include "mpi_sys_api.h"
 #include "mpi_vo_api.h"
 #include "k_vo_comm.h"
-
-#include "k_connector_comm.h"
-#include "mpi_connector_api.h"
+#include "kd_display.h"
 #include "mpi_vdec_api.h"
 
 #include "mpi_uvc_api.h"
@@ -71,6 +69,7 @@ typedef struct
     bool vdec_created;
     bool vdec_started;
     bool vdec_bound;
+    bool display_initialized;
 
     k_s32 vo_poolid;
     k_s32 vdec_poolid;
@@ -123,80 +122,37 @@ int vb_create_vo_pool(int width, int height)
     return pool_id;
 }
 
-k_s32 sample_connector_init(k_connector_type type)
+static k_s32 sample_display_init(k_connector_type type, bool rotation, sample_uvc_runtime *rt)
 {
-    k_u32 ret = 0;
-    k_s32 connector_fd = -1;
-    k_u32 chip_id = 0x00;
-    k_connector_type connector_type = type;
-    k_connector_info connector_info;
+    k_gdma_rotation_e rotate = rotation ? GDMA_ROTATE_DEGREE_270 : GDMA_ROTATE_DEGREE_0;
+    k_s32 ret = kd_display_init(type, 0, 0, rotate);
 
-    memset(&connector_info, 0, sizeof(k_connector_info));
-
-    //connector get sensor info
-    ret = kd_mpi_get_connector_info(connector_type, &connector_info);
-    if (ret) {
-        printf("sample_vicap, the sensor type not supported!\n");
+    if (ret != K_SUCCESS) {
+        printf("kd_display_init failed, ret=%d\n", ret);
         return ret;
     }
 
-    connector_fd = kd_mpi_connector_open(connector_info.connector_name);
-    if (connector_fd < 0) {
-        printf("%s, connector open failed.\n", __func__);
-        return K_ERR_VO_NOTREADY;
-    }
-
-    // connector init
-    ret = kd_mpi_connector_init(connector_fd, connector_info);
-    if (ret) {
-        goto out;
-    }
-
-    // set connect power
-    ret = kd_mpi_connector_power_set(connector_fd, 1);
-    if (ret) {
-        goto out;
-    }
-    // set connect get id
-    ret = kd_mpi_connector_id_get(connector_fd, &chip_id);
-    if (ret) {
-        goto out;
-    }
-
-out:
-    if (connector_fd >= 0) {
-        kd_mpi_connector_close(connector_fd);
-    }
+    rt->display_initialized = true;
     return ret;
 }
 
 static int sample_vo_layer_start(k_vo_layer_id layer_id, int width, int height, bool rotation)
 {
-    k_vo_layer_attr attr;
-
     if (layer_id < K_VO_LAYER_VIDEO1 || layer_id > K_VO_LAYER_VIDEO3) {
         printf("input layer id %d not supported\n", layer_id);
         return -1;
     }
 
-    memset(&attr, 0, sizeof(attr));
-    attr.layer_id = layer_id;
-    attr.position.x = 0;
-    attr.position.y = 0;
-    attr.img_size.width = width;
-    attr.img_size.height = height;
-    attr.pixel_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
-    attr.func = rotation ? GDMA_ROTATE_DEGREE_270 : GDMA_ROTATE_DEGREE_0;
-    attr.rot_buf_nr = rotation ? 2 : 0;
-    attr.global_alpha = 0xff;
-
-    if (kd_mpi_vo_set_layer_attr(layer_id, &attr) != K_SUCCESS) {
-        printf("kd_mpi_vo_set_layer_attr failed\n");
+    k_gdma_rotation_e rotate = rotation ? GDMA_ROTATE_DEGREE_270 : GDMA_ROTATE_DEGREE_0;
+    if (kd_display_layer_configure_ex(layer_id, PIXEL_FORMAT_YUV_SEMIPLANAR_420,
+                                      width, height, 0, 0, 0xff, rotate,
+                                      rotation ? 2 : 0, 0) != K_SUCCESS) {
+        printf("kd_display_layer_configure failed\n");
         return -1;
     }
 
-    if (kd_mpi_vo_enable_layer(layer_id) != K_SUCCESS) {
-        printf("kd_mpi_vo_enable_layer failed\n");
+    if (kd_display_layer_enable(layer_id) != K_SUCCESS) {
+        printf("kd_display_layer_enable failed\n");
         return -1;
     }
 
@@ -447,7 +403,7 @@ static void sample_cleanup(sample_uvc_runtime *rt)
         rt->vdec_bound = false;
     }
     if (rt->vo_layer_enabled) {
-        kd_mpi_vo_disable_layer(rt->chn_id);
+        kd_display_layer_disable(rt->chn_id);
         rt->vo_layer_enabled = false;
     }
     if (rt->vdec_started) {
@@ -488,6 +444,11 @@ static void sample_cleanup(sample_uvc_runtime *rt)
         kd_mpi_vb_destory_pool(rt->vo_poolid);
         rt->vo_pool_created = false;
         rt->vo_poolid = VB_INVALID_POOLID;
+    }
+
+    if (rt->display_initialized) {
+        kd_display_deinit();
+        rt->display_initialized = false;
     }
 
     if (rt->vb_inited) {
@@ -583,7 +544,7 @@ int main(int argc, char **argv)
            format.fourcc);
     fps_last_ms = utils_cpu_ticks_ms();
 
-    ret = sample_connector_init(type);
+    ret = sample_display_init(type, rotation, &rt);
     if (ret) {
         goto cleanup;
     }

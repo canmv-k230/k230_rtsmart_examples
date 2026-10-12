@@ -30,7 +30,6 @@
 #include <sys/mman.h>
 #include <pthread.h>
 #include <stdint.h>
-#include <signal.h>
 
 #include "k_module.h"
 #include "k_type.h"
@@ -70,12 +69,10 @@ typedef struct
     k_u32 video_height;
     k_u32 video_file_size;
     k_u32 input_frames;
-    k_u32 send_cnt;
-    k_u32 get_cnt;
     k_u64 video_phys_addr[OSD_MAX_IN_FRAMES][3];
     k_u8 *video_virt_addr[OSD_MAX_IN_FRAMES][3];
     pthread_t input_tid;
-    k_video_frame_info *frame;
+    pthread_t output_tid;
     k_u32 osd_width;
     k_u32 osd_height;
     k_u32 osd_file_size;
@@ -101,15 +98,42 @@ typedef struct
     char out_filename[50];
     FILE *video_file;
     FILE *output_file;
+    k_u64 output_hash;
+    k_u64 output_bytes;
 
 } sample_osd_conf_t;
 
 static sample_osd_conf_t g_osd_conf;
 
-static inline void CHECK_RET(k_s32 ret)
+static void print_usage(const char *program)
 {
-    if (ret)
-        printf("error %s %d\n", __func__, __LINE__);
+    printf("Usage: %s -i <input.yuv> -w <width> -h <height> -o <output.yuv> [-hold <seconds>]\n", program);
+    printf("  -i          Input YUV420 planar file\n");
+    printf("  -w          Input width\n");
+    printf("  -h          Input height\n");
+    printf("  --help      Show this help\n");
+}
+
+static int parse_positive_int(const char *text, int *value)
+{
+    char *end = NULL;
+    long parsed = strtol(text, &end, 10);
+
+    if (text[0] == '\0' || *end != '\0' || parsed <= 0 || parsed > INT32_MAX)
+        return -1;
+
+    *value = (int)parsed;
+    return 0;
+}
+
+static k_u64 fnv1a64_update(k_u64 hash, const k_u8 *data, size_t size)
+{
+    for (size_t i = 0; i < size; i++) {
+        hash ^= data[i];
+        hash *= 1099511628211ULL;
+    }
+
+    return hash;
 }
 
 static k_u32 vb_create_pool(k_u32 blk_cnt, k_u64 blk_size)
@@ -331,7 +355,7 @@ static k_s32 sample_vb_exit(void)
     return ret;
 }
 
-static void sample_osd_start(int ch)
+static k_s32 sample_osd_start(int ch)
 {
     printf("%s\n", __FUNCTION__);
     k_venc_2d_osd_attr attr;
@@ -341,10 +365,18 @@ static void sample_osd_start(int ch)
     sample_osd_conf_t *osd_conf = &g_osd_conf;
 
     ret = kd_mpi_venc_start_2d_chn(ch);
-    CHECK_RET(ret);
+    if (ret)
+    {
+        printf("kd_mpi_venc_start_2d_chn failed: %d\n", ret);
+        return ret;
+    }
 
     ret = kd_mpi_venc_set_2d_mode(ch, K_VENC_2D_CALC_MODE_OSD);
-    CHECK_RET(ret);
+    if (ret)
+    {
+        printf("kd_mpi_venc_set_2d_mode failed: %d\n", ret);
+        goto stop_channel;
+    }
 
     attr.width = osd_conf->osd_width;
     attr.height = osd_conf->osd_height;
@@ -360,109 +392,197 @@ static void sample_osd_start(int ch)
     attr.bg_color = osd_conf->bg_color;
     attr.fmt = osd_conf->osd_fmt;
     ret = kd_mpi_venc_set_2d_osd_param(ch, 0, &attr);
-    CHECK_RET(ret);
+    if (ret)
+    {
+        printf("kd_mpi_venc_set_2d_osd_param failed: %d\n", ret);
+        goto stop_channel;
+    }
 
-    return;
+    return K_SUCCESS;
+
+stop_channel:
+    (void)kd_mpi_venc_stop_2d_chn(ch);
+    return ret;
 }
 
 static void *input_thread(void *arg)
 {
+    sample_osd_conf_t *osd_conf = arg;
     int i;
-
+    int ret;
     k_video_frame_info frame;
 
-
-    for (i = 0; i < g_osd_conf.input_frames; i++)
+    memset(&frame, 0, sizeof(frame));
+    for (i = 0; i < osd_conf->input_frames; i++)
     {
         frame.mod_id = K_ID_VENC;
-        frame.pool_id = g_osd_conf.video_pool_id;
-        frame.v_frame.phys_addr[0] = g_osd_conf.video_phys_addr[i % g_osd_conf.input_frames][0];
-        frame.v_frame.phys_addr[1] = g_osd_conf.video_phys_addr[i % g_osd_conf.input_frames][1];
-        frame.v_frame.phys_addr[2] = g_osd_conf.video_phys_addr[i % g_osd_conf.input_frames][2];
-        frame.v_frame.virt_addr[0] = (k_u64)g_osd_conf.video_virt_addr[i % g_osd_conf.input_frames][0];
-        frame.v_frame.virt_addr[1] = (k_u64)g_osd_conf.video_virt_addr[i % g_osd_conf.input_frames][1];
-        frame.v_frame.virt_addr[2] = (k_u64)g_osd_conf.video_virt_addr[i % g_osd_conf.input_frames][2];
+        frame.pool_id = osd_conf->video_pool_id;
+        frame.v_frame.phys_addr[0] = osd_conf->video_phys_addr[i][0];
+        frame.v_frame.phys_addr[1] = osd_conf->video_phys_addr[i][1];
+        frame.v_frame.phys_addr[2] = osd_conf->video_phys_addr[i][2];
+        frame.v_frame.virt_addr[0] = (k_u64)osd_conf->video_virt_addr[i][0];
+        frame.v_frame.virt_addr[1] = (k_u64)osd_conf->video_virt_addr[i][1];
+        frame.v_frame.virt_addr[2] = (k_u64)osd_conf->video_virt_addr[i][2];
         frame.v_frame.pixel_format = PIXEL_FORMAT_YVU_PLANAR_420;
-        frame.v_frame.width = g_osd_conf.video_width;
-        frame.v_frame.height = g_osd_conf.video_height;
+        frame.v_frame.width = osd_conf->video_width;
+        frame.v_frame.height = osd_conf->video_height;
 
         printf("send frame %d: phys_addr 0x%lx 0x%lx 0x%lx\n", i, frame.v_frame.phys_addr[0], frame.v_frame.phys_addr[1], frame.v_frame.phys_addr[2]);
 
-        kd_mpi_venc_send_2d_frame(0, &frame);
-        g_osd_conf.send_cnt++;
+        ret = kd_mpi_venc_send_2d_frame(osd_conf->chn_id, &frame);
+        if (ret)
+        {
+            printf("send frame %d failed: %d\n", i, ret);
+            return (void *)(intptr_t)ret;
+        }
     }
 
-    return arg;
+    return NULL;
 }
 
 static void *output_thread(void *arg)
 {
+    sample_osd_conf_t *osd_conf = arg;
     k_video_frame_info output;
-    int ret = 0;
-    g_osd_conf.get_cnt = 0;
-    while (g_osd_conf.get_cnt < g_osd_conf.input_frames)
+    int ret;
+
+    for (k_u32 i = 0; i < osd_conf->input_frames; i++)
     {
-        if (g_osd_conf.get_cnt < g_osd_conf.send_cnt)
-        {
-            ret = kd_mpi_venc_get_2d_frame(g_osd_conf.chn_id, &output);
-            printf("%s>get frame ret = %d\n", __FUNCTION__, ret);
-            if (!g_osd_conf.output_file)
-            {
-                if ((g_osd_conf.output_file = fopen(g_osd_conf.out_filename, "wb")) == NULL)
-                {
-                    printf("Cannot open output file!!!\n");
-                }
+        memset(&output, 0, sizeof(output));
+        ret = kd_mpi_venc_get_2d_frame(osd_conf->chn_id, &output);
+        printf("%s>get frame %u ret = %d\n", __FUNCTION__, i, ret);
+        if (ret)
+            return (void *)(intptr_t)ret;
+
+        size_t plane_size[3] = {
+            output.v_frame.width * output.v_frame.height,
+            output.v_frame.width * output.v_frame.height / 4,
+            output.v_frame.width * output.v_frame.height / 4,
+        };
+        for (k_u32 plane = 0; plane < 3; plane++) {
+            const k_u8 *data = (const k_u8 *)(uintptr_t)output.v_frame.virt_addr[plane];
+
+            osd_conf->output_hash = fnv1a64_update(osd_conf->output_hash,
+                                                    data, plane_size[plane]);
+            osd_conf->output_bytes += plane_size[plane];
+            if (fwrite(data, 1, plane_size[plane], osd_conf->output_file) != plane_size[plane]) {
+                printf("write output frame %u plane %u failed\n", i, plane);
+                return (void *)(intptr_t)-1;
             }
-            fwrite((void *)output.v_frame.virt_addr[0], 1, output.v_frame.width * output.v_frame.height, g_osd_conf.output_file);
-            fwrite((void *)output.v_frame.virt_addr[1], 1, output.v_frame.width * output.v_frame.height / 4, g_osd_conf.output_file);
-            fwrite((void *)output.v_frame.virt_addr[2], 1, output.v_frame.width * output.v_frame.height / 4, g_osd_conf.output_file);
-            g_osd_conf.get_cnt++;
         }
     }
 
-    return arg;
+    return NULL;
 }
 
 int main(int argc, char *argv[])
 {
     int ch = 0;
-    int width, height;
+    int ret;
+    int exit_code = -1;
+    int width = 0;
+    int height = 0;
+    int hold_seconds = 0;
     int i;
+    void *thread_result = NULL;
+    k_bool vb_initialized = K_FALSE;
+    k_bool channel_started = K_FALSE;
+    const char *input_filename = NULL;
+    const char *output_filename = NULL;
 
     printf("%s\n", __FUNCTION__);
     memset(&g_osd_conf, 0, sizeof(sample_osd_conf_t));
+    g_osd_conf.output_hash = 14695981039346656037ULL;
+
+    if (argc == 1)
+    {
+        print_usage(argv[0]);
+        return -1;
+    }
 
     for (i = 1; i < argc; i += 2)
     {
-        if (strcmp(argv[i], "-help") == 0)
+        if (strcmp(argv[i], "--help") == 0 ||
+            (strcmp(argv[i], "-h") == 0 && i + 1 >= argc))
         {
-            printf("Please input:\n");
-            printf("-i: input file name\n");
-            printf("-w: input width\n");
-            printf("-h: input height\n");
-            printf("-o: output file name\n");
+            print_usage(argv[0]);
+            return 0;
         }
-        else if (strcmp(argv[i], "-i") == 0)
+
+        if (i + 1 >= argc)
+        {
+            fprintf(stderr, "Error: option %s requires a value\n", argv[i]);
+            print_usage(argv[0]);
+            return -1;
+        }
+
+        if (strcmp(argv[i], "-i") == 0)
         {
             venc_debug("infilename: %s\n", argv[i + 1]);
-            if ((g_osd_conf.video_file = fopen(argv[i + 1], "rb")) == NULL)
-            {
-                venc_debug("Cannot open input file!!!\n");
-                return -1;
-            }
+            input_filename = argv[i + 1];
         }
         else if (strcmp(argv[i], "-w") == 0)
         {
-            width = atoi(argv[i + 1]);
+            if (parse_positive_int(argv[i + 1], &width))
+            {
+                fprintf(stderr, "Error: invalid width '%s'\n", argv[i + 1]);
+                return -1;
+            }
         }
         else if (strcmp(argv[i], "-h") == 0)
         {
-            height = atoi(argv[i + 1]);
+            if (parse_positive_int(argv[i + 1], &height))
+            {
+                fprintf(stderr, "Error: invalid height '%s'\n", argv[i + 1]);
+                return -1;
+            }
         }
         else if (strcmp(argv[i], "-o") == 0)
         {
-            strcpy(g_osd_conf.out_filename, argv[i + 1]);
+            output_filename = argv[i + 1];
         }
+        else if (strcmp(argv[i], "-hold") == 0)
+        {
+            if (parse_positive_int(argv[i + 1], &hold_seconds))
+            {
+                fprintf(stderr, "Error: invalid hold duration '%s'\n", argv[i + 1]);
+                return -1;
+            }
+        }
+        else
+        {
+            fprintf(stderr, "Error: unknown option '%s'\n", argv[i]);
+            print_usage(argv[0]);
+            return -1;
+        }
+    }
+
+    if (input_filename == NULL || output_filename == NULL || width == 0 || height == 0)
+    {
+        fprintf(stderr, "Error: input, output, width, and height are required\n");
+        print_usage(argv[0]);
+        return -1;
+    }
+
+    if (snprintf(g_osd_conf.out_filename, sizeof(g_osd_conf.out_filename), "%s",
+                 output_filename) >= (int)sizeof(g_osd_conf.out_filename))
+    {
+        fprintf(stderr, "Error: output file name is too long\n");
+        return -1;
+    }
+
+    g_osd_conf.output_file = fopen(g_osd_conf.out_filename, "wb");
+    if (g_osd_conf.output_file == NULL)
+    {
+        fprintf(stderr, "Error: cannot open output file '%s'\n", g_osd_conf.out_filename);
+        return -1;
+    }
+
+    g_osd_conf.video_file = fopen(input_filename, "rb");
+    if (g_osd_conf.video_file == NULL)
+    {
+        fprintf(stderr, "Error: cannot open input file '%s'\n", input_filename);
+        goto cleanup;
     }
 
     if (g_osd_conf.video_file)
@@ -494,46 +614,81 @@ int main(int argc, char *argv[])
     g_osd_conf.add_order = K_VENC_2D_ADD_ORDER_VIDEO_OSD;
     g_osd_conf.bg_color = (200 << 16) | (128 << 8) | (128 << 0);
 
-    if (g_osd_conf.input_frames >= OSD_MAX_IN_FRAMES)
+    if (g_osd_conf.input_frames == 0 ||
+        g_osd_conf.input_frames >= OSD_MAX_IN_FRAMES)
     {
-        printf("too many input frames %d\n", g_osd_conf.input_frames);
-        return -1;
+        printf("invalid input frame count %d\n", g_osd_conf.input_frames);
+        goto cleanup;
     }
-
-    g_osd_conf.frame = (k_video_frame_info *)malloc(sizeof(k_video_frame_info) * g_osd_conf.input_frames);
-    if (g_osd_conf.frame == NULL)
-        printf("error:no space\n");
 
     if (sample_vb_init(&g_osd_conf))
     {
-        return -1;
+        goto cleanup;
     }
+    vb_initialized = K_TRUE;
 
-    sample_osd_start(ch);
+    ret = sample_osd_start(ch);
+    if (ret)
+        goto cleanup;
+    channel_started = K_TRUE;
 
-    pthread_create(&g_osd_conf.input_tid, NULL, input_thread, &g_osd_conf);
-    pthread_create(&g_osd_conf.input_tid, NULL, output_thread, &g_osd_conf);
-
-    while (g_osd_conf.get_cnt != g_osd_conf.input_frames)
+    ret = pthread_create(&g_osd_conf.input_tid, NULL, input_thread, &g_osd_conf);
+    if (ret)
     {
-        usleep(50000);
+        printf("create input thread failed: %s\n", strerror(ret));
+        goto cleanup;
     }
 
-    kd_mpi_venc_stop_2d_chn(ch);
+    ret = pthread_join(g_osd_conf.input_tid, &thread_result);
+    if (ret || thread_result != NULL)
+    {
+        printf("input thread failed: %d\n",
+               ret ? ret : (int)(intptr_t)thread_result);
+        goto cleanup;
+    }
+
+    ret = pthread_create(&g_osd_conf.output_tid, NULL, output_thread, &g_osd_conf);
+    if (ret)
+    {
+        printf("create output thread failed: %s\n", strerror(ret));
+        goto cleanup;
+    }
+
+    thread_result = NULL;
+    ret = pthread_join(g_osd_conf.output_tid, &thread_result);
+    if (ret || thread_result != NULL)
+    {
+        printf("output thread failed: %d\n",
+               ret ? ret : (int)(intptr_t)thread_result);
+        goto cleanup;
+    }
+
+    printf("output bytes=%lu fnv1a64=%016lx\n",
+           (unsigned long)g_osd_conf.output_bytes,
+           (unsigned long)g_osd_conf.output_hash);
+
+    if (hold_seconds > 0)
+    {
+        printf("holding resources for %d seconds\n", hold_seconds);
+        sleep((unsigned int)hold_seconds);
+    }
+
+    exit_code = 0;
+
+cleanup:
+    if (channel_started)
+        (void)kd_mpi_venc_stop_2d_chn(ch);
+    (void)kd_mpi_venc_close_fd();
 
     printf("%s>close files\n", __FUNCTION__);
-    fclose(g_osd_conf.video_file);
-    fclose(g_osd_conf.output_file);
-
-    printf("%s>free frame\n", __FUNCTION__);
-    free(g_osd_conf.frame);
-
-    printf("%s>kill threads\n", __FUNCTION__);
-    pthread_kill(g_osd_conf.input_tid, SIGALRM);
-    pthread_join(g_osd_conf.input_tid, NULL);
+    if (g_osd_conf.video_file)
+        fclose(g_osd_conf.video_file);
+    if (g_osd_conf.output_file)
+        fclose(g_osd_conf.output_file);
 
     printf("%s>exit\n", __FUNCTION__);
-    sample_vb_exit();
+    if (vb_initialized)
+        sample_vb_exit();
 
-    return 0;
+    return exit_code;
 }

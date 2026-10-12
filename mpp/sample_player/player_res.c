@@ -120,15 +120,16 @@ k_s32 sys_init(k_bool init_vo)
 k_s32 sys_deinit(k_bool deinit_vo)
 {
     k_s32 ret;
-    ret = kd_mpi_vb_exit();
-    if(ret != K_SUCCESS) {
-        printf("kd_mpi_vb_exit failed:0x%08x\n",ret);
-        return -1;
-    }
 
     if (deinit_vo)
     {
         vo_deinit();
+    }
+
+    ret = kd_mpi_vb_exit();
+    if(ret != K_SUCCESS) {
+        printf("kd_mpi_vb_exit failed:0x%08x\n",ret);
+        return -1;
     }
 
     return ret;
@@ -176,11 +177,17 @@ static k_s32 _initvo(k_u32 width,k_u32 height,k_u32 vdec_chn,int type)
 {
     //init vo
     display_set_connector_type((k_connector_type)type);
-    display_layer_init(width,height);
+    if (display_layer_init(width,height) != K_SUCCESS)
+    {
+        printf("display_layer_init failed\n");
+        return K_FAILED;
+    }
 
     if (K_SUCCESS != kd_sample_vdec_bind_vo(vdec_chn, 0, BIND_VO_LAYER))
     {
         printf("kd_sample_vdec_bind_vo failed\n");
+        display_layer_deinit();
+        vo_deinit();
         return K_FAILED;
     }
 
@@ -221,7 +228,14 @@ k_s32 disp_open(k_payload_type video_dec_type,k_u32 width,k_u32 height,int type)
         return K_FAILED;
     }
 
-    _initvo(width,height,ch,type);
+    if (_initvo(width, height, ch, type) != K_SUCCESS)
+    {
+        kd_mpi_vdec_stop_chn(ch);
+        kd_mpi_vdec_destroy_chn(ch);
+        kd_mpi_vdec_detach_vb_pool(ch);
+        vb_destory_pool(0);
+        return K_FAILED;
+    }
 
     return K_SUCCESS;
 }
@@ -415,15 +429,16 @@ k_s32 disp_close()
         return K_FAILED;
     }
 
-    kd_mpi_vdec_detach_vb_pool(ch);
-
     if (K_SUCCESS != kd_mpi_vdec_destroy_chn(ch))
     {
         printf("kd_mpi_vdec_destroy_chn failed\n");
         return K_FAILED;
     }
 
+    kd_mpi_vdec_detach_vb_pool(ch);
+
     display_layer_deinit();
+    vo_deinit();
 
     if (vb_destory_pool(0) != K_SUCCESS)
     {

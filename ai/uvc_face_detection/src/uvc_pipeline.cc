@@ -467,8 +467,8 @@ int UVC_PipeLine::Destroy() {
 
     // 停止并销毁解码通道
     kd_mpi_vdec_stop_chn(vdec_bind_chn_id);
-    kd_mpi_vdec_detach_vb_pool(vdec_bind_chn_id);
     kd_mpi_vdec_destroy_chn(vdec_bind_chn_id);
+    kd_mpi_vdec_detach_vb_pool(vdec_bind_chn_id);
 
     if (vdec_pool_id != VB_INVALID_POOLID){
         kd_mpi_vb_destory_pool(vdec_pool_id);

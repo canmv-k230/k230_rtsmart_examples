@@ -342,7 +342,7 @@ static void *output_thread(void *arg)
     int out_cnt, out_frames;
     k_s32 ret;
     int i;
-    k_u32 total_len = 0;
+    k_u64 total_len = 0;
     output_info *info = (output_info *)arg;
 
     out_cnt = 0;
@@ -441,7 +441,8 @@ static void *output_thread(void *arg)
         output_file = NULL;
     }
         
-    venc_debug("%s>done, ch %d: out_frames %d, size %d bits\n", __func__, info->ch_id, out_frames, total_len * 8);
+    venc_debug("%s>done, ch %d: out_frames %d, size %llu bits\n", __func__,
+        info->ch_id, out_frames, (unsigned long long)(total_len * 8));
     return arg;
 }
 
@@ -571,12 +572,25 @@ k_s32 sample_exit(venc_conf_t *venc_conf)
     int ret = 0;
 
     printf("%s>g_venc_sample_status = %d\n", __FUNCTION__, g_venc_sample_status);
-    switch (g_venc_sample_status)
+
+    if (g_venc_sample_status == VENC_SAMPLE_STATUE_RUNING)
     {
-    case VENC_SAMPLE_STATUE_RUNING:
-    case VENC_SAMPLE_STATUS_BINDED:
         sample_vicap_stop(ch);
         sample_vi_unbind_venc(ch);
+
+        g_venc_output_stop = K_TRUE;
+        pthread_join(venc_conf->output_tid, NULL);
+        g_venc_sample_status = VENC_SAMPLE_STATUS_START;
+    }
+    else if (g_venc_sample_status == VENC_SAMPLE_STATUS_BINDED)
+    {
+        sample_vicap_stop(ch);
+        sample_vi_unbind_venc(ch);
+        g_venc_sample_status = VENC_SAMPLE_STATUS_START;
+    }
+
+    switch (g_venc_sample_status)
+    {
     case VENC_SAMPLE_STATUS_START:
         kd_mpi_venc_stop_chn(ch);
         if (venc_conf->osd_enable)
@@ -600,9 +614,6 @@ k_s32 sample_exit(venc_conf_t *venc_conf)
     default:
         break;
     }
-
-    g_venc_output_stop = K_TRUE;
-    pthread_join(venc_conf->output_tid, NULL);
 
     venc_debug("kill ch %d thread done! ch_done %d, chnum %d\n", ch, g_venc_conf.ch_done, g_venc_conf.chnum);
 
@@ -1024,7 +1035,8 @@ k_s32 sample_venc_osd_border_h265(k_vicap_sensor_type sensor_type)
 
 void sample_venc_usage(char *sPrgNm)
 {
-    printf("Usage : %s [index] -o [filename] -L [2|4]\n", sPrgNm);
+    printf("Usage : %s [index] -o [filename] -c [0|1|2] -L [2|4]\n", sPrgNm);
+    printf("-c selects the CSI device (default: board configuration).\n");
     printf("-L selects the MIPI lane preference (default: ANY).\n");
     printf("index:\n");
     printf("\t  0) H.265e.\n");
@@ -1036,13 +1048,14 @@ void sample_venc_usage(char *sPrgNm)
 
 
 static k_s32 kd_sample_sensor_auto_detect(k_vicap_sensor_type* sensor_type,
-                                          k_vicap_mipi_lane_pref lane_pref)
+                                          k_vicap_mipi_lane_pref lane_pref,
+                                          k_u32 csi_num)
 {
     k_vicap_probe_config probe_cfg;
     k_vicap_sensor_info sensor_info;
 
     memset(&sensor_info, 0, sizeof(sensor_info));
-    probe_cfg.csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
+    probe_cfg.csi_num = csi_num;
     probe_cfg.width = 1920;
     probe_cfg.height = 1080;
     probe_cfg.fps = 30;
@@ -1065,6 +1078,7 @@ int main(int argc, char *argv[])
     pthread_t exit_thread_handle;
     int case_index = 0;
     int ret = 0;
+    k_u32 csi_num = CONFIG_MPP_SENSOR_DEFAULT_CSI;
     k_vicap_mipi_lane_pref lane_pref = VICAP_MIPI_LANE_PREF_ANY;
 
     printf("argc = %d\n", argc);
@@ -1085,7 +1099,23 @@ int main(int argc, char *argv[])
     case_index = atoi(argv[1]);
     for (int i = 2; i < argc; i++)
     {
-        if (strcmp(argv[i], "-o") == 0)
+        if (strcmp(argv[i], "-c") == 0)
+        {
+            char *end;
+            long value;
+
+            if (i + 1 >= argc) {
+                printf("ERROR: -c requires 0, 1, or 2\n");
+                return K_FAILED;
+            }
+            value = strtol(argv[++i], &end, 10);
+            if (argv[i][0] == '\0' || *end != '\0' || value < 0 || value > 2) {
+                printf("ERROR: -c must be 0, 1, or 2\n");
+                return K_FAILED;
+            }
+            csi_num = (k_u32)value;
+        }
+        else if (strcmp(argv[i], "-o") == 0)
         {
             strcpy(out_filename, argv[i + 1]);
             if ((output_file = fopen(out_filename, "wb")) == NULL)
@@ -1124,7 +1154,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (0 != kd_sample_sensor_auto_detect(&sensor_type, lane_pref))
+    if (0 != kd_sample_sensor_auto_detect(&sensor_type, lane_pref, csi_num))
     {
         return -1;
     }

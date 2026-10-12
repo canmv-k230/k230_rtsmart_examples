@@ -1,10 +1,13 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include "hal_syscall.h"
 #include "vg_lite.h"
 #include "tiger_paths.h"
 
@@ -23,7 +26,7 @@ static const char *error_type[] =
     "VG_LITE_SUCCESS",
     "VG_LITE_INVALID_ARGUMENT",
     "VG_LITE_OUT_OF_MEMORY",
-    "VG_LITE_NO_CONTEXT",      
+    "VG_LITE_NO_CONTEXT",
     "VG_LITE_TIMEOUT",
     "VG_LITE_OUT_OF_RESOURCES",
     "VG_LITE_GENERIC_IO",
@@ -77,6 +80,18 @@ static int trace_enabled;
 static int trace_paths;
 static int trace_every = 30;
 static volatile sig_atomic_t exit_requested;
+static int quiet_mode;
+
+static pid_t wait_for_child(pid_t child, int *status)
+{
+    long result;
+
+    do {
+        result = syscall(_NRSYS_waitpid, (long)child, (long)status, 0);
+    } while ((result == -1 && errno == EINTR) || result == -EINTR);
+
+    return (pid_t)result;
+}
 
 typedef struct {
     uint64_t clear_us;
@@ -463,8 +478,10 @@ static int present_display_frame(k_vo_layer_id layer, k_u32 width, k_u32 height,
 static void wait_display_hold(int hold_seconds)
 {
     if (hold_seconds < 0) {
-        printf("Showing tiger. Press Ctrl+C to exit.\n");
-        fflush(stdout);
+        if (!quiet_mode) {
+            printf("Showing tiger. Press Ctrl+C to exit.\n");
+            fflush(stdout);
+        }
         while (!exit_requested) {
             usleep(100000);
         }
@@ -481,15 +498,13 @@ void cleanup(void)
     int32_t i;
 
     if (layer_enabled) {
+        trace_log("cleanup layer disable begin");
         kd_display_layer_disable(display_layer);
         layer_enabled = 0;
+        trace_log("cleanup layer disable done");
     }
 
-    if (display_inited) {
-        kd_display_deinit();
-        display_inited = 0;
-    }
-
+    trace_log("cleanup vglite resources begin");
     for (i = 0; i < display_buffer_count; i++) {
         if (display_buffers[i].buffer.handle != NULL) {
             vg_lite_unmap(&display_buffers[i].buffer);
@@ -506,10 +521,21 @@ void cleanup(void)
     }
 
     if (vglite_inited) {
+        trace_log("cleanup vg_lite_close begin");
         vg_lite_close();
         vglite_inited = 0;
+        trace_log("cleanup vg_lite_close done");
+    }
+    trace_log("cleanup vglite resources done");
+
+    if (display_inited) {
+        trace_log("cleanup display deinit begin");
+        kd_display_deinit();
+        display_inited = 0;
+        trace_log("cleanup display deinit done");
     }
 
+    trace_log("cleanup display buffers begin");
     for (i = 0; i < display_buffer_count; i++) {
         if (display_buffers[i].memory != NULL) {
             kd_mpi_sys_munmap(display_buffers[i].memory, display_buffers[i].size);
@@ -531,9 +557,10 @@ void cleanup(void)
         kd_mpi_vb_exit();
         vb_inited = 0;
     }
+    trace_log("cleanup display buffers done");
 }
 
-int main(int argc, const char * argv[])
+static int run_tiger_once(int argc, const char *argv[])
 {
     int frame;
     int frames = 30;
@@ -581,10 +608,13 @@ int main(int argc, const char * argv[])
     vg_lite_quality_t render_quality = VG_LITE_HIGH;
     vg_lite_matrix_t matrix;
     profile_stats_t profile_stats = { 0 };
+    int result = 0;
 
     /* Initialize vglite. */
     vg_lite_error_t error = VG_LITE_SUCCESS;
 
+    quiet_mode = 0;
+    exit_requested = 0;
     for (int i = 1; i < argc; i++) {
         const char *value;
 
@@ -619,6 +649,8 @@ int main(int argc, const char * argv[])
             trace_paths = 1;
         } else if (strcmp(argv[i], "--profile") == 0) {
             profile = 1;
+        } else if (strcmp(argv[i], "--quiet") == 0) {
+            quiet_mode = 1;
         } else if (strcmp(argv[i], "--pipeline") == 0) {
             pipeline = 1;
         } else if ((value = skip_arg_prefix(argv[i], "--trace-every=")) != NULL) {
@@ -721,7 +753,7 @@ int main(int argc, const char * argv[])
             y_set = 1;
         } else {
             if (!parse_positive_int(argv[i], &frames)) {
-                printf("usage: %s [frames] [-c connector] [--animate] [--fps=N] [--no-sync] [--pipeline] [--quality=high|upper|medium|low] [--cmd-buf-kb=N] [--tess-width=N] [--tess-height=N] [--buffers=1..8] [--profile] [--trace] [--trace-paths] [--trace-every=N] [--no-upload] [--no-display] [--width=N] [--height=N] [--layer=N] [--x=N] [--y=N] [--hold=N|-1]\n", argv[0]);
+                printf("usage: %s [frames] [-c connector] [--animate] [--fps=N] [--no-sync] [--pipeline] [--quality=high|upper|medium|low] [--cmd-buf-kb=N] [--tess-width=N] [--tess-height=N] [--buffers=1..8] [--profile] [--trace] [--trace-paths] [--trace-every=N] [--no-upload] [--no-display] [--width=N] [--height=N] [--layer=N] [--x=N] [--y=N] [--hold=N|-1] [--quiet] [--repeat-seconds=N] [--repeat-pause-ms=N]\n", argv[0]);
                 return 1;
             }
             frames_set = 1;
@@ -788,6 +820,7 @@ int main(int argc, const char * argv[])
         trace_log("display init done");
 
         if (init_display_buffers((k_u32)fb_width, (k_u32)fb_height, display_buffer_count) != 0) {
+            result = 1;
             goto ErrorHandler;
         }
     } else if (sync_fps < 0) {
@@ -818,20 +851,22 @@ int main(int argc, const char * argv[])
         trace_log("upload paths done %llu us", (unsigned long long)upload_us);
     }
 
-    printf("Framebuffer size: %d x %d\n", fb_width, fb_height);
-    if (display) {
-        printf("Panel size: %u x %u, visible: %u x %u, rotate: %d, offset: %d,%d, buffers: %d, sync: ",
-               panel_width, panel_height, visible_width, visible_height,
-               rotation_degrees, offset_x, offset_y, display_buffer_count);
-        if (sync_fps > 0) {
-            printf("%d fps\n", sync_fps);
-        } else {
-            printf("off\n");
+    if (!quiet_mode) {
+        printf("Framebuffer size: %d x %d\n", fb_width, fb_height);
+        if (display) {
+            printf("Panel size: %u x %u, visible: %u x %u, rotate: %d, offset: %d,%d, buffers: %d, sync: ",
+                   panel_width, panel_height, visible_width, visible_height,
+                   rotation_degrees, offset_x, offset_y, display_buffer_count);
+            if (sync_fps > 0) {
+                printf("%d fps\n", sync_fps);
+            } else {
+                printf("off\n");
+            }
         }
+        printf("Tiger paths: %d, frames: %d, quality: %s, tess: %dx%d, cmd buffer: %d KB, pipeline: %s\n",
+               pathCount, frames, quality_name(render_quality), tess_width, tess_height,
+               cmd_buffer_kb, pipeline ? "on" : "off");
     }
-    printf("Tiger paths: %d, frames: %d, quality: %s, tess: %dx%d, cmd buffer: %d KB, pipeline: %s\n",
-           pathCount, frames, quality_name(render_quality), tess_width, tess_height,
-           cmd_buffer_kb, pipeline ? "on" : "off");
     if (display && animate && sync_fps > 0) {
         frame_period_us = get_frame_period_us(sync_fps);
     }
@@ -871,12 +906,14 @@ int main(int argc, const char * argv[])
                                        (k_u32)fb_width, (k_u32)fb_height,
                                        (k_u32)offset_x, (k_u32)offset_y) != K_SUCCESS) {
             printf("display layer configure failed\n");
+            result = 1;
             goto ErrorHandler;
         }
         trace_log("layer configure done");
         trace_log("layer enable begin layer=%d", display_layer);
         if (kd_display_layer_enable(display_layer) != K_SUCCESS) {
             printf("display layer enable failed\n");
+            result = 1;
             goto ErrorHandler;
         }
         layer_enabled = 1;
@@ -940,6 +977,7 @@ int main(int argc, const char * argv[])
                 stage_start = get_time_us();
                 if (present_display_frame(display_layer, (k_u32)fb_width, (k_u32)fb_height,
                                           pending_physical) != 0) {
+                    result = 1;
                     goto ErrorHandler;
                 }
                 if (profile) {
@@ -977,6 +1015,7 @@ int main(int argc, const char * argv[])
                 stage_start = get_time_us();
                 if (present_display_frame(display_layer, (k_u32)fb_width, (k_u32)fb_height,
                                           target_physical) != 0) {
+                    result = 1;
                     goto ErrorHandler;
                 }
                 if (profile) {
@@ -1013,6 +1052,7 @@ int main(int argc, const char * argv[])
         present_start = get_time_us();
         if (present_display_frame(display_layer, (k_u32)fb_width, (k_u32)fb_height,
                                   pending_physical) != 0) {
+            result = 1;
             goto ErrorHandler;
         }
         if (profile) {
@@ -1022,66 +1062,68 @@ int main(int argc, const char * argv[])
     }
     render_us = get_time_us() - render_start;
 
-    if (display) {
-        printf("Displayed on connector %u layer %d\n", connector_type, display_layer);
-    }
-
-    printf("Init: %llu us\n", (unsigned long long)init_us);
-    if (upload_paths) {
-        printf("Upload paths: %llu us\n", (unsigned long long)upload_us);
-    }
-    printf("Allocate: %llu us\n", (unsigned long long)alloc_us);
-    printf("%s: %llu us total, %llu us/frame, %.2f fps\n",
-           display ? (animate ? "Dynamic render+present" : "Render+present") : (animate ? "Dynamic render" : "Render"),
-           (unsigned long long)render_us,
-           (unsigned long long)(frame ? render_us / (uint64_t)frame : 0),
-           render_us ? (double)frame * 1000000.0 / (double)render_us : 0.0);
-    if (sync_sleep_us > 0) {
-        printf("Work only: %llu us total, %llu us/frame, %.2f fps\n",
-               (unsigned long long)work_us,
-               (unsigned long long)(frame ? work_us / (uint64_t)frame : 0),
-               work_us ? (double)frame * 1000000.0 / (double)work_us : 0.0);
-        printf("Display sync sleep: %llu us\n", (unsigned long long)sync_sleep_us);
-    }
-    if (profile && frame > 0) {
-        uint64_t render_profile_us = profile_stats.clear_us + profile_stats.draw_us +
-                                     profile_stats.submit_us + profile_stats.finish_us;
-        uint64_t profiled_us = render_profile_us + profile_stats.present_us;
-        uint64_t other_us = work_us > profiled_us ? work_us - profiled_us : 0;
-
-        printf("Profile (%d frames), total / average us:\n", frame);
-        printf("  clear enqueue: %llu / %llu\n",
-               (unsigned long long)profile_stats.clear_us,
-               (unsigned long long)(profile_stats.clear_us / (uint64_t)frame));
-        printf("  draw enqueue:  %llu / %llu\n",
-               (unsigned long long)profile_stats.draw_us,
-               (unsigned long long)(profile_stats.draw_us / (uint64_t)frame));
-        if (pipeline) {
-            printf("  submit+prewait: %llu / %llu\n",
-                   (unsigned long long)profile_stats.submit_us,
-                   (unsigned long long)(profile_stats.submit_us / (uint64_t)frame));
-            printf("  final drain:    %llu / %llu\n",
-                   (unsigned long long)profile_stats.finish_us,
-                   (unsigned long long)(profile_stats.finish_us / (uint64_t)frame));
-        } else {
-            printf("  finish+wait:    %llu / %llu\n",
-                   (unsigned long long)profile_stats.finish_us,
-                   (unsigned long long)(profile_stats.finish_us / (uint64_t)frame));
-        }
-        if (!pipeline) {
-            printf("  render total:  %llu / %llu (%.2f fps)\n",
-                   (unsigned long long)render_profile_us,
-                   (unsigned long long)(render_profile_us / (uint64_t)frame),
-                   render_profile_us ? (double)frame * 1000000.0 / (double)render_profile_us : 0.0);
-        }
+    if (!quiet_mode) {
         if (display) {
-            printf("  display push:  %llu / %llu\n",
-                   (unsigned long long)profile_stats.present_us,
-                   (unsigned long long)(profile_stats.present_us / (uint64_t)frame));
+            printf("Displayed on connector %u layer %d\n", connector_type, display_layer);
         }
-        printf("  other:         %llu / %llu\n",
-               (unsigned long long)other_us,
-               (unsigned long long)(other_us / (uint64_t)frame));
+
+        printf("Init: %llu us\n", (unsigned long long)init_us);
+        if (upload_paths) {
+            printf("Upload paths: %llu us\n", (unsigned long long)upload_us);
+        }
+        printf("Allocate: %llu us\n", (unsigned long long)alloc_us);
+        printf("%s: %llu us total, %llu us/frame, %.2f fps\n",
+               display ? (animate ? "Dynamic render+present" : "Render+present") : (animate ? "Dynamic render" : "Render"),
+               (unsigned long long)render_us,
+               (unsigned long long)(frame ? render_us / (uint64_t)frame : 0),
+               render_us ? (double)frame * 1000000.0 / (double)render_us : 0.0);
+        if (sync_sleep_us > 0) {
+            printf("Work only: %llu us total, %llu us/frame, %.2f fps\n",
+                   (unsigned long long)work_us,
+                   (unsigned long long)(frame ? work_us / (uint64_t)frame : 0),
+                   work_us ? (double)frame * 1000000.0 / (double)work_us : 0.0);
+            printf("Display sync sleep: %llu us\n", (unsigned long long)sync_sleep_us);
+        }
+        if (profile && frame > 0) {
+            uint64_t render_profile_us = profile_stats.clear_us + profile_stats.draw_us +
+                                         profile_stats.submit_us + profile_stats.finish_us;
+            uint64_t profiled_us = render_profile_us + profile_stats.present_us;
+            uint64_t other_us = work_us > profiled_us ? work_us - profiled_us : 0;
+
+            printf("Profile (%d frames), total / average us:\n", frame);
+            printf("  clear enqueue: %llu / %llu\n",
+                   (unsigned long long)profile_stats.clear_us,
+                   (unsigned long long)(profile_stats.clear_us / (uint64_t)frame));
+            printf("  draw enqueue:  %llu / %llu\n",
+                   (unsigned long long)profile_stats.draw_us,
+                   (unsigned long long)(profile_stats.draw_us / (uint64_t)frame));
+            if (pipeline) {
+                printf("  submit+prewait: %llu / %llu\n",
+                       (unsigned long long)profile_stats.submit_us,
+                       (unsigned long long)(profile_stats.submit_us / (uint64_t)frame));
+                printf("  final drain:    %llu / %llu\n",
+                       (unsigned long long)profile_stats.finish_us,
+                       (unsigned long long)(profile_stats.finish_us / (uint64_t)frame));
+            } else {
+                printf("  finish+wait:    %llu / %llu\n",
+                       (unsigned long long)profile_stats.finish_us,
+                       (unsigned long long)(profile_stats.finish_us / (uint64_t)frame));
+            }
+            if (!pipeline) {
+                printf("  render total:  %llu / %llu (%.2f fps)\n",
+                       (unsigned long long)render_profile_us,
+                       (unsigned long long)(render_profile_us / (uint64_t)frame),
+                       render_profile_us ? (double)frame * 1000000.0 / (double)render_profile_us : 0.0);
+            }
+            if (display) {
+                printf("  display push:  %llu / %llu\n",
+                       (unsigned long long)profile_stats.present_us,
+                       (unsigned long long)(profile_stats.present_us / (uint64_t)frame));
+            }
+            printf("  other:         %llu / %llu\n",
+                   (unsigned long long)other_us,
+                   (unsigned long long)(other_us / (uint64_t)frame));
+        }
     }
     if (display) {
         wait_display_hold(hold_seconds);
@@ -1090,5 +1132,119 @@ int main(int argc, const char * argv[])
 ErrorHandler:
     // Cleanup.
     cleanup();
-    return IS_ERROR(error) ? 1 : 0;
+    return result || IS_ERROR(error) ? 1 : 0;
+}
+
+int main(int argc, const char *argv[])
+{
+    const char **child_argv;
+    uint64_t start_us;
+    uint64_t deadline_us;
+    uint64_t next_report_us;
+    int repeat_seconds = 0;
+    int repeat_pause_ms = 250;
+    int child_argc = 0;
+    int has_quiet = 0;
+    pid_t active_child = -1;
+    unsigned int cycles = 0;
+
+    child_argv = calloc((size_t)argc + 2U, sizeof(*child_argv));
+    if (child_argv == NULL) {
+        printf("repeat argument allocation failed\n");
+        return 1;
+    }
+
+    child_argv[child_argc++] = argv[0];
+    for (int i = 1; i < argc; i++) {
+        const char *value;
+
+        if ((value = skip_arg_prefix(argv[i], "--repeat-seconds=")) != NULL) {
+            if (!parse_positive_int(value, &repeat_seconds)) {
+                printf("invalid repeat duration: %s\n", value);
+                free(child_argv);
+                return 1;
+            }
+        } else if ((value = skip_arg_prefix(argv[i], "--repeat-pause-ms=")) != NULL) {
+            if (!parse_positive_int(value, &repeat_pause_ms)) {
+                printf("invalid repeat pause: %s\n", value);
+                free(child_argv);
+                return 1;
+            }
+        } else {
+            child_argv[child_argc++] = argv[i];
+            if (strcmp(argv[i], "--quiet") == 0) {
+                has_quiet = 1;
+            }
+        }
+    }
+
+    if (repeat_seconds == 0) {
+        int result = run_tiger_once(child_argc, child_argv);
+
+        free(child_argv);
+        return result;
+    }
+
+    if (!has_quiet) {
+        child_argv[child_argc++] = "--quiet";
+    }
+    child_argv[child_argc] = NULL;
+    exit_requested = 0;
+    signal(SIGINT, sig_handler);
+    signal(SIGTERM, sig_handler);
+    start_us = get_time_us();
+    deadline_us = start_us + (uint64_t)repeat_seconds * 1000000U;
+    next_report_us = start_us + 60000000U;
+    printf("P10_MEDIA_SOAK start seconds=%d pause_ms=%d\n",
+           repeat_seconds, repeat_pause_ms);
+
+    while (!exit_requested && get_time_us() < deadline_us) {
+        int status = 0;
+
+        if (active_child != -1) {
+            printf("P10_MEDIA_SOAK internal error: child %d still active\n",
+                   active_child);
+            free(child_argv);
+            return 1;
+        }
+        active_child = fork();
+        if (active_child < 0) {
+            printf("P10_MEDIA_SOAK fork failed at cycle %u\n", cycles + 1U);
+            free(child_argv);
+            return 1;
+        }
+        if (active_child == 0) {
+            execv(argv[0], (char *const *)child_argv);
+            _exit(127);
+        }
+        if (wait_for_child(active_child, &status) != active_child) {
+            printf("P10_MEDIA_SOAK wait failed at cycle %u: %s\n",
+                   cycles + 1U, strerror(errno));
+            free(child_argv);
+            return 1;
+        }
+        active_child = -1;
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            printf("P10_MEDIA_SOAK child failed at cycle %u status=%#x\n",
+                   cycles + 1U, status);
+            free(child_argv);
+            return 1;
+        }
+        cycles++;
+
+        if (get_time_us() >= next_report_us) {
+            printf("P10_MEDIA_SOAK progress cycles=%u\n", cycles);
+            next_report_us += 60000000U;
+        }
+        usleep((useconds_t)repeat_pause_ms * 1000U);
+    }
+
+    free(child_argv);
+    if (exit_requested) {
+        printf("P10_MEDIA_SOAK interrupted after %u cycles\n", cycles);
+        return 1;
+    }
+    printf("P10_MEDIA_SOAK PASS seconds=%d cycles=%u\n",
+           repeat_seconds, cycles);
+    return 0;
 }

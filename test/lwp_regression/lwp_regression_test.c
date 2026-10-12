@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -458,6 +459,68 @@ static int test_tls_metadata_after_fork(size_t page_size)
     return 0;
 }
 
+static int test_process_wait_status(void)
+{
+    const char *test = "process-wait-status";
+    const int signals[] = { SIGTERM, SIGKILL };
+    pid_t child;
+    int status;
+    size_t i;
+
+    printf("[RUN] %s normal-exit\n", test);
+    fflush(stdout);
+    child = fork();
+    CHECK(test, child >= 0, "normal-exit fork failed");
+    if (child == 0)
+    {
+        _Exit(37);
+    }
+    CHECK(test, lwp_waitpid_syscall(child, &status, 0) == child,
+          "normal-exit waitpid failed");
+    CHECK(test, WIFEXITED(status) && WEXITSTATUS(status) == 37,
+          "normal exit status was not POSIX encoded");
+    printf("[PASS] %s normal-exit status=0x%x\n", test, status);
+
+    for (i = 0; i < sizeof(signals) / sizeof(signals[0]); i++)
+    {
+        unsigned char ready = 0;
+        int pipe_fd[2];
+
+        printf("[RUN] %s signal=%d\n", test, signals[i]);
+        fflush(stdout);
+        CHECK(test, pipe(pipe_fd) == 0, "signal-exit pipe failed");
+        child = fork();
+        CHECK(test, child >= 0, "signal-exit fork failed");
+        if (child == 0)
+        {
+            close(pipe_fd[0]);
+            ready = 1;
+            if (write(pipe_fd[1], &ready, sizeof(ready)) != sizeof(ready))
+            {
+                _Exit(1);
+            }
+            close(pipe_fd[1]);
+            for (;;)
+            {
+                pause();
+            }
+        }
+        close(pipe_fd[1]);
+        CHECK(test, read(pipe_fd[0], &ready, sizeof(ready)) == sizeof(ready) && ready == 1,
+              "signal-exit child did not become ready");
+        close(pipe_fd[0]);
+        CHECK(test, kill(child, signals[i]) == 0, "kill failed");
+        CHECK(test, lwp_waitpid_syscall(child, &status, 0) == child,
+              "signal-exit waitpid failed");
+        CHECK(test, WIFSIGNALED(status) && WTERMSIG(status) == signals[i],
+              "signal exit status was not POSIX encoded");
+        printf("[PASS] %s signal=%d status=0x%x\n", test, signals[i], status);
+    }
+
+    printf("[PASS] %s\n", test);
+    return 0;
+}
+
 static int test_shared_memory_partial_munmap(size_t page_size)
 {
     const char *test = "shared-memory-partial-munmap";
@@ -810,6 +873,7 @@ int main(void)
         test_munmap_validation((size_t)page_size) != 0 ||
         test_tls_munmap_metadata((size_t)page_size) != 0 ||
         test_tls_metadata_after_fork((size_t)page_size) != 0 ||
+        test_process_wait_status() != 0 ||
         test_shared_memory_partial_munmap((size_t)page_size) != 0 ||
         test_user_pointer_validation() != 0 ||
         test_pmutex_futex_tree_separation() != 0 ||

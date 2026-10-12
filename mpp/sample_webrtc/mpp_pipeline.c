@@ -5,13 +5,13 @@
  * Pipeline topology:
  *
  *   ┌──────────────┐                 ┌──────────────┐
- *   │    VICAP     │── CHN0 (bind) ──>│    VO        │
+ *   │    VICAP     │── CHN1 (bind) ──>│    VO        │
  *   │  (Camera     │                 │ (LCD/HDMI    │
- *   │   Capture)   │── CHN1 (bind) ──>│  display)    │
+ *   │   Capture)   │                 │  display)    │
  *   │              │                 └──────────────┘
  *   └──────────────┘
  *         │
- *         │ CHN1 (bind)
+ *         │ CHN2 (bind)
  *         ▼
  *   ┌──────────────┐
  *   │    VENC      │── H.264 bitstream ──> WebRTC (via main.c)
@@ -25,8 +25,8 @@
  *   3. VO Layer (video output overlay)
  *   4. VICAP (camera capture, 2 channels)
  *   5. VENC (H.264 encoder with dedicated VB pool)
- *   6. Bind VICAP-CHN0 → VO (display)
- *   7. Bind VICAP-CHN1 → VENC (encode)
+ *   6. Bind VICAP-CHN1 to VO (display)
+ *   7. Bind VICAP-CHN2 to VENC (encode)
  *
  * Deinit order (reverse of init, with VB release considerations):
  *   1. Stop VENC + VICAP streams
@@ -69,18 +69,29 @@
 /* ── Channel assignments ─────────────────────────────────────────── */
 
 static k_vicap_dev g_vicap_dev = VICAP_DEV_ID_0;       /* VICAP device 0 */
-static k_vicap_chn g_vicap_chn_vo = VICAP_CHN_ID_0;    /* CHN0 → VO display */
-static k_vicap_chn g_vicap_chn_venc = VICAP_CHN_ID_1;  /* CHN1 → VENC encode */
+static k_vicap_chn g_vicap_chn_vo = VICAP_CHN_ID_1;    /* CHN1 -> VO display */
+static k_vicap_chn g_vicap_chn_venc = VICAP_CHN_ID_2;  /* CHN2 -> VENC encode */
 
-static k_vo_layer_id g_vo_layer = K_VO_LAYER_VIDEO1;   /* VO overlay layer */
+static k_vo_layer_id g_vo_layer = K_VO_LAYER_VIDEO2;   /* VO overlay layer */
 
 static k_u32 g_venc_chn = 0;                            /* Allocated VENC channel ID */
 static k_u32 g_venc_attach_pool_id = VB_INVALID_POOLID; /* VENC's dedicated VB pool */
+static int g_venc_fd_acquired = 0;
+static int g_venc_chn_requested = 0;
+static int g_venc_pool_attached = 0;
+static int g_venc_chn_created = 0;
 
 static k_u32 g_display_width = 0;   /* Actual display panel width (after rotation) */
 static k_u32 g_display_height = 0;  /* Actual display panel height (after rotation) */
 
-static int g_pipeline_initialized = 0;  /* 1 after mpp_pipeline_init succeeds */
+typedef enum {
+  PIPELINE_DOWN,
+  PIPELINE_READY,
+  PIPELINE_ROLLBACK_REQUIRED,
+  PIPELINE_VENC_CLEANUP_REQUIRED,
+} PipelineState;
+
+static PipelineState g_pipeline_state = PIPELINE_DOWN;
 static int g_pipeline_started = 0;      /* 1 after mpp_pipeline_start succeeds */
 static VencType g_venc_type = VENC_TYPE_H265;  /* Encoder type (stored from config) */
 
@@ -133,9 +144,8 @@ static void vb_exit(void) {
 /**
  * Initialize the display connector (LCD panel or HDMI).
  *
- * For the ST7701 LCD panel (480x800), the physical orientation is
- * portrait (480 wide × 800 tall), but we use it in landscape mode
- * (800 wide × 480 tall), so we swap width/height.
+ * The ST7701 panel is physically 480x800. Rotate the VO output when using
+ * its 800x480 landscape view so the reported logical size matches scanout.
  *
  * @param panel_id    Connector type (LCD or HDMI)
  * @param out_width   Output: actual display width in pixels
@@ -144,8 +154,10 @@ static void vb_exit(void) {
  */
 static int connector_init(k_connector_type panel_id, k_u32* out_width, k_u32* out_height) {
   k_s32 ret;
+  k_gdma_rotation_e rotation = panel_id == ST7701_V1_MIPI_2LAN_480X800_30FPS ?
+      GDMA_ROTATE_DEGREE_90 : GDMA_ROTATE_DEGREE_0;
 
-  ret = kd_display_init(panel_id, 0, 0, GDMA_ROTATE_DEGREE_0);
+  ret = kd_display_init(panel_id, 0, 0, rotation);
   if (ret) {
     printf("[MPP] Display init failed, ret=%d\n", ret);
     return ret;
@@ -156,13 +168,6 @@ static int connector_init(k_connector_type panel_id, k_u32* out_width, k_u32* ou
     printf("[MPP] Get display resolution failed, ret=%d\n", ret);
     kd_display_deinit();
     return ret;
-  }
-
-  /* ST7701 LCD is portrait (480x800), swap to landscape (800x480) */
-  if (panel_id == ST7701_V1_MIPI_2LAN_480X800_30FPS) {
-    k_u32 temp = *out_width;
-    *out_width = *out_height;
-    *out_height = temp;
   }
 
   printf("[MPP] Display: %ux%u\n", *out_width, *out_height);
@@ -203,7 +208,7 @@ static int layer_init(k_vo_layer_id layer_id, k_u32 width, k_u32 height) {
   layer_attr.img_size.height = height;
   layer_attr.pixel_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;  /* NV12 */
   layer_attr.global_alpha = 0xFF;  /* Fully opaque */
-  layer_attr.func = GDMA_ROTATE_DEGREE_0;
+  layer_attr.func = GDMA_ROTATE_NONE;  /* Inherit the connector rotation. */
   layer_attr.rot_buf_nr = 0;
   layer_attr.rot_buf_bpp = 0;
 
@@ -235,18 +240,18 @@ static void layer_exit(k_vo_layer_id layer_id) {
 
 /**
  * Initialize VICAP with two output channels:
- *   - CHN0: Scaled to display resolution → bound to VO (preview)
- *   - CHN1: Scaled to encode resolution → bound to VENC (WebRTC)
+ *   - CHN1: Scaled to display resolution, bound to VO (preview)
+ *   - CHN2: Scaled to encode resolution, bound to VENC (WebRTC)
  *
  * The sensor is auto-detected via kd_mpi_sensor_adapt_get_ex() using
  * the specified CSI number. Both channels output NV12 format.
  *
  * @param dev_id       VICAP device ID (typically VICAP_DEV_ID_0)
  * @param csi_num      CSI interface number (0-2, selects camera connector)
- * @param vo_width     Output width for display channel (CHN0)
- * @param vo_height    Output height for display channel (CHN0)
- * @param venc_width   Output width for encode channel (CHN1)
- * @param venc_height  Output height for encode channel (CHN1)
+ * @param vo_width     Output width for display channel (CHN1)
+ * @param vo_height    Output height for display channel (CHN1)
+ * @param venc_width   Output width for encode channel (CHN2)
+ * @param venc_height  Output height for encode channel (CHN2)
  */
 static int vicap_init(k_vicap_dev dev_id, k_u32 csi_num,
                       k_vicap_mipi_lane_pref lane_pref,
@@ -303,21 +308,21 @@ static int vicap_init(k_vicap_dev dev_id, k_u32 csi_num,
     return ret;
   }
 
-  /* ── Channel 0 → VO display ──
-   * Scales sensor output to display resolution.
-   * crop_enable=K_FALSE and scale_enable=K_FALSE means the ISP
-   * hardware scaler handles the resize automatically. */
+  /* Channel 1 -> VO display.
+   * Scale the full sensor frame to the logical display resolution. */
   memset(&chn_attr, 0, sizeof(chn_attr));
   chn_attr.out_win.width = vo_width;
   chn_attr.out_win.height = vo_height;
   chn_attr.crop_win = dev_attr.acq_win;
   chn_attr.scale_win = chn_attr.out_win;
   chn_attr.crop_enable = K_FALSE;
-  chn_attr.scale_enable = K_FALSE;
+  chn_attr.scale_enable = vo_width != dev_attr.acq_win.width ||
+                          vo_height != dev_attr.acq_win.height;
   chn_attr.chn_enable = K_TRUE;
   chn_attr.pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;  /* NV12 */
   chn_attr.buffer_num = VB_BUF_COUNT;
   chn_attr.buffer_size = VB_ALIGN_UP(vo_width * vo_height * 3 / 2, 4096);  /* NV12 size, 4K aligned */
+  chn_attr.alignment = 12;
   chn_attr.buffer_pool_id = VB_INVALID_POOLID;  /* Let VICAP allocate from common pool */
 
   ret = kd_mpi_vicap_set_chn_attr(dev_id, g_vicap_chn_vo, chn_attr);
@@ -325,8 +330,7 @@ static int vicap_init(k_vicap_dev dev_id, k_u32 csi_num,
     printf("[MPP] VICAP set_chn_attr VO failed, ret=%d\n", ret);
     return ret;
   }
-
-  /* ── Channel 2 → VENC encode ──
+  /* Channel 2 -> VENC encode.
    * Scales sensor output to WebRTC encode resolution (typically 1280x720).
    * alignment=12 for VENC compatibility (H.264 requires 16-pixel
    * alignment, but VICAP channel alignment of 12 works with the
@@ -337,7 +341,8 @@ static int vicap_init(k_vicap_dev dev_id, k_u32 csi_num,
   chn_attr.crop_win = dev_attr.acq_win;
   chn_attr.scale_win = chn_attr.out_win;
   chn_attr.crop_enable = K_FALSE;
-  chn_attr.scale_enable = K_FALSE;
+  chn_attr.scale_enable = venc_width != dev_attr.acq_win.width ||
+                          venc_height != dev_attr.acq_win.height;
   chn_attr.chn_enable = K_TRUE;
   chn_attr.pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;  /* NV12 */
   chn_attr.buffer_num = VB_BUF_COUNT;
@@ -423,7 +428,12 @@ static int venc_init(k_u32 chn_id, k_u32 width, k_u32 height, k_u32 bitrate_kbps
     printf("[MPP] VENC VB create pool failed\n");
     return -1;
   }
-  kd_mpi_venc_attach_vb_pool(chn_id, g_venc_attach_pool_id);
+  ret = kd_mpi_venc_attach_vb_pool(chn_id, g_venc_attach_pool_id);
+  if (ret != K_SUCCESS) {
+    printf("[MPP] VENC attach_vb_pool failed: 0x%x\n", ret);
+    return -1;
+  }
+  g_venc_pool_attached = 1;
 
   /* Configure H.264/H.265 CBR encoding */
   memset(&chn_attr, 0, sizeof(chn_attr));
@@ -445,11 +455,9 @@ static int venc_init(k_u32 chn_id, k_u32 width, k_u32 height, k_u32 bitrate_kbps
   ret = kd_mpi_venc_create_chn(chn_id, &chn_attr);
   if (ret != K_SUCCESS) {
     printf("[MPP] VENC create_chn failed: 0x%x\n", ret);
-    kd_mpi_venc_detach_vb_pool(chn_id);
-    kd_mpi_vb_destory_pool(g_venc_attach_pool_id);
-    g_venc_attach_pool_id = VB_INVALID_POOLID;
     return -1;
   }
+  g_venc_chn_created = 1;
 
   /* Enable IDR (instantaneous decoder refresh) frames.
    * IDR frames allow the decoder to start from any I-frame,
@@ -458,10 +466,6 @@ static int venc_init(k_u32 chn_id, k_u32 width, k_u32 height, k_u32 bitrate_kbps
   ret = kd_mpi_venc_enable_idr(chn_id, K_TRUE);
   if (ret != K_SUCCESS) {
     printf("[MPP] VENC enable_idr failed: 0x%x\n", ret);
-    kd_mpi_venc_destroy_chn(chn_id);
-    kd_mpi_venc_detach_vb_pool(chn_id);
-    kd_mpi_vb_destory_pool(g_venc_attach_pool_id);
-    g_venc_attach_pool_id = VB_INVALID_POOLID;
     return -1;
   }
 
@@ -474,13 +478,68 @@ static int venc_init(k_u32 chn_id, k_u32 width, k_u32 height, k_u32 bitrate_kbps
  * Destroy VENC channel and its dedicated VB pool.
  * Must be called AFTER unbinding from VICAP.
  */
-static void venc_exit(k_u32 chn_id) {
-  kd_mpi_venc_detach_vb_pool(chn_id);
-  kd_mpi_venc_destroy_chn(chn_id);
+static k_s32 venc_exit(k_u32 chn_id) {
+  k_s32 ret;
+
+  if (g_venc_pool_attached) {
+    ret = kd_mpi_venc_detach_vb_pool(chn_id);
+    if (ret != K_SUCCESS) {
+      printf("[MPP] VENC detach_vb_pool failed: 0x%x; resources retained\n", ret);
+      return ret;
+    }
+    g_venc_pool_attached = 0;
+  }
+  if (g_venc_chn_created) {
+    ret = kd_mpi_venc_destroy_chn(chn_id);
+    if (ret != K_SUCCESS) {
+      printf("[MPP] VENC destroy_chn failed: 0x%x; resources retained\n", ret);
+      return ret;
+    }
+    g_venc_chn_created = 0;
+  }
   if (g_venc_attach_pool_id != VB_INVALID_POOLID) {
-    kd_mpi_vb_destory_pool(g_venc_attach_pool_id);
+    ret = kd_mpi_vb_destory_pool(g_venc_attach_pool_id);
+    if (ret != K_SUCCESS) {
+      printf("[MPP] VENC destroy pool failed: 0x%x; resource retained\n", ret);
+      return ret;
+    }
     g_venc_attach_pool_id = VB_INVALID_POOLID;
   }
+  return K_SUCCESS;
+}
+
+static k_s32 venc_release(k_u32 chn_id) {
+  k_s32 ret;
+
+  if (g_venc_chn_created || g_venc_pool_attached ||
+      g_venc_attach_pool_id != VB_INVALID_POOLID)
+    return K_ERR_VENC_BUSY;
+
+  if (g_venc_chn_requested) {
+    ret = kd_mpi_venc_release_chn(chn_id);
+    if (ret != K_SUCCESS) {
+      printf("[MPP] VENC release_chn failed: 0x%x; resource retained\n", ret);
+      return ret;
+    }
+    g_venc_chn_requested = 0;
+  }
+  if (g_venc_fd_acquired) {
+    ret = kd_mpi_venc_release_fd();
+    g_venc_fd_acquired = 0;
+    if (ret != K_SUCCESS) {
+      printf("[MPP] VENC release fd failed: 0x%x\n", ret);
+      return ret;
+    }
+  }
+  return K_SUCCESS;
+}
+
+static k_s32 venc_cleanup(k_u32 chn_id) {
+  k_s32 ret = venc_exit(chn_id);
+
+  if (ret != K_SUCCESS)
+    return ret;
+  return venc_release(chn_id);
 }
 
 /* ── Bind (VICAP → VO / VENC) ───────────────────────────────────── */
@@ -575,9 +634,13 @@ static void vicap_unbind_venc(k_vicap_dev dev_id, k_vicap_chn chn_id, k_u32 venc
 int mpp_pipeline_init(const MppPipelineConfig* config) {
   k_s32 ret;
 
-  if (g_pipeline_initialized) {
+  if (g_pipeline_state == PIPELINE_READY) {
     printf("[MPP] Pipeline already initialized\n");
     return 0;
+  }
+  if (g_pipeline_state != PIPELINE_DOWN) {
+    printf("[MPP] Pipeline cleanup must be retried before initialization\n");
+    return -1;
   }
 
   /* 1. VB (Video Buffer subsystem) */
@@ -592,7 +655,7 @@ int mpp_pipeline_init(const MppPipelineConfig* config) {
   ret = layer_init(g_vo_layer, g_display_width, g_display_height);
   if (ret != 0) { connector_exit(); vb_exit(); return ret; }
 
-  /* 4. VICAP (camera capture, 2 channels: CHN0→VO, CHN1→VENC) */
+  /* 4. VICAP (camera capture, 2 channels: CHN1->VO, CHN2->VENC) */
   ret = vicap_init(g_vicap_dev, config->csi_num, config->lane_pref,
                    g_display_width, g_display_height,
                    config->venc_width, config->venc_height);
@@ -600,38 +663,64 @@ int mpp_pipeline_init(const MppPipelineConfig* config) {
 
   /* 5. VENC channel allocation + H.264/H.265 encoder init */
   g_venc_type = config->venc_type;
+  ret = kd_mpi_venc_acquire_fd();
+  if (ret != K_SUCCESS) {
+    printf("[MPP] VENC acquire fd failed, ret=%d\n", ret);
+    vicap_exit(g_vicap_dev); layer_exit(g_vo_layer); connector_exit(); vb_exit();
+    return ret;
+  }
+  g_venc_fd_acquired = 1;
+
   ret = kd_mpi_venc_request_chn(&g_venc_chn);
   if (ret != 0) {
     printf("[MPP] VENC request_chn failed, ret=%d\n", ret);
+    (void)kd_mpi_venc_release_fd();
+    g_venc_fd_acquired = 0;
     vicap_exit(g_vicap_dev); layer_exit(g_vo_layer); connector_exit(); vb_exit();
     return ret;
   }
+  g_venc_chn_requested = 1;
 
   ret = venc_init(g_venc_chn, config->venc_width, config->venc_height, config->venc_bitrate_kbps, config->venc_type);
   if (ret != 0) {
-    kd_mpi_venc_release_chn(g_venc_chn);
+    k_s32 cleanup_ret = venc_cleanup(g_venc_chn);
+    if (cleanup_ret != K_SUCCESS) {
+      printf("[MPP] VENC rollback failed: 0x%x; pipeline resources retained\n", cleanup_ret);
+      g_pipeline_state = PIPELINE_ROLLBACK_REQUIRED;
+      return ret;
+    }
     vicap_exit(g_vicap_dev); layer_exit(g_vo_layer); connector_exit(); vb_exit();
     return ret;
   }
 
-  /* 6. Bind VICAP-CHN0 → VO (camera preview on LCD/HDMI) */
+  /* 6. Bind VICAP-CHN1 to VO (camera preview on LCD/HDMI) */
   ret = vicap_bind_vo(g_vicap_dev, g_vicap_chn_vo, g_vo_layer);
   if (ret != 0) {
-    venc_exit(g_venc_chn); kd_mpi_venc_release_chn(g_venc_chn);
+    k_s32 cleanup_ret = venc_cleanup(g_venc_chn);
+    if (cleanup_ret != K_SUCCESS) {
+      printf("[MPP] VENC rollback failed: 0x%x; pipeline resources retained\n", cleanup_ret);
+      g_pipeline_state = PIPELINE_ROLLBACK_REQUIRED;
+      return ret;
+    }
     vicap_exit(g_vicap_dev); layer_exit(g_vo_layer); connector_exit(); vb_exit();
     return ret;
   }
 
-  /* 7. Bind VICAP-CHN1 → VENC (camera → H.264 encode → WebRTC) */
+  /* 7. Bind VICAP-CHN2 to VENC (camera to H.264 encode to WebRTC) */
   ret = vicap_bind_venc(g_vicap_dev, g_vicap_chn_venc, g_venc_chn);
   if (ret != 0) {
     vicap_unbind_vo(g_vicap_dev, g_vicap_chn_vo, g_vo_layer);
-    venc_exit(g_venc_chn); kd_mpi_venc_release_chn(g_venc_chn);
+    k_s32 cleanup_ret = venc_cleanup(g_venc_chn);
+    if (cleanup_ret != K_SUCCESS) {
+      printf("[MPP] VENC rollback failed: 0x%x; pipeline resources retained\n", cleanup_ret);
+      g_pipeline_state = PIPELINE_ROLLBACK_REQUIRED;
+      return ret;
+    }
     vicap_exit(g_vicap_dev); layer_exit(g_vo_layer); connector_exit(); vb_exit();
     return ret;
   }
 
-  g_pipeline_initialized = 1;
+  g_pipeline_state = PIPELINE_READY;
   printf("[MPP] Pipeline initialized: CSI%d, %ux%u encode, display %ux%u\n",
          config->csi_num, config->venc_width, config->venc_height,
          g_display_width, g_display_height);
@@ -645,7 +734,7 @@ int mpp_pipeline_init(const MppPipelineConfig* config) {
 int mpp_pipeline_start(void) {
   k_s32 ret;
 
-  if (!g_pipeline_initialized) {
+  if (g_pipeline_state != PIPELINE_READY) {
     printf("[MPP] Pipeline not initialized\n");
     return -1;
   }
@@ -699,7 +788,37 @@ VencType mpp_pipeline_get_venc_type(void) {
  * 8. Deinit connector + VB system
  */
 void mpp_pipeline_deinit(void) {
-  if (!g_pipeline_initialized) return;
+  k_s32 ret;
+
+  if (g_pipeline_state == PIPELINE_DOWN) return;
+
+  if (g_pipeline_state == PIPELINE_ROLLBACK_REQUIRED) {
+    ret = venc_cleanup(g_venc_chn);
+    if (ret != K_SUCCESS) {
+      printf("[MPP] VENC cleanup retry failed: 0x%x; resources retained\n", ret);
+      return;
+    }
+    layer_exit(g_vo_layer);
+    vicap_exit(g_vicap_dev);
+    connector_exit();
+    vb_exit();
+    g_pipeline_state = PIPELINE_DOWN;
+    printf("[MPP] Pipeline rollback completed\n");
+    return;
+  }
+
+  if (g_pipeline_state == PIPELINE_VENC_CLEANUP_REQUIRED) {
+    ret = venc_cleanup(g_venc_chn);
+    if (ret != K_SUCCESS) {
+      printf("[MPP] VENC cleanup retry failed: 0x%x; resources retained\n", ret);
+      return;
+    }
+    connector_exit();
+    vb_exit();
+    g_pipeline_state = PIPELINE_DOWN;
+    printf("[MPP] Pipeline deinitialized\n");
+    return;
+  }
 
   if (g_pipeline_started) {
     /* Stop producing: VENC first, then VICAP */
@@ -742,13 +861,17 @@ void mpp_pipeline_deinit(void) {
   vicap_exit(g_vicap_dev);
 
   /* Deinit VENC and destroy its dedicated VB pool */
-  venc_exit(g_venc_chn);
-  kd_mpi_venc_release_chn(g_venc_chn);
+  g_pipeline_state = PIPELINE_VENC_CLEANUP_REQUIRED;
+  ret = venc_cleanup(g_venc_chn);
+  if (ret != K_SUCCESS) {
+    printf("[MPP] VENC cleanup failed: 0x%x; pipeline resources retained\n", ret);
+    return;
+  }
 
   /* Finally, deinit display connector and VB system */
   connector_exit();
   vb_exit();
 
-  g_pipeline_initialized = 0;
+  g_pipeline_state = PIPELINE_DOWN;
   printf("[MPP] Pipeline deinitialized\n");
 }

@@ -4,8 +4,8 @@ include $(SDK_RTSMART_SRC_DIR)/libs/mk/toolchain_riscv64_musl.mk
 
 # Build configuration
 DIR := $(shell basename `pwd`)
-BUILD := $(SDK_RTSMART_BUILD_DIR)/examples/mpp/$(DIR)
-BIN := $(RTT_MPP_EXAMPLES_ELF_INSTALL_PATH)/$(DIR).elf
+BUILD := $(SDK_RTSMART_BUILD_DIR)/examples/peripheral/$(DIR)
+BIN := $(RTT_PERIPHERAL_EXAMPLES_ELF_INSTALL_PATH)/$(DIR).elf
 
 # Source files handling
 C_SRCS    := $(wildcard *.c)
@@ -22,12 +22,12 @@ DEPS      := $(OBJS:.o=.d)
 OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
 
 # Library configuration
-include $(SDK_RTSMART_SRC_DIR)/libs/mk/libmpp.mk
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/librtsmart_hal.mk
 
 # Compiler flags
 C_CXX_FLAGS := -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -Os
 C_CXX_FLAGS += -I. $(LIB_CFLAGS) -I$(SDK_SRC_ROOT_DIR)/include -include "generated/autoconf.h"
+C_CXX_FLAGS += -I$(SDK_RTSMART_SRC_DIR)/rtsmart/userapps/sdk/rt-thread/include
 C_CXX_FLAGS += -Wall -Wextra -ffunction-sections -fdata-sections
 
 CFLAGS 		:= $(C_CXX_FLAGS) -std=gnu99
@@ -41,7 +41,7 @@ LDFLAGS += $(LIB_LDFLAGS)
 .PHONY: all clean distclean
 
 all: $(BIN)
-	@$(ECHO) [BUILD] examples mpp $(DIR) done.
+	@$(ECHO) [BUILD] examples peripheral $(DIR) done.
 
 # Rule to link the final ELF - Order-only dependency on directory
 $(BIN): $(OBJS) | $(OBJ_DIRS)

@@ -482,6 +482,11 @@ static bool flash_detect_device(flash_device_t* flash)
 
     printf("Detected JEDEC ID: 0x%06X\n", jedec_id);
 
+    if (jedec_id == 0 || jedec_id == 0xFFFFFF) {
+        printf("No SPI flash response detected\n");
+        return false;
+    }
+
     // 在数据库中查找匹配的设备
     const flash_device_info_t* dev = flash_devices;
     while (dev->jedec_id != 0) {
@@ -870,8 +875,15 @@ static flash_device_t* flash_create(int spi_id, int cs_pin, uint32_t baudrate)
     flash_set_data_lines(flash, 1);
 
     // 检测设备
-    if (!flash_detect_device(flash)) {
-        printf("Warning: Using default device parameters\n");
+    if (!flash_detect_device(flash) &&
+        (flash->jedec_id == 0 || flash->jedec_id == 0xFFFFFF)) {
+        printf("Failed to detect an attached SPI flash\n");
+        if (flash->qspi4_handle)
+            drv_spi_inst_destroy(&flash->qspi4_handle);
+        drv_spi_inst_destroy(&flash->qspi2_handle);
+        drv_spi_inst_destroy(&flash->spi_handle);
+        free(flash);
+        return NULL;
     }
 
     // 根据设备大小决定是否使用4字节地址模式

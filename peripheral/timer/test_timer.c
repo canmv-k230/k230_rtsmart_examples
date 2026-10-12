@@ -2,16 +2,17 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <string.h>
 #include "drv_timer.h"
 
 // 测试结果统计
 static int test_passed = 0;
 static int test_failed = 0;
+static int verbose = 1;
 
 // 中断测试变量
 static atomic_int hard_timer_irq_count = 0;
 static atomic_int soft_timer_irq_count = 0;
-static atomic_int irq_test_running = 0;
 
 // 测试宏
 #define TEST_ASSERT(cond, msg) do { \
@@ -20,7 +21,8 @@ static atomic_int irq_test_running = 0;
         test_failed++; \
         return -1; \
     } else { \
-        printf("[PASS] %s\n", msg); \
+        if (verbose) \
+            printf("[PASS] %s\n", msg); \
         test_passed++; \
     } \
 } while(0)
@@ -36,10 +38,12 @@ static atomic_int irq_test_running = 0;
 
 // Timer callback functions
 void hard_timer_callback(void* args) {
+    (void)args;
     atomic_fetch_add(&hard_timer_irq_count, 1);
 }
 
 void soft_timer_callback(void* args) {
+    (void)args;
     atomic_fetch_add(&soft_timer_irq_count, 1);
 }
 
@@ -53,7 +57,8 @@ void print_test_summary() {
 
 // Test cases for hard timer
 int test_hard_timer() {
-    printf("\n=== Testing Hard Timer ===\n");
+    if (verbose)
+        printf("\n=== Testing Hard Timer ===\n");
 
     drv_hard_timer_inst_t* timer = NULL;
     rt_hwtimer_info_t info;
@@ -153,7 +158,8 @@ int test_hard_timer() {
 
 // Test cases for soft timer
 int test_soft_timer() {
-    printf("\n=== Testing Soft Timer ===\n");
+    if (verbose)
+        printf("\n=== Testing Soft Timer ===\n");
 
     drv_soft_timer_inst_t* timer = NULL;
     int ret;
@@ -217,13 +223,52 @@ int test_soft_timer() {
     return 0;
 }
 
-int main() {
+static void usage(const char *prog)
+{
+    printf("Usage: %s [--repeat COUNT] [--quiet]\n", prog);
+}
+
+int main(int argc, char **argv) {
+    int repeat = 1;
+    int completed = 0;
+    int i;
+
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--quiet") == 0) {
+            verbose = 0;
+        } else if (strcmp(argv[i], "--repeat") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            unsigned long value = strtoul(argv[++i], &end, 10);
+
+            if (end == argv[i] || *end != '\0' || value == 0 || value > 10000) {
+                usage(argv[0]);
+                return 1;
+            }
+            repeat = (int)value;
+        } else {
+            usage(argv[0]);
+            return 1;
+        }
+    }
+
     printf("Starting Timer Driver Tests\n");
 
-    test_hard_timer();
-    test_soft_timer();
+    for (i = 0; i < repeat; i++) {
+        int failures_before = test_failed;
+
+        test_hard_timer();
+        test_soft_timer();
+        completed++;
+        if (test_failed != failures_before) {
+            printf("Timer repetition %d/%d failed\n", i + 1, repeat);
+            break;
+        }
+        if (verbose)
+            printf("Timer repetition %d/%d passed\n", i + 1, repeat);
+    }
 
     print_test_summary();
+    printf("Repetitions: %d/%d\n", completed, repeat);
 
     return test_failed ? -1 : 0;
 }

@@ -15,6 +15,16 @@
 #define TEST_ITERATIONS 3
 #define TEST_MSG_SIZE   128
 
+static int total_checks;
+static int total_failures;
+
+#define RECORD_CHECK(condition)       \
+    do {                              \
+        total_checks++;               \
+        if (!(condition))             \
+            total_failures++;         \
+    } while (0)
+
 typedef struct {
     uint32_t    baud_rate;
     uint8_t     parity;
@@ -119,6 +129,56 @@ void clear_uart_buffers(drv_uart_inst_t* uart)
     }
 }
 
+static int transmission_delay_us(const uart_test_config* config, size_t len)
+{
+    uint32_t stop_half_bits = config->stop_bits == STOP_BITS_1 ? 2
+                              : config->stop_bits == STOP_BITS_2 ? 3
+                                                                 : 4;
+    uint32_t frame_half_bits = 2 + 16 + (config->parity != PARITY_NONE ? 2 : 0) + stop_half_bits;
+    uint64_t transmission_us = (uint64_t)frame_half_bits * len * 500000ULL;
+
+    return (int)((transmission_us + config->baud_rate - 1) / config->baud_rate) + 10000;
+}
+
+static int test_transfer(drv_uart_inst_t* tx_uart, drv_uart_inst_t* rx_uart,
+                         const char* direction, const uint8_t* tx_buf,
+                         uint8_t* rx_buf, size_t len, int delay_us)
+{
+    ssize_t written;
+    ssize_t received;
+
+    memset(rx_buf, 0, TEST_MSG_SIZE);
+    written = drv_uart_write(tx_uart, tx_buf, len);
+    if (written != (ssize_t)len) {
+        printf("  %s %zu-byte write failed: wrote %zd/%zu\n",
+               direction, len, written, len);
+        RECORD_CHECK(0);
+        return 1;
+    }
+
+    usleep(delay_us);
+    received = drv_uart_read(rx_uart, rx_buf, len);
+    if (received != (ssize_t)len) {
+        printf("  %s %zu-byte read failed: read %zd/%zu\n",
+               direction, len, received, len);
+        RECORD_CHECK(0);
+        clear_uart_buffers(rx_uart);
+        return 1;
+    }
+
+    if (memcmp(tx_buf, rx_buf, len) != 0) {
+        printf("  %s %zu-byte verify failed: data mismatch\n", direction, len);
+        RECORD_CHECK(0);
+        clear_uart_buffers(rx_uart);
+        return 1;
+    } else {
+        printf("  %s %4zu-byte: PASS\n", direction, len);
+        RECORD_CHECK(1);
+    }
+    clear_uart_buffers(rx_uart);
+    return 0;
+}
+
 /**
  * @brief Test basic read/write between UART2 and UART3
  */
@@ -139,63 +199,12 @@ void test_basic_io(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const uart_te
             tx_buf[j] = (uint8_t)(j % 256);
         }
 
-        // Clear receive buffer
-        memset(rx_buf, 0, sizeof(rx_buf));
+        int delay_us = transmission_delay_us(config, len);
 
-        // Test UART2 -> UART3 direction
-        ssize_t written = drv_uart_write(uart2, tx_buf, len);
-        if (written != (ssize_t)len) {
-            printf("  UART2->UART3 %zu-byte write failed: wrote %zd/%zu\n", len, written, len);
-            continue;
-        }
-
-        // Calculate transmission time with margin
-        int bit_count = (1 + 8 + (config->parity != PARITY_NONE ? 1 : 0)
-                         + (config->stop_bits == STOP_BITS_1       ? 1
-                                : config->stop_bits == STOP_BITS_2 ? 15
-                                                                   : 2))
-            * len;
-        int delay_us = (bit_count * 1000000) / config->baud_rate + 10000;
-        usleep(delay_us);
-
-        // Read data from UART3
-        ssize_t read = drv_uart_read(uart3, rx_buf, len);
-        if (read != (ssize_t)len) {
-            printf("  UART2->UART3 %zu-byte read failed: read %zd/%zu\n", len, read, len);
-            clear_uart_buffers(uart3);
-            continue;
-        }
-
-        // Verify data
-        if (memcmp(tx_buf, rx_buf, len) != 0) {
-            printf("  UART2->UART3 %zu-byte verify failed: data mismatch\n", len);
-        } else {
-            printf("  UART2->UART3 %4zu-byte: PASS\n", len);
-        }
-        clear_uart_buffers(uart3);
-
-        // Test UART3 -> UART2 direction
-        written = drv_uart_write(uart3, tx_buf, len);
-        if (written != (ssize_t)len) {
-            printf("  UART3->UART2 %zu-byte write failed: wrote %zd/%zu\n", len, written, len);
-            continue;
-        }
-
-        usleep(delay_us);
-
-        read = drv_uart_read(uart2, rx_buf, len);
-        if (read != (ssize_t)len) {
-            printf("  UART3->UART2 %zu-byte read failed: read %zd/%zu\n", len, read, len);
-            clear_uart_buffers(uart2);
-            continue;
-        }
-
-        if (memcmp(tx_buf, rx_buf, len) != 0) {
-            printf("  UART3->UART2 %zu-byte verify failed: data mismatch\n", len);
-        } else {
-            printf("  UART3->UART2 %4zu-byte: PASS\n", len);
-        }
-        clear_uart_buffers(uart2);
+        test_transfer(uart2, uart3, "UART2->UART3", tx_buf, rx_buf,
+                      len, delay_us);
+        test_transfer(uart3, uart2, "UART3->UART2", tx_buf, rx_buf,
+                      len, delay_us);
     }
 }
 
@@ -213,6 +222,7 @@ void test_polling(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const uart_tes
     // Test 1: Poll with no data (non-blocking)
     int ret = drv_uart_poll(uart3, 0);
     printf("  UART3 poll no data (non-block): %s\n", ret == 0 ? "PASS" : "FAIL");
+    RECORD_CHECK(ret == 0);
 
     // Test 2: Poll with timeout (no data)
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -223,20 +233,17 @@ void test_polling(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const uart_tes
 
     printf("  UART3 poll timeout (100ms): %s (actual %ldms)\n",
            (ret == 0 && elapsed_ms >= 90 && elapsed_ms <= 110) ? "PASS" : "FAIL", elapsed_ms);
+    RECORD_CHECK(ret == 0 && elapsed_ms >= 90 && elapsed_ms <= 110);
 
     // Test 3: Poll with data available (UART2 -> UART3)
     drv_uart_write(uart2, &test_byte, 1);
 
-    // Calculate transmission time with margin
-    int bit_count = (1 + 8 + (config->parity != PARITY_NONE ? 1 : 0)
-                     + (config->stop_bits == STOP_BITS_1       ? 1
-                            : config->stop_bits == STOP_BITS_2 ? 15
-                                                               : 2));
-    int delay_us  = (bit_count * 1000000) / config->baud_rate + 10000;
+    int delay_us = transmission_delay_us(config, 1);
     usleep(delay_us);
 
     ret = drv_uart_poll(uart3, 0);
     printf("  UART3 poll with data: %s\n", ret > 0 ? "PASS" : "FAIL");
+    RECORD_CHECK(ret > 0);
 
     // Clean up
     uint8_t dummy;
@@ -245,6 +252,7 @@ void test_polling(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const uart_tes
     // Repeat tests for UART2
     ret = drv_uart_poll(uart2, 0);
     printf("  UART2 poll no data (non-block): %s\n", ret == 0 ? "PASS" : "FAIL");
+    RECORD_CHECK(ret == 0);
 
     clock_gettime(CLOCK_MONOTONIC, &start);
     ret = drv_uart_poll(uart2, 100);
@@ -254,12 +262,14 @@ void test_polling(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const uart_tes
 
     printf("  UART2 poll timeout (100ms): %s (actual %ldms)\n",
            (ret == 0 && elapsed_ms >= 90 && elapsed_ms <= 110) ? "PASS" : "FAIL", elapsed_ms);
+    RECORD_CHECK(ret == 0 && elapsed_ms >= 90 && elapsed_ms <= 110);
 
     drv_uart_write(uart3, &test_byte, 1);
     usleep(delay_us);
 
     ret = drv_uart_poll(uart2, 0);
     printf("  UART2 poll with data: %s\n", ret > 0 ? "PASS" : "FAIL");
+    RECORD_CHECK(ret > 0);
     drv_uart_read(uart2, &dummy, 1);
 }
 
@@ -276,21 +286,17 @@ void test_receive_available(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, cons
     // Test UART3 available bytes
     ssize_t avail = drv_uart_recv_available(uart3);
     printf("  UART3 available empty: %s\n", avail == 0 ? "PASS" : "FAIL");
+    RECORD_CHECK(avail == 0);
 
     // Send data from UART2 to UART3
     drv_uart_write(uart2, test_data, sizeof(test_data));
 
-    // Calculate transmission time
-    int bit_count = (1 + 8 + (config->parity != PARITY_NONE ? 1 : 0)
-                     + (config->stop_bits == STOP_BITS_1       ? 1
-                            : config->stop_bits == STOP_BITS_2 ? 15
-                                                               : 2))
-        * sizeof(test_data);
-    int delay_us = (bit_count * 1000000) / config->baud_rate + 10000;
+    int delay_us = transmission_delay_us(config, sizeof(test_data));
     usleep(delay_us);
 
     avail = drv_uart_recv_available(uart3);
     printf("  UART3 available with data: %s (%zd bytes)\n", avail == sizeof(test_data) ? "PASS" : "FAIL", avail);
+    RECORD_CHECK(avail == sizeof(test_data));
 
     // Clean up
     uint8_t dummy[16];
@@ -299,6 +305,7 @@ void test_receive_available(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, cons
     // Test UART2 available bytes
     avail = drv_uart_recv_available(uart2);
     printf("  UART2 available empty: %s\n", avail == 0 ? "PASS" : "FAIL");
+    RECORD_CHECK(avail == 0);
 
     // Send data from UART3 to UART2
     drv_uart_write(uart3, test_data, sizeof(test_data));
@@ -306,6 +313,7 @@ void test_receive_available(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, cons
 
     avail = drv_uart_recv_available(uart2);
     printf("  UART2 available with data: %s (%zd bytes)\n", avail == sizeof(test_data) ? "PASS" : "FAIL", avail);
+    RECORD_CHECK(avail == sizeof(test_data));
     drv_uart_read(uart2, dummy, sizeof(dummy));
 }
 
@@ -319,39 +327,49 @@ void test_error_conditions()
     // Test 1: NULL instance
     ssize_t ret = drv_uart_read(NULL, NULL, 0);
     printf("  NULL instance read: %s\n", ret == -1 ? "PASS" : "FAIL");
+    RECORD_CHECK(ret == -1);
 
     ret = drv_uart_write(NULL, NULL, 0);
     printf("  NULL instance write: %s\n", ret == -1 ? "PASS" : "FAIL");
+    RECORD_CHECK(ret == -1);
 
     // Test 2: Invalid FD
     drv_uart_inst_t dummy_inst = { 0 };
     dummy_inst.fd              = -1;
     ret                        = drv_uart_read(&dummy_inst, NULL, 0);
     printf("  Invalid FD read: %s\n", ret == -1 ? "PASS" : "FAIL");
+    RECORD_CHECK(ret == -1);
 
     ret = drv_uart_write(&dummy_inst, NULL, 0);
     printf("  Invalid FD write: %s\n", ret == -1 ? "PASS" : "FAIL");
+    RECORD_CHECK(ret == -1);
 
     // Test 3: NULL buffers
     drv_uart_inst_t* uart2 = NULL;
-    drv_uart_inst_create(2, &uart2);
+    ret = drv_uart_inst_create(2, &uart2);
     if (uart2) {
         ret = drv_uart_read(uart2, NULL, 10);
         printf("  NULL read buffer: %s\n", ret == -1 ? "PASS" : "FAIL");
+        RECORD_CHECK(ret == -1);
 
         ret = drv_uart_write(uart2, NULL, 10);
         printf("  NULL write buffer: %s\n", ret == -1 ? "PASS" : "FAIL");
-        drv_uart_inst_destroy(&uart2);
-    }
+        RECORD_CHECK(ret == -1);
 
-    // Test 4: Zero length
-    uint8_t dummy;
-    if (uart2) {
+        // Test 4: Zero length
+        uint8_t dummy = 0;
         ret = drv_uart_read(uart2, &dummy, 0);
         printf("  Zero-length read: %s\n", ret == 0 ? "PASS" : "FAIL");
+        RECORD_CHECK(ret == 0);
 
         ret = drv_uart_write(uart2, &dummy, 0);
         printf("  Zero-length write: %s\n", ret == 0 ? "PASS" : "FAIL");
+        RECORD_CHECK(ret == 0);
+        drv_uart_inst_destroy(&uart2);
+    } else {
+        printf("  UART2 creation for buffer tests: FAIL (%zd)\n", ret);
+        total_checks += 4;
+        total_failures += 4;
     }
 }
 
@@ -376,65 +394,13 @@ void test_stress(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const uart_test
             tx_buf[j] = (uint8_t)rand();
         }
 
-        // Clear receive buffer
-        memset(rx_buf, 0, sizeof(rx_buf));
+        int delay_us = transmission_delay_us(config, len);
 
-        // Test UART2 -> UART3 direction
-        ssize_t written = drv_uart_write(uart2, tx_buf, len);
-        if (written != (ssize_t)len) {
-            printf("  UART2->UART3 Iter %d: write failed (%zd/%zu)\n", i, written, len);
-            failures++;
-            continue;
-        }
-
-        // Calculate transmission time
-        int bit_count = (1 + 8 + (config->parity != PARITY_NONE ? 1 : 0)
-                         + (config->stop_bits == STOP_BITS_1       ? 1
-                                : config->stop_bits == STOP_BITS_2 ? 15
-                                                                   : 2))
-            * len;
-        int delay_us = (bit_count * 1000000) / config->baud_rate + 10000;
-        usleep(delay_us);
-
-        // Read data from UART3
-        ssize_t read = drv_uart_read(uart3, rx_buf, len);
-        if (read != (ssize_t)len) {
-            printf("  UART2->UART3 Iter %d: read failed (%zd/%zu)\n", i, read, len);
-            failures++;
-            clear_uart_buffers(uart3);
-            continue;
-        }
-
-        // Verify data
-        if (memcmp(tx_buf, rx_buf, len) != 0) {
-            printf("  UART2->UART3 Iter %d: data mismatch\n", i);
-            failures++;
-        }
-        clear_uart_buffers(uart3);
-
-        // Test UART3 -> UART2 direction
-        written = drv_uart_write(uart3, tx_buf, len);
-        if (written != (ssize_t)len) {
-            printf("  UART3->UART2 Iter %d: write failed (%zd/%zu)\n", i, written, len);
-            failures++;
-            continue;
-        }
-
-        usleep(delay_us);
-
-        read = drv_uart_read(uart2, rx_buf, len);
-        if (read != (ssize_t)len) {
-            printf("  UART3->UART2 Iter %d: read failed (%zd/%zu)\n", i, read, len);
-            failures++;
-            clear_uart_buffers(uart2);
-            continue;
-        }
-
-        if (memcmp(tx_buf, rx_buf, len) != 0) {
-            printf("  UART3->UART2 Iter %d: data mismatch\n", i);
-            failures++;
-        }
-        clear_uart_buffers(uart2);
+        printf("  Stress iteration %d/%d\n", i + 1, TEST_ITERATIONS);
+        failures += test_transfer(uart2, uart3, "UART2->UART3",
+                                  tx_buf, rx_buf, len, delay_us);
+        failures += test_transfer(uart3, uart2, "UART3->UART2",
+                                  tx_buf, rx_buf, len, delay_us);
     }
 
     printf("  Stress test complete: %d/%d passed\n", TEST_ITERATIONS * 2 - failures, TEST_ITERATIONS * 2);
@@ -445,8 +411,16 @@ void test_stress(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const uart_test
 int test_config_operations(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const uart_test_config* current_config)
 {
     printf("\n=== Configuration Tests ===\n");
-    int                   config_failures = 0;
-    struct uart_configure cfg, get_cfg;
+    int config_failures = 0;
+    struct uart_configure get_cfg;
+    struct uart_configure cfg = {
+        .baud_rate = current_config->baud_rate,
+        .data_bits = DATA_BITS_8,
+        .stop_bits = current_config->stop_bits,
+        .parity    = current_config->parity,
+        .bit_order = BIT_ORDER_LSB,
+        .invert    = NRZ_NORMAL,
+    };
 
     // Test 1: Verify current configuration matches what we set
     if (drv_uart_get_config(uart2, &get_cfg) == 0) {
@@ -465,7 +439,6 @@ int test_config_operations(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const
     }
 
     // Test 2: Set and verify new configuration
-    cfg                 = get_cfg;
     uint32_t new_baud   = (cfg.baud_rate == 115200) ? 57600 : 115200;
     uint8_t  new_parity = (cfg.parity == PARITY_NONE) ? PARITY_ODD : PARITY_NONE;
     cfg.baud_rate       = new_baud;
@@ -530,6 +503,8 @@ int test_config_operations(drv_uart_inst_t* uart2, drv_uart_inst_t* uart3, const
     drv_uart_set_config(uart2, &cfg);
     drv_uart_set_config(uart3, &cfg);
 
+    total_checks += 4;
+    total_failures += config_failures;
     return config_failures;
 }
 
@@ -551,9 +526,10 @@ int main()
 
     int total_configs  = sizeof(test_configs) / sizeof(test_configs[0]);
     int passed_configs = 0;
-    int total_failures = 0;
 
     for (int i = 0; i < total_configs; i++) {
+        int failures_before = total_failures;
+
         printf("\n=== Testing Configuration %d/%d ===\n", i + 1, total_configs);
         printf("Baud Rate: %d, Parity: %s, Stop Bits: %s\n", test_configs[i].baud_rate, test_configs[i].parity_name,
                test_configs[i].stop_bits_name);
@@ -561,30 +537,29 @@ int main()
         drv_uart_inst_t* uart2 = NULL;
         drv_uart_inst_t* uart3 = NULL;
         if (init_uarts_with_config(&uart2, &uart3, &test_configs[i]) != 0) {
+            total_checks++;
             total_failures++;
             continue;
         }
 
-        int config_failures = 0;
-
         test_basic_io(uart2, uart3, &test_configs[i]);
         test_polling(uart2, uart3, &test_configs[i]);
         test_receive_available(uart2, uart3, &test_configs[i]);
-        config_failures += test_config_operations(uart2, uart3, &test_configs[i]);
+        test_config_operations(uart2, uart3, &test_configs[i]);
         test_stress(uart2, uart3, &test_configs[i]);
 
         drv_uart_inst_destroy(&uart2);
         drv_uart_inst_destroy(&uart3);
 
-        if (config_failures == 0) {
+        if (total_failures == failures_before) {
             passed_configs++;
-        } else {
-            total_failures += config_failures;
         }
     }
 
     printf("\nTest Complete: %d/%d configurations passed with %d individual test failures\n", passed_configs, total_configs,
            total_failures);
+    printf("Checks: %d passed, %d failed, %d total\n",
+           total_checks - total_failures, total_failures, total_checks);
 
     return (total_failures == 0) ? 0 : 1;
 }

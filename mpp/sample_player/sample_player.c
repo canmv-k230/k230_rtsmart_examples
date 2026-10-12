@@ -10,8 +10,8 @@ static sem_t g_stop_player_sem;
 
 static void sig_handler(int sig)
 {
-    printf("receive SIGINT \n");
-    kd_player_stop();
+    (void)sig;
+    sem_post(&g_stop_player_sem);
 }
 
 static k_s32 player_event_cb(K_PLAYER_EVENT_E enEvent, void *pData)

@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "drv_fft.h"
 
@@ -148,8 +149,108 @@ out:
 
 static const int test_points[] = { 64, 128, 256, 512, 1024, 2048, 4096 };
 
+static int fft_invalid_test(drv_fft_inst_t* inst)
+{
+    drv_fft_cfg_t cfg = {
+        .point = 64,
+        .input_mode = RIRI,
+        .output_mode = RR_II_OUT,
+        .shift = 0x555,
+        .timeout_ms = 100,
+    };
+    short in_real[64] = {0};
+    short in_imag[64] = {0};
+    short out_real[64] = {0};
+    short out_imag[64] = {0};
+    uint32_t old_input_size;
+    uint32_t old_output_size;
+    int passed = 0;
+    int total = 0;
+    int ret;
+
+#define FFT_EXPECT(condition, name)                                      \
+    do {                                                                 \
+        total++;                                                         \
+        if (condition) {                                                 \
+            passed++;                                                    \
+            printf("[PASS] %s\n", name);                                \
+        } else {                                                         \
+            printf("[FAIL] %s\n", name);                                \
+        }                                                                \
+    } while (0)
+
+    FFT_EXPECT(drv_fft_open(NULL) < 0, "FFT rejects null open output");
+    FFT_EXPECT(drv_fft_run(NULL, &cfg, in_real, in_imag, out_real,
+                           out_imag) < 0,
+               "FFT rejects null instance");
+    FFT_EXPECT(drv_fft_run(inst, NULL, in_real, in_imag, out_real,
+                           out_imag) < 0,
+               "FFT rejects null configuration");
+
+    cfg.point = 63;
+    FFT_EXPECT(drv_fft_run(inst, &cfg, in_real, in_imag, out_real,
+                           out_imag) < 0,
+               "FFT rejects unsupported point count");
+    cfg.point = 64;
+    FFT_EXPECT(drv_fft_run(inst, &cfg, NULL, in_imag, out_real,
+                           out_imag) < 0,
+               "FFT rejects null input");
+    FFT_EXPECT(drv_fft_run(inst, &cfg, in_real, NULL, out_real,
+                           out_imag) < 0,
+               "FFT rejects missing imaginary input");
+    FFT_EXPECT(drv_fft_run(inst, &cfg, in_real, in_imag, NULL,
+                           out_imag) < 0,
+               "FFT rejects null output");
+
+    old_input_size = drv_fft_get_input_alloc_size(inst);
+    old_output_size = drv_fft_get_output_alloc_size(inst);
+    FFT_EXPECT(drv_fft_set_input_alloc_size(inst, 0) < 0 &&
+                   drv_fft_get_input_alloc_size(inst) == old_input_size,
+               "FFT rejects zero allocation without losing input buffer");
+    ret = drv_fft_set_output_alloc_size(inst, UINT32_MAX);
+    FFT_EXPECT(ret < 0 &&
+                   drv_fft_get_output_alloc_size(inst) == old_output_size,
+               "FFT allocation failure preserves output buffer");
+    FFT_EXPECT(fft_roundtrip_test(inst, 64) == 0,
+               "FFT recovers after invalid and allocation failures");
+
+    printf("FFT_INVALID_RESULT passed=%d failed=%d total=%d\n", passed,
+           total - passed, total);
+#undef FFT_EXPECT
+    return passed == total ? 0 : -1;
+}
+
+static int fft_hold(unsigned int seconds)
+{
+    drv_fft_inst_t* inst = NULL;
+    int ret;
+
+    ret = drv_fft_open(&inst);
+    if (ret != 0) {
+        printf("drv_fft_open failed ret=%d\n", ret);
+        return 1;
+    }
+
+    printf("FFT_HOLD_READY seconds=%u\n", seconds);
+    sleep(seconds);
+    drv_fft_close(&inst);
+    printf("FFT_HOLD_DONE\n");
+    return 0;
+}
+
 int main(int argc, char* argv[])
 {
+    if (argc == 3 && strcmp(argv[1], "--hold") == 0) {
+        char* end = NULL;
+        unsigned long seconds = strtoul(argv[2], &end, 10);
+
+        if (end == argv[2] || *end != '\0' || seconds == 0 || seconds > 60) {
+            fprintf(stderr, "Invalid hold duration: %s\n", argv[2]);
+            return 1;
+        }
+        return fft_hold((unsigned int)seconds);
+    }
+
     if (argc >= 2)
         g_verbose = atoi(argv[1]);
 
@@ -165,6 +266,8 @@ int main(int argc, char* argv[])
     printf("after drv_fft_open inst=%p\n", inst);
 
     int failures = 0;
+    if (fft_invalid_test(inst) != 0)
+        failures++;
     for (int i = 0; i < (int)(sizeof(test_points) / sizeof(test_points[0])); i++) {
         printf("start point=%d\n", test_points[i]);
         if (fft_roundtrip_test(inst, test_points[i]) != 0)
@@ -175,7 +278,8 @@ int main(int argc, char* argv[])
     drv_fft_close(&inst);
     printf("done failures=%d\n", failures);
 
-    printf("\n%d/%d tests passed\n", (int)(sizeof(test_points) / sizeof(test_points[0])) - failures,
-           (int)(sizeof(test_points) / sizeof(test_points[0])));
+    printf("\n%d/%d test groups passed\n",
+           (int)(sizeof(test_points) / sizeof(test_points[0])) + 1 - failures,
+           (int)(sizeof(test_points) / sizeof(test_points[0])) + 1);
     return failures ? 1 : 0;
 }

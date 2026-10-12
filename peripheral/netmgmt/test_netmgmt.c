@@ -1,6 +1,14 @@
 #include "hal_netmgmt.h"
+#include <arpa/inet.h>
+#include <errno.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define TEST_SSID     "Xel"
@@ -11,6 +19,14 @@
 #define TEST_LAN_STATIC_GW   0xC0A80101 // 192.168.1.1
 #define TEST_LAN_STATIC_MASK 0xFFFFFF00
 #define TEST_LAN_STATIC_DNS  0x08080808
+
+#define DNS_PORT             53
+#define DNS_RETRY_COUNT      5
+#define DNS_REPLY_TIMEOUT_MS 2000
+#define SOAK_DELAY_US        500000U
+#define SOAK_REPORT_SECONDS  60U
+
+static volatile sig_atomic_t soak_stop;
 
 #define PASS(msg) printf(" [PASS] %s\n", msg)
 #define FAIL(msg) printf(" [FAIL] %s\n", msg)
@@ -34,9 +50,10 @@ static void test_utils()
 {
     STEP("UTILS: Default Device + Ifconfig + Probe");
 
+    char preferred_dev[32] = "wlan0";
     char dev[32] = { 0 };
-    CHECK_OK(netmgmt_utils_set_defeault_dev("wlan0"), "Set default device");
-    CHECK_OK(netmgmt_utils_get_defeault_dev(dev), "Get default device");
+    CHECK_OK(netmgmt_utils_set_default_dev(preferred_dev), "Set default device");
+    CHECK_OK(netmgmt_utils_get_default_dev(dev), "Get default device");
     printf("  Default device: %s\n", dev);
 
     int probe = 0;
@@ -217,8 +234,216 @@ static void test_lan()
     printf("  DHCP IP: 0x%X\n", cfg.ip.addr);
 }
 
-int main()
+static void soak_signal_handler(int sig)
 {
+    (void)sig;
+    soak_stop = 1;
+}
+
+static int monotonic_seconds(uint64_t *seconds)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+    }
+    *seconds = (uint64_t)now.tv_sec;
+    return 0;
+}
+
+static size_t build_dns_query(uint8_t *packet, size_t capacity, uint16_t id)
+{
+    static const uint8_t question[] = {
+        4, 'p', 'o', 'o', 'l',
+        3, 'n', 't', 'p',
+        3, 'o', 'r', 'g',
+        0,
+        0, 1,
+        0, 1,
+    };
+
+    if (capacity < 12U + sizeof(question)) {
+        return 0;
+    }
+    memset(packet, 0, capacity);
+    packet[0] = (uint8_t)(id >> 8);
+    packet[1] = (uint8_t)id;
+    packet[2] = 0x01;
+    packet[5] = 0x01;
+    memcpy(packet + 12, question, sizeof(question));
+    return 12U + sizeof(question);
+}
+
+static int dns_query(int fd, uint16_t id, uint64_t *sent_bytes,
+                     uint64_t *received_bytes, unsigned int *retries)
+{
+    uint8_t request[64];
+    uint8_t response[512];
+    size_t request_size = build_dns_query(request, sizeof(request), id);
+    unsigned int attempt;
+
+    for (attempt = 0; attempt < DNS_RETRY_COUNT && !soak_stop; attempt++) {
+        struct pollfd pollfd = {
+            .fd = fd,
+            .events = POLLIN,
+        };
+        ssize_t sent;
+        ssize_t received;
+        int ready;
+
+        sent = send(fd, request, request_size, 0);
+        if (sent != (ssize_t)request_size) {
+            if (sent < 0 && errno == EINTR) {
+                attempt--;
+                continue;
+            }
+            continue;
+        }
+        *sent_bytes += (uint64_t)sent;
+
+        ready = poll(&pollfd, 1, DNS_REPLY_TIMEOUT_MS);
+        if (ready <= 0 || !(pollfd.revents & POLLIN)) {
+            if (ready < 0 && errno == EINTR) {
+                attempt--;
+                continue;
+            }
+            continue;
+        }
+
+        received = recv(fd, response, sizeof(response), 0);
+        if (received < 12) {
+            continue;
+        }
+        *received_bytes += (uint64_t)received;
+        if (response[0] != (uint8_t)(id >> 8) ||
+            response[1] != (uint8_t)id ||
+            !(response[2] & 0x80) || (response[3] & 0x0f) != 0) {
+            continue;
+        }
+        *retries += attempt;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int run_usb_soak(const char *dns_address, unsigned int seconds)
+{
+    struct sockaddr_in server;
+    enum rt_netif_t lan_itf = RT_NET_DEV_USB_RTL8152;
+    uint64_t start_seconds;
+    uint64_t now_seconds;
+    uint64_t deadline_seconds;
+    uint64_t next_report_seconds;
+    uint64_t sent_bytes = 0;
+    uint64_t received_bytes = 0;
+    unsigned int queries = 0;
+    unsigned int retries = 0;
+    int connected = 0;
+    int link = 0;
+    int fd = -1;
+
+    if (netmgmt_lan_get_isconnected(lan_itf, &connected) != 0 || !connected ||
+        netmgmt_lan_get_link_status(lan_itf, &link) != 0 || !link) {
+        fprintf(stderr, "P10_USB_SOAK USB Ethernet link is not ready\n");
+        return 1;
+    }
+
+    memset(&server, 0, sizeof(server));
+    server.sin_family = AF_INET;
+    server.sin_port = htons(DNS_PORT);
+    if (inet_pton(AF_INET, dns_address, &server.sin_addr) != 1) {
+        fprintf(stderr, "P10_USB_SOAK invalid DNS address: %s\n", dns_address);
+        return 1;
+    }
+
+    fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&server, sizeof(server)) != 0) {
+        fprintf(stderr, "P10_USB_SOAK socket setup failed: %s\n", strerror(errno));
+        if (fd >= 0) {
+            close(fd);
+        }
+        return 1;
+    }
+
+    if (monotonic_seconds(&start_seconds) != 0) {
+        fprintf(stderr, "P10_USB_SOAK clock_gettime failed: %s\n", strerror(errno));
+        close(fd);
+        return 1;
+    }
+    deadline_seconds = start_seconds + seconds;
+    next_report_seconds = start_seconds + SOAK_REPORT_SECONDS;
+    soak_stop = 0;
+    signal(SIGINT, soak_signal_handler);
+    signal(SIGTERM, soak_signal_handler);
+
+    printf("P10_USB_SOAK start interface=eth0 dns=%s seconds=%u\n",
+           dns_address, seconds);
+
+    while (!soak_stop) {
+        if (monotonic_seconds(&now_seconds) != 0) {
+            fprintf(stderr, "P10_USB_SOAK clock_gettime failed: %s\n", strerror(errno));
+            close(fd);
+            return 1;
+        }
+        if (now_seconds >= deadline_seconds) {
+            break;
+        }
+        if (dns_query(fd, (uint16_t)(queries + 1U), &sent_bytes,
+                      &received_bytes, &retries) != 0) {
+            fprintf(stderr, "P10_USB_SOAK DNS traffic failed at query %u\n",
+                    queries + 1U);
+            close(fd);
+            return 1;
+        }
+        queries++;
+
+        if (now_seconds >= next_report_seconds) {
+            if (netmgmt_lan_get_isconnected(lan_itf, &connected) != 0 || !connected ||
+                netmgmt_lan_get_link_status(lan_itf, &link) != 0 || !link) {
+                fprintf(stderr, "P10_USB_SOAK USB Ethernet link dropped after %u queries\n",
+                        queries);
+                close(fd);
+                return 1;
+            }
+            printf("P10_USB_SOAK progress queries=%u retries=%u tx=%llu rx=%llu\n",
+                   queries, retries, (unsigned long long)sent_bytes,
+                   (unsigned long long)received_bytes);
+            next_report_seconds += SOAK_REPORT_SECONDS;
+        }
+        usleep(SOAK_DELAY_US);
+    }
+
+    close(fd);
+    if (soak_stop) {
+        fprintf(stderr, "P10_USB_SOAK interrupted after %u queries\n", queries);
+        return 1;
+    }
+
+    printf("P10_USB_SOAK PASS seconds=%u queries=%u retries=%u tx=%llu rx=%llu\n",
+           seconds, queries, retries, (unsigned long long)sent_bytes,
+           (unsigned long long)received_bytes);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && strcmp(argv[1], "--usb-soak") == 0) {
+        char *end = NULL;
+        unsigned long seconds;
+
+        if (argc != 4) {
+            fprintf(stderr, "usage: %s --usb-soak <dns-ip> <seconds>\n", argv[0]);
+            return 1;
+        }
+        seconds = strtoul(argv[3], &end, 10);
+        if (end == argv[3] || *end != '\0' || seconds == 0 || seconds > UINT32_MAX) {
+            fprintf(stderr, "invalid duration: %s\n", argv[3]);
+            return 1;
+        }
+        return run_usb_soak(argv[2], (unsigned int)seconds);
+    }
+
     printf("=== [FULL NETMGMT TEST] ===\n");
 
     test_utils();

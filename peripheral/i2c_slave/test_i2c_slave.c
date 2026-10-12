@@ -44,6 +44,7 @@ struct test_config {
     int iterations;
     uint32_t max_speed;
     uint8_t slave_addr;
+    const char* result_file;
 };
 
 static int failures;
@@ -60,6 +61,7 @@ static void usage(const char* program)
     printf("      --slave-sda PIN   slave SDA pin (default %d)\n", DEFAULT_SLAVE_SDA);
     printf("  -n, --iterations N    stress iterations (default %d)\n", DEFAULT_ITERATIONS);
     printf("      --max-speed HZ    highest speed to test (default %u)\n", DEFAULT_MAX_SPEED);
+    printf("      --result-file PATH write a machine-readable final result\n");
     printf("  -h, --help            show this help\n\n");
     printf("Connect master SCL to slave SCL and master SDA to slave SDA.\n");
     printf("The kernel must configure the selected slave controller in slave mode.\n");
@@ -88,6 +90,7 @@ static int parse_args(int argc, char** argv, struct test_config* cfg)
         OPT_SLAVE_SCL,
         OPT_SLAVE_SDA,
         OPT_MAX_SPEED,
+        OPT_RESULT_FILE,
     };
     static const struct option options[] = {
         { "master-bus", required_argument, NULL, 'm' },
@@ -99,6 +102,7 @@ static int parse_args(int argc, char** argv, struct test_config* cfg)
         { "slave-scl", required_argument, NULL, OPT_SLAVE_SCL },
         { "slave-sda", required_argument, NULL, OPT_SLAVE_SDA },
         { "max-speed", required_argument, NULL, OPT_MAX_SPEED },
+        { "result-file", required_argument, NULL, OPT_RESULT_FILE },
         { "help", no_argument, NULL, 'h' },
         { NULL, 0, NULL, 0 },
     };
@@ -144,6 +148,9 @@ static int parse_args(int argc, char** argv, struct test_config* cfg)
             if (parse_number(optarg, 100000, DEFAULT_MAX_SPEED, &value))
                 return -1;
             cfg->max_speed = (uint32_t)value;
+            break;
+        case OPT_RESULT_FILE:
+            cfg->result_file = optarg;
             break;
         case 'h':
             usage(argv[0]);
@@ -549,6 +556,32 @@ static void test_speed_sweep(drv_i2c_inst_t* master, uint8_t address,
     }
 }
 
+static void write_result_file(const struct test_config* cfg, int status)
+{
+    char result[192];
+    int length;
+    int fd;
+
+    if (!cfg->result_file)
+        return;
+
+    length = snprintf(result, sizeof(result),
+                      "status=%s\nfailures=%d\niterations=%d\nmax_speed=%u\n",
+                      status == EXIT_SUCCESS ? "PASS" : "FAIL", failures,
+                      cfg->iterations, cfg->max_speed);
+    fd = open(cfg->result_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        printf("FAIL: open result file %s: %s\n",
+               cfg->result_file, strerror(errno));
+        return;
+    }
+    if (write(fd, result, (size_t)length) != length)
+        printf("FAIL: write result file %s: %s\n",
+               cfg->result_file, strerror(errno));
+    fsync(fd);
+    close(fd);
+}
+
 int main(int argc, char** argv)
 {
     struct test_config cfg = {
@@ -595,14 +628,9 @@ int main(int argc, char** argv)
         goto out;
     }
 
-    /* A zero cached frequency makes the first set_freq reach the kernel. */
-    if (drv_i2c_inst_create(cfg.master_bus, 0, I2C_TIMEOUT_MS,
+    if (drv_i2c_inst_create(cfg.master_bus, 100000U, I2C_TIMEOUT_MS,
                             0xff, 0xff, &master)) {
         printf("FAIL: open master i2c%d\n", cfg.master_bus);
-        goto out;
-    }
-    if (drv_i2c_set_freq(master, 100000U)) {
-        printf("FAIL: set initial master speed\n");
         goto out;
     }
 
@@ -625,5 +653,6 @@ out:
         drv_i2c_inst_destroy(&master);
     if (slave_fd >= 0)
         close(slave_fd);
+    write_result_file(&cfg, status);
     return status;
 }

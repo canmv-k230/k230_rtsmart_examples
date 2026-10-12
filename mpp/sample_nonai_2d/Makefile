@@ -6,6 +6,8 @@ include $(SDK_RTSMART_SRC_DIR)/libs/mk/toolchain_riscv64_musl.mk
 DIR := $(shell basename `pwd`)
 BUILD := $(SDK_RTSMART_BUILD_DIR)/examples/mpp/$(DIR)
 BIN := $(RTT_MPP_EXAMPLES_ELF_INSTALL_PATH)/$(DIR).elf
+INPUT_SRC := foreman_128x64_3frames.yuv
+INPUT_INSTALL := $(RTT_MPP_EXAMPLES_ELF_INSTALL_PATH)/$(INPUT_SRC)
 
 # Source files handling
 C_SRCS    := $(wildcard *.c)
@@ -19,7 +21,7 @@ OBJS      := $(C_OBJS) $(CXX_OBJS)
 DEPS      := $(OBJS:.o=.d)
 
 # Directory creation logic - Captured and sorted
-OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
+OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN) $(INPUT_INSTALL)))
 
 # Library configuration
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/libmpp.mk
@@ -39,7 +41,7 @@ LDFLAGS += $(LIB_LDFLAGS)
 # Phony targets
 .PHONY: all clean distclean
 
-all: $(BIN)
+all: $(BIN) $(INPUT_INSTALL)
 	@$(ECHO) [BUILD] examples mpp $(DIR) done.
 
 # Rule to link the final ELF - Order-only dependency on directory
@@ -47,6 +49,10 @@ $(BIN): $(OBJS) | $(OBJ_DIRS)
 	@echo "[LD] $@"
 	$(Q)$(CXX) $(CFLAGS) $^ $(LDFLAGS) -o $@
 	$(Q)$(STRIP) $@
+
+$(INPUT_INSTALL): $(INPUT_SRC) | $(OBJ_DIRS)
+	@echo "[INSTALL] $@"
+	$(Q)cp -a $< $@
 
 # Rule for C objects - Order-only dependency on directory
 $(BUILD)/%.o: %.c | $(OBJ_DIRS)
@@ -63,7 +69,7 @@ $(OBJ_DIRS):
 	$(Q)mkdir -p $@
 
 clean:
-	@rm -rf $(BIN)
+	@rm -f $(BIN) $(INPUT_INSTALL)
 
 distclean: clean
 	@rm -rf $(BUILD)

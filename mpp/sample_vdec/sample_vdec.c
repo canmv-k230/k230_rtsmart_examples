@@ -46,9 +46,7 @@
 #include "k_vdec_comm.h"
 #include "k_vvo_comm.h"
 //#include "vo_test_case.h"
-
-#include "k_connector_comm.h"
-#include "mpi_connector_api.h"
+#include "kd_display.h"
 
 #define ENABLE_VDEC_DEBUG    1
 #define BIND_VO_LAYER   1
@@ -90,6 +88,8 @@ typedef struct
 
 static sample_vdec_conf_t g_vdec_conf[VDEC_MAX_CHN_NUMS];
 static k_connector_type g_connector_type = LT9611_MIPI_4LAN_1920X1080_60FPS; /* lt9611_1080p60, run `list_connector` to see all supported types */
+static k_bool g_display_initialized = K_FALSE;
+static k_u32 g_display_hold_seconds = 0;
 
 static inline void CHECK_RET(k_s32 ret, const char *func, const int line)
 {
@@ -258,83 +258,37 @@ static void *input_thread(void *arg)
     return arg;
 }
 
-typedef struct {
-    k_connector_type type;
-    k_vo_layer_id layer_id;
-    int width;
-    int height;
-    int ratation_90;
-} sample_vo_info;
-
-static k_s32 sample_vo_init(sample_vo_info* vo_info)
+static k_s32 sample_vo_init(k_u32 width, k_u32 height, k_gdma_rotation_e rotate, k_u8 rot_buf_nr)
 {
-    k_u32 ret = 0;
-    k_s32 connector_fd;
-    k_connector_type connector_type = vo_info->type;
-    k_connector_info connector_info;
+    k_s32 ret;
 
-    memset(&connector_info, 0, sizeof(k_connector_info));
-
-    //connector get sensor info
-    ret = kd_mpi_get_connector_info(connector_type, &connector_info);
-    if (ret) {
-        printf("sample_vicap, the sensor type not supported!\n");
-        return ret;
-    }
-
-    connector_fd = kd_mpi_connector_open(connector_info.connector_name);
-    if (connector_fd < 0) {
-        printf("%s, connector open failed.\n", __func__);
-        return K_ERR_VO_NOTREADY;
-    }
-
-    // connector init
-    kd_mpi_connector_init(connector_fd, connector_info);
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
-
-    // 关闭设备句柄（配置完成即可关闭）
-    ret = kd_mpi_connector_close(connector_fd);
-    if (ret) {
-        printf("ERROR: kd_mpi_connector_close failed, ret=%d\n", ret);
-        return ret;
-    }
-
-    kd_mpi_vo_disable_layer(vo_info->layer_id);
-
-    printf("%s>vo init width %d height %d\n", __func__, vo_info->width, vo_info->height);
-
-    k_vo_layer_attr vo_layer_attr;
-    memset(&vo_layer_attr, 0, sizeof(vo_layer_attr));
-    vo_layer_attr.layer_id           = vo_info->layer_id;
-    vo_layer_attr.position.x         = 0;
-    vo_layer_attr.position.y         = 0;
-    vo_layer_attr.img_size.width     = vo_info->width;
-    vo_layer_attr.img_size.height    = vo_info->height;
-    vo_layer_attr.pixel_format       = PIXEL_FORMAT_YUV_SEMIPLANAR_420; /* NV12 / YUV420SP */
-    vo_layer_attr.func               = (vo_info->ratation_90 == 1) ? GDMA_ROTATE_DEGREE_90 :GDMA_ROTATE_DEGREE_0;
-    vo_layer_attr.rot_buf_nr         = (vo_info->ratation_90 == 1) ? 2:0; /* 旋转时使用少量 GSDMA buffer */
-    vo_layer_attr.global_alpha       = 0xff;
-    vo_layer_attr.rot_buf_bpp        = 0;
-
-    printf("sample_vo_init: layer_id %d, width %d, height %d, pixel_format %d, func %d,buf_nr:%d\n",
-           vo_layer_attr.layer_id, vo_layer_attr.img_size.width, vo_layer_attr.img_size.height,
-           vo_layer_attr.pixel_format, vo_layer_attr.func,vo_layer_attr.rot_buf_nr);
-
-    ret = kd_mpi_vo_set_layer_attr(vo_info->layer_id,&vo_layer_attr);
+    ret = kd_display_init(g_connector_type, 0, 0, rotate);
     if (ret != K_SUCCESS) {
-        printf("ERROR: kd_mpi_vo_set_layer_attr failed, ret=%d\n", ret);
+        printf("ERROR: kd_display_init failed, ret=%d\n", ret);
         return ret;
     }
+    g_display_initialized = K_TRUE;
 
-    ret = kd_mpi_vo_enable_layer(vo_info->layer_id);
+    printf("%s>vo init width %d height %d\n", __func__, width, height);
+
+    ret = kd_display_layer_configure_ex(BIND_VO_LAYER, PIXEL_FORMAT_YUV_SEMIPLANAR_420,
+                                        width, height, 0, 0, 0xff, rotate, rot_buf_nr, 0);
     if (ret != K_SUCCESS) {
-        printf("ERROR: kd_mpi_vo_enable_layer failed, ret=%d\n", ret);
+        printf("ERROR: kd_display_layer_configure failed, ret=%d\n", ret);
+        kd_display_deinit();
+        g_display_initialized = K_FALSE;
         return ret;
     }
 
-    printf("enable vo layer:%d\n", vo_info->layer_id);
-    //exit ;
+    ret = kd_display_layer_enable(BIND_VO_LAYER);
+    if (ret != K_SUCCESS) {
+        printf("ERROR: kd_display_layer_enable failed, ret=%d\n", ret);
+        kd_display_deinit();
+        g_display_initialized = K_FALSE;
+        return ret;
+    }
+
+    printf("enable vo layer:%d\n", BIND_VO_LAYER);
     return 0;
 }
 
@@ -395,14 +349,14 @@ static void *output_thread(void *arg)
                 ratation_90 = 0;
             }
             //Note: config.w/config.h CAN NOT be set larger than the physical width/height for your screen.
-
-            sample_vo_info vo_info;
-            vo_info.type = g_connector_type;
-            vo_info.layer_id = BIND_VO_LAYER;
-            vo_info.width = width;
-            vo_info.height = height;
-            vo_info.ratation_90 = ratation_90;
-            sample_vo_init(&vo_info);
+            ret = sample_vo_init(width, height,
+                                 ratation_90 ? GDMA_ROTATE_DEGREE_90 : GDMA_ROTATE_DEGREE_0,
+                                 ratation_90 ? 2 : 0);
+            if (ret != K_SUCCESS) {
+                printf("sample_vo_init failed, ret=%d\n", ret);
+                vdec_conf->done = K_TRUE;
+                return arg;
+            }
 
             first = 1;
         }
@@ -455,9 +409,10 @@ static void sample_vdec_unbind_vo(k_u32 chn_id)
 
 static void show_help()
 {
-    printf("Usage: ./sample_vdec.elf -i test.265 -type %u\n", LT9611_MIPI_4LAN_1920X1080_60FPS);
+    printf("Usage: ./sample_vdec.elf -i test.265 -type %u [-hold seconds]\n", LT9611_MIPI_4LAN_1920X1080_60FPS);
     printf("-i: input file name\n");
     printf("-type: vo connector type, run `list_connector` to see the supported types, default: %u (lt9611_1080p60)\n", LT9611_MIPI_4LAN_1920X1080_60FPS);
+    printf("-hold: keep the final frame displayed after EOS (0-60 seconds, default: 0)\n");
 }
 
 int main(int argc, char *argv[])
@@ -484,7 +439,14 @@ int main(int argc, char *argv[])
             show_help();
             return -1;
         }
-        else if (strcmp(argv[i], "-i") == 0)
+
+        if (i + 1 >= argc)
+        {
+            vdec_debug("Error: missing value for %s\n", argv[i]);
+            return -1;
+        }
+
+        if (strcmp(argv[i], "-i") == 0)
         {
             char *ptr = strchr(argv[i + 1], '.');
 
@@ -518,6 +480,15 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "-type") == 0) {
             g_connector_type = (k_connector_type)atoi(argv[i + 1]);
             printf("g_connector_type = %d...\n", g_connector_type);
+        }
+        else if (strcmp(argv[i], "-hold") == 0) {
+            char *end;
+            long hold_seconds = strtol(argv[i + 1], &end, 10);
+            if (argv[i + 1][0] == '\0' || *end != '\0' || hold_seconds < 0 || hold_seconds > 60) {
+                vdec_debug("Error: -hold must be between 0 and 60 seconds\n");
+                return -1;
+            }
+            g_display_hold_seconds = (k_u32)hold_seconds;
         }
         else
         {
@@ -572,26 +543,36 @@ int main(int argc, char *argv[])
 
     while (1)
     {
-        if(g_vdec_conf[ch].dec_stream_frames == 1 && type == K_PT_JPEG)
-        {
-            sleep(3);
-            vdec_debug("one jpeg picture\n");
-        }
         if (g_vdec_conf[ch].done == K_TRUE)
         {
+            k_u32 hold_seconds = g_display_hold_seconds;
+
+            if (g_vdec_conf[ch].dec_stream_frames == 1 && type == K_PT_JPEG)
+            {
+                if (hold_seconds < 3)
+                    hold_seconds = 3;
+                vdec_debug("one jpeg picture\n");
+            }
+
+            if (g_display_initialized && hold_seconds > 0)
+            {
+                printf("holding final frame for %u seconds\n", hold_seconds);
+                sleep(hold_seconds);
+            }
+
             sample_vdec_unbind_vo(BIND_VO_LAYER);
 
-            kd_mpi_vo_disable_layer(BIND_VO_LAYER);
+            kd_display_layer_disable(BIND_VO_LAYER);
             printf("disenable vo layer:%d\n", BIND_VO_LAYER);
             //kd_mpi_vo_disable_video_layer(BIND_VO_LAYER);
 
             ret = kd_mpi_vdec_stop_chn(ch);
             CHECK_RET(ret, __func__, __LINE__);
 
-            ret = kd_mpi_vdec_detach_vb_pool(ch);
+            ret = kd_mpi_vdec_destroy_chn(ch);
             CHECK_RET(ret, __func__, __LINE__);
 
-            ret = kd_mpi_vdec_destroy_chn(ch);
+            ret = kd_mpi_vdec_detach_vb_pool(ch);
             CHECK_RET(ret, __func__, __LINE__);
 
             pthread_kill(g_vdec_conf[ch].input_tid, SIGALRM);
@@ -611,6 +592,12 @@ int main(int argc, char *argv[])
 
     ret = kd_mpi_vdec_close_fd();
     CHECK_RET(ret, __func__, __LINE__);
+
+    if (g_display_initialized) {
+        ret = kd_display_deinit();
+        CHECK_RET(ret, __func__, __LINE__);
+        g_display_initialized = K_FALSE;
+    }
 
     sample_vb_exit();
 

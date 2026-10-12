@@ -1151,23 +1151,45 @@ k_u32 KdMedia::_venc_vb_create_pool()
 int KdMedia::_init_venc()
 {
     k_s32 ret;
+    k_s32 cleanup_ret;
     k_venc_chn_attr chn_attr;
-    k_u32 venc_chn_id = venc_chn_id_;
+    k_rotation rotation;
 
     if (!feature_config_.enable_video_encoder)
     {
         return 0;
     }
 
+    ret = kd_mpi_venc_acquire_fd();
+    if (ret != K_SUCCESS)
+    {
+        printf("kd_mpi_venc_acquire_fd failed:0x%x\n", ret);
+        return -1;
+    }
+    venc_fd_acquired_ = true;
+
+    ret = kd_mpi_venc_request_chn(&venc_chn_id_);
+    if (ret != K_SUCCESS)
+    {
+        printf("kd_mpi_venc_request_chn failed:0x%x\n", ret);
+        goto fail;
+    }
+    venc_chn_requested_ = true;
+
     venc_attach_pool_id_ = _venc_vb_create_pool();
     if (venc_attach_pool_id_ == VB_INVALID_POOLID){
         printf("%s _venc_vb_create_pool failed\n",__func__);
-        return -1;
+        goto fail;
     }
-    kd_mpi_venc_attach_vb_pool(venc_chn_id_,venc_attach_pool_id_);
+    ret = kd_mpi_venc_attach_vb_pool(venc_chn_id_,venc_attach_pool_id_);
+    if (ret != K_SUCCESS)
+    {
+        printf("kd_mpi_venc_attach_vb_pool failed:0x%x\n", ret);
+        goto fail;
+    }
+    venc_pool_attached_ = true;
 
     memset(&chn_attr, 0, sizeof(chn_attr));
-    k_u64 stream_size = input_config_.venc_width * input_config_.venc_height / 2;
     chn_attr.venc_attr.pic_width = input_config_.venc_width;
     chn_attr.venc_attr.pic_height = input_config_.venc_height;
     chn_attr.rc_attr.rc_mode = K_VENC_RC_MODE_CBR;
@@ -1193,61 +1215,96 @@ int KdMedia::_init_venc()
         chn_attr.rc_attr.mjpeg_fixqp.q_factor = 45;
     }
 
-    ret = kd_mpi_venc_create_chn(venc_chn_id, &chn_attr);
+    ret = kd_mpi_venc_create_chn(venc_chn_id_, &chn_attr);
     if (ret != K_SUCCESS)
     {
         printf("kd_mpi_venc_create_chn failed:0x%x\n", ret);
-        return -1;
+        goto fail;
     }
+    venc_chn_created_ = true;
 
     if (input_config_.video_type != KdMediaVideoType::kVideoTypeMjpeg)
     {
-        ret = kd_mpi_venc_enable_idr(venc_chn_id, K_TRUE);
+        ret = kd_mpi_venc_enable_idr(venc_chn_id_, K_TRUE);
         if (ret != K_SUCCESS)
         {
             printf("kd_mpi_venc_enable_idr failed:0x%x\n", ret);
-            kd_mpi_venc_destroy_chn(venc_chn_id);
-            return -1;
+            goto fail;
         }
     }
 
-    k_rotation rotaion = rotation_90_ ? K_VPU_ROTATION_90 : K_VPU_ROTATION_0;
-    ret = kd_mpi_venc_set_rotation(venc_chn_id, rotaion);
+    rotation = rotation_90_ ? K_VPU_ROTATION_90 : K_VPU_ROTATION_0;
+    ret = kd_mpi_venc_set_rotation(venc_chn_id_, rotation);
     if (ret != K_SUCCESS)
     {
         printf("kd_mpi_venc_set_rotation failed:0x%x\n", ret);
-        kd_mpi_venc_destroy_chn(venc_chn_id);
-        return -1;
+        goto fail;
     }
 
     venc_initialized_ = true;
 
     return 0;
+
+fail:
+    cleanup_ret = _deinit_venc();
+    if (cleanup_ret != K_SUCCESS)
+        printf("VENC cleanup failed:0x%x; resources retained\n", cleanup_ret);
+    return -1;
 }
 
 int KdMedia::_deinit_venc()
 {
-    k_s32 ret = -1;
-    if (!feature_config_.enable_video_encoder || !venc_initialized_)
+    k_s32 ret;
+
+    if (!feature_config_.enable_video_encoder)
     {
         return 0;
     }
 
+    if (venc_pool_attached_)
+    {
+        ret = kd_mpi_venc_detach_vb_pool(venc_chn_id_);
+        if (ret != K_SUCCESS)
+        {
+            printf("kd_mpi_venc_detach_vb_pool failed:0x%x\n", ret);
+            return ret;
+        }
+        venc_pool_attached_ = false;
+    }
+
+    if (venc_chn_created_)
+    {
+        ret = kd_mpi_venc_destroy_chn(venc_chn_id_);
+        if (ret != K_SUCCESS)
+        {
+            printf("kd_mpi_venc_destroy_chn failed:0x%x\n", ret);
+            return ret;
+        }
+        venc_chn_created_ = false;
+    }
+
+    if (venc_attach_pool_id_ != VB_INVALID_POOLID)
+    {
+        ret = kd_mpi_vb_destory_pool(venc_attach_pool_id_);
+        if (ret != K_SUCCESS)
+            return ret;
+        venc_attach_pool_id_ = VB_INVALID_POOLID;
+    }
+    if (venc_chn_requested_)
+    {
+        ret = kd_mpi_venc_release_chn(venc_chn_id_);
+        if (ret != K_SUCCESS)
+            return ret;
+        venc_chn_requested_ = false;
+    }
+    if (venc_fd_acquired_)
+    {
+        ret = kd_mpi_venc_release_fd();
+        venc_fd_acquired_ = false;
+        if (ret != K_SUCCESS)
+            return ret;
+    }
     venc_initialized_ = false;
-
-    ret = kd_mpi_venc_detach_vb_pool(venc_chn_id_);
-    if (ret != K_SUCCESS)
-    {
-        printf("kd_mpi_venc_detach_vb_pool failed:0x%x\n", ret);
-    }
-
-    ret = kd_mpi_venc_destroy_chn(venc_chn_id_);
-    if (ret != K_SUCCESS)
-    {
-        printf("kd_mpi_venc_destroy_chn failed:0x%x\n", ret);
-        return -1;
-    }
-
     return 0;
 }
 

@@ -1,15 +1,27 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
+#include <mbedtls/sha256.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #define TEST_TOTAL_BYTES (8ULL * 1024 * 1024)
 #define MIN_BLOCK_COUNT  8U
+#define FILL_VERIFY_BLOCK_SIZE (64U * 1024U)
+#define SHA256_SIZE            32U
+#define SOAK_DEFAULT_KIB       128U
+#define SOAK_BLOCK_SIZE        (64U * 1024U)
+#define SOAK_DELAY_US          500000U
+#define SOAK_REPORT_US         (60ULL * 1000U * 1000U)
+
+static volatile sig_atomic_t soak_stop;
 
 /** cpu time *****************************************************************/
 #define CPU_TICKS_PER_SECOND (27 * 1000 * 1000)
@@ -161,6 +173,364 @@ static int read_full(int fd, uint8_t* buffer, size_t size)
     }
 
     return 0;
+}
+
+static uint64_t filesystem_free_bytes(const struct statvfs* fs)
+{
+    uint64_t fragment_size = fs->f_frsize ? fs->f_frsize : fs->f_bsize;
+
+    return fragment_size * (uint64_t)fs->f_bavail;
+}
+
+static void fill_offset_pattern(uint8_t* buffer, size_t size, uint64_t offset)
+{
+    size_t index;
+
+    for (index = 0; index < size; ++index) {
+        uint64_t position = offset + index;
+
+        buffer[index] = (uint8_t)(((position * 131U) + 17U) ^ (position >> 8));
+    }
+}
+
+static void print_sha256(const uint8_t digest[SHA256_SIZE])
+{
+    size_t index;
+
+    for (index = 0; index < SHA256_SIZE; ++index) {
+        printf("%02x", digest[index]);
+    }
+}
+
+static int hash_file(const char* path, uint8_t* buffer, size_t buffer_size, uint8_t digest[SHA256_SIZE])
+{
+    mbedtls_sha256_context context;
+    int                    fd = -1;
+    int                    result = -1;
+
+    mbedtls_sha256_init(&context);
+    if (mbedtls_sha256_starts(&context, 0) != 0) {
+        goto cleanup;
+    }
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        goto cleanup;
+    }
+
+    for (;;) {
+        ssize_t received = read(fd, buffer, buffer_size);
+
+        if (received < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            goto cleanup;
+        }
+        if (received == 0) {
+            break;
+        }
+        if (mbedtls_sha256_update(&context, buffer, (size_t)received) != 0) {
+            goto cleanup;
+        }
+    }
+
+    if (mbedtls_sha256_finish(&context, digest) != 0) {
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    if (fd >= 0) {
+        close(fd);
+    }
+    mbedtls_sha256_free(&context);
+    return result;
+}
+
+static void soak_signal_handler(int sig)
+{
+    (void)sig;
+    soak_stop = 1;
+}
+
+static int run_soak(const char* mount_point, unsigned int seconds, size_t file_size)
+{
+    uint8_t* write_buffer = NULL;
+    uint8_t* read_buffer = NULL;
+    uint64_t start_us = utils_cpu_ticks_us();
+    uint64_t deadline_us = start_us + (uint64_t)seconds * 1000000U;
+    uint64_t next_report_us = start_us + SOAK_REPORT_US;
+    uint64_t total_bytes = 0;
+    unsigned int cycles = 0;
+    char path[256];
+    int fd = -1;
+    int result = 1;
+
+    if (snprintf(path, sizeof(path), "%s/p10_sd_soak.bin", mount_point) >= (int)sizeof(path)) {
+        fprintf(stderr, "Soak path is too long\n");
+        return 1;
+    }
+
+    write_buffer = malloc(SOAK_BLOCK_SIZE);
+    read_buffer = malloc(SOAK_BLOCK_SIZE);
+    if (write_buffer == NULL || read_buffer == NULL) {
+        fprintf(stderr, "Soak buffer allocation failed\n");
+        goto cleanup;
+    }
+
+    soak_stop = 0;
+    signal(SIGINT, soak_signal_handler);
+    signal(SIGTERM, soak_signal_handler);
+    unlink(path);
+
+    printf("P10_SD_SOAK start mount=%s seconds=%u file_bytes=%zu\n",
+           mount_point, seconds, file_size);
+
+    while (!soak_stop && utils_cpu_ticks_us() < deadline_us) {
+        size_t offset = 0;
+        uint64_t pattern_base = (uint64_t)cycles * file_size;
+
+        fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd < 0) {
+            fprintf(stderr, "P10_SD_SOAK open failed at cycle %u: %s\n",
+                    cycles + 1, strerror(errno));
+            goto cleanup;
+        }
+
+        while (offset < file_size) {
+            size_t chunk_size = file_size - offset;
+
+            if (chunk_size > SOAK_BLOCK_SIZE) {
+                chunk_size = SOAK_BLOCK_SIZE;
+            }
+            fill_offset_pattern(write_buffer, chunk_size, pattern_base + offset);
+            if (write_full(fd, write_buffer, chunk_size) != 0) {
+                fprintf(stderr, "P10_SD_SOAK write failed at cycle %u offset %zu: %s\n",
+                        cycles + 1, offset, strerror(errno));
+                goto cleanup;
+            }
+            offset += chunk_size;
+        }
+
+        if (fsync(fd) != 0 || lseek(fd, 0, SEEK_SET) < 0) {
+            fprintf(stderr, "P10_SD_SOAK sync/seek failed at cycle %u: %s\n",
+                    cycles + 1, strerror(errno));
+            goto cleanup;
+        }
+
+        offset = 0;
+        while (offset < file_size) {
+            size_t chunk_size = file_size - offset;
+
+            if (chunk_size > SOAK_BLOCK_SIZE) {
+                chunk_size = SOAK_BLOCK_SIZE;
+            }
+            if (read_full(fd, read_buffer, chunk_size) != 0) {
+                fprintf(stderr, "P10_SD_SOAK read failed at cycle %u offset %zu: %s\n",
+                        cycles + 1, offset, strerror(errno));
+                goto cleanup;
+            }
+            fill_offset_pattern(write_buffer, chunk_size, pattern_base + offset);
+            if (memcmp(write_buffer, read_buffer, chunk_size) != 0) {
+                fprintf(stderr, "P10_SD_SOAK verify failed at cycle %u offset %zu\n",
+                        cycles + 1, offset);
+                goto cleanup;
+            }
+            offset += chunk_size;
+        }
+
+        if (close(fd) != 0) {
+            fd = -1;
+            fprintf(stderr, "P10_SD_SOAK close failed at cycle %u: %s\n",
+                    cycles + 1, strerror(errno));
+            goto cleanup;
+        }
+        fd = -1;
+        if (unlink(path) != 0) {
+            fprintf(stderr, "P10_SD_SOAK unlink failed at cycle %u: %s\n",
+                    cycles + 1, strerror(errno));
+            goto cleanup;
+        }
+
+        cycles++;
+        total_bytes += (uint64_t)file_size * 2U;
+        if (utils_cpu_ticks_us() >= next_report_us) {
+            printf("P10_SD_SOAK progress cycles=%u verified_bytes=%" PRIu64 "\n",
+                   cycles, total_bytes);
+            next_report_us += SOAK_REPORT_US;
+        }
+        usleep(SOAK_DELAY_US);
+    }
+
+    if (soak_stop) {
+        fprintf(stderr, "P10_SD_SOAK interrupted after %u cycles\n", cycles);
+        goto cleanup;
+    }
+
+    printf("P10_SD_SOAK PASS seconds=%u cycles=%u verified_bytes=%" PRIu64 "\n",
+           seconds, cycles, total_bytes);
+    result = 0;
+
+cleanup:
+    if (fd >= 0) {
+        close(fd);
+    }
+    unlink(path);
+    free(read_buffer);
+    free(write_buffer);
+    return result;
+}
+
+static int run_fill_verify(const char* mount_point, unsigned int percent)
+{
+    struct statvfs         initial_fs;
+    struct statvfs         written_fs;
+    struct statvfs         deleted_fs;
+    struct stat            file_stat;
+    mbedtls_sha256_context write_context;
+    uint8_t                write_digest[SHA256_SIZE];
+    uint8_t                read_digest[SHA256_SIZE];
+    uint8_t*               buffer = NULL;
+    uint64_t               initial_free;
+    uint64_t               target_bytes;
+    uint64_t               written = 0;
+    uint64_t               fragment_size;
+    char                   path[256];
+    int                    fd = -1;
+    int                    result = 1;
+
+    if ((percent == 0U) || (percent > 95U)) {
+        fprintf(stderr, "Fill percentage must be between 1 and 95\n");
+        return 1;
+    }
+    if (snprintf(path, sizeof(path), "%s/b03_fill_verify.bin", mount_point) >= (int)sizeof(path)) {
+        fprintf(stderr, "Test path is too long\n");
+        return 1;
+    }
+    if (statvfs(mount_point, &initial_fs) != 0) {
+        fprintf(stderr, "statvfs(%s) failed: %s\n", mount_point, strerror(errno));
+        return 1;
+    }
+
+    initial_free = filesystem_free_bytes(&initial_fs);
+    target_bytes = ((initial_free / 100U) * percent) +
+                   ((((initial_free % 100U) * percent) + 99U) / 100U);
+    if (target_bytes == 0U) {
+        fprintf(stderr, "No free space is available on %s\n", mount_point);
+        return 1;
+    }
+
+    printf("B03_FILL_VERIFY mount=%s percent=%u\n", mount_point, percent);
+    printf("initial_free=%" PRIu64 " target_bytes=%" PRIu64 "\n", initial_free, target_bytes);
+
+    unlink(path);
+    buffer = (uint8_t*)malloc(FILL_VERIFY_BLOCK_SIZE);
+    if (buffer == NULL) {
+        fprintf(stderr, "Buffer allocation failed: %s\n", strerror(errno));
+        return 1;
+    }
+
+    mbedtls_sha256_init(&write_context);
+    if (mbedtls_sha256_starts(&write_context, 0) != 0) {
+        fprintf(stderr, "Failed to initialize SHA-256\n");
+        goto cleanup;
+    }
+
+    fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "open(%s) failed: %s\n", path, strerror(errno));
+        goto cleanup;
+    }
+
+    while (written < target_bytes) {
+        size_t chunk_size = FILL_VERIFY_BLOCK_SIZE;
+
+        if (target_bytes - written < chunk_size) {
+            chunk_size = (size_t)(target_bytes - written);
+        }
+        fill_offset_pattern(buffer, chunk_size, written);
+        if (write_full(fd, buffer, chunk_size) != 0) {
+            fprintf(stderr, "Write failed at byte %" PRIu64 ": %s\n", written, strerror(errno));
+            goto cleanup;
+        }
+        if (mbedtls_sha256_update(&write_context, buffer, chunk_size) != 0) {
+            fprintf(stderr, "SHA-256 update failed\n");
+            goto cleanup;
+        }
+        written += chunk_size;
+    }
+
+    if (fsync(fd) != 0) {
+        fprintf(stderr, "fsync failed: %s\n", strerror(errno));
+        goto cleanup;
+    }
+    if (close(fd) != 0) {
+        fd = -1;
+        fprintf(stderr, "close failed: %s\n", strerror(errno));
+        goto cleanup;
+    }
+    fd = -1;
+
+    if (mbedtls_sha256_finish(&write_context, write_digest) != 0) {
+        fprintf(stderr, "Failed to finish write SHA-256\n");
+        goto cleanup;
+    }
+    if ((stat(path, &file_stat) != 0) || ((uint64_t)file_stat.st_size != target_bytes)) {
+        fprintf(stderr, "Created file size does not match target\n");
+        goto cleanup;
+    }
+    if (statvfs(mount_point, &written_fs) != 0) {
+        fprintf(stderr, "statvfs after write failed: %s\n", strerror(errno));
+        goto cleanup;
+    }
+
+    printf("written_bytes=%" PRIu64 " free_after_write=%" PRIu64 " sha256=", written,
+           filesystem_free_bytes(&written_fs));
+    print_sha256(write_digest);
+    printf("\n");
+
+    if (hash_file(path, buffer, FILL_VERIFY_BLOCK_SIZE, read_digest) != 0) {
+        fprintf(stderr, "Failed to hash the written file\n");
+        goto cleanup;
+    }
+    printf("read_sha256=");
+    print_sha256(read_digest);
+    printf("\n");
+    if (memcmp(write_digest, read_digest, SHA256_SIZE) != 0) {
+        fprintf(stderr, "SHA-256 verification failed\n");
+        goto cleanup;
+    }
+
+    if (unlink(path) != 0) {
+        fprintf(stderr, "unlink(%s) failed: %s\n", path, strerror(errno));
+        goto cleanup;
+    }
+    if (statvfs(mount_point, &deleted_fs) != 0) {
+        fprintf(stderr, "statvfs after delete failed: %s\n", strerror(errno));
+        goto cleanup;
+    }
+
+    fragment_size = deleted_fs.f_frsize ? deleted_fs.f_frsize : deleted_fs.f_bsize;
+    printf("free_after_delete=%" PRIu64 "\n", filesystem_free_bytes(&deleted_fs));
+    if (filesystem_free_bytes(&deleted_fs) + fragment_size < initial_free) {
+        fprintf(stderr, "Free space was not recovered after deletion\n");
+        goto cleanup;
+    }
+
+    printf("B03_FILL_VERIFY PASS\n");
+    result = 0;
+
+cleanup:
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (result != 0) {
+        unlink(path);
+    }
+    mbedtls_sha256_free(&write_context);
+    free(buffer);
+    return result;
 }
 
 static void print_result(const char* mode, size_t block_size, size_t total_bytes, uint64_t elapsed_us)
@@ -506,6 +876,8 @@ static int run_benchmark_for_mount(const char* mount_point)
 static void print_usage(const char* prog_name)
 {
     printf("Usage: %s [test_path]\n", prog_name);
+    printf("       %s --fill-verify <mount_point> [percent]\n", prog_name);
+    printf("       %s --soak <mount_point> <seconds> [file_kib]\n", prog_name);
     printf("  test_path: Directory path where benchmark file will be created\n");
     printf("             If not provided, default paths will be used:\n");
     for (size_t i = 0; i < (sizeof(k_default_mount_points) / sizeof(k_default_mount_points[0])); ++i) {
@@ -519,6 +891,50 @@ int main(int argc, char* argv[])
     int          use_default = 1;
     const char** test_paths  = NULL;
     size_t       num_paths   = 0;
+
+    if ((argc >= 2) && (strcmp(argv[1], "--fill-verify") == 0)) {
+        unsigned long percent = 80;
+        char*         end = NULL;
+
+        if ((argc < 3) || (argc > 4)) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        if (argc == 4) {
+            percent = strtoul(argv[3], &end, 10);
+            if ((end == argv[3]) || (*end != '\0') || (percent > 100U)) {
+                fprintf(stderr, "Invalid fill percentage: %s\n", argv[3]);
+                return 1;
+            }
+        }
+        return run_fill_verify(argv[2], (unsigned int)percent);
+    }
+
+    if ((argc >= 2) && (strcmp(argv[1], "--soak") == 0)) {
+        unsigned long seconds;
+        unsigned long file_kib = SOAK_DEFAULT_KIB;
+        char* end = NULL;
+
+        if (argc < 4 || argc > 5) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        seconds = strtoul(argv[3], &end, 10);
+        if (end == argv[3] || *end != '\0' || seconds == 0 || seconds > UINT32_MAX) {
+            fprintf(stderr, "Invalid soak duration: %s\n", argv[3]);
+            return 1;
+        }
+        if (argc == 5) {
+            end = NULL;
+            file_kib = strtoul(argv[4], &end, 10);
+            if (end == argv[4] || *end != '\0' || file_kib == 0 || file_kib > 1024U) {
+                fprintf(stderr, "Invalid soak file size: %s\n", argv[4]);
+                return 1;
+            }
+        }
+        return run_soak(argv[2], (unsigned int)seconds,
+                        (size_t)file_kib * 1024U);
+    }
 
     printf("Filesystem read/write benchmark\n");
     printf("Uses utils_cpu_ticks_us() for timing. Read numbers may include filesystem cache effects.\n");

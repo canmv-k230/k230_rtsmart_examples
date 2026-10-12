@@ -2,26 +2,9 @@
  * @file main.c
  * @brief WebRTC LAN camera demo for K230 RT-Smart
  *
- * Architecture overview:
- *
- *   ┌──────────┐    bind     ┌──────────┐    bind     ┌──────────┐
- *   │  VICAP   │───────────> │    VO    │            │  VENC   │
- *   │ (camera) │ CHN0        │ (LCD/    │            │ (H.264/ │
- *   │          │───────────> │  HDMI)   │            │ H.265   │
- *   │          │ CHN1        └──────────┘            │ encode) │
- *   └──────────┘                                        │
- *                                                       │ H.264/H.265 frames
- *                                                       ▼
- *   ┌────────────────────────────────────────────────────────────┐
- *   │                    WebRTC (libpeer)                         │
- *   │  peer_connection_task ── ICE/DTLS ──> browsers             │
- *   └────────────────────────────────────────────────────────────┘
- *                                                       ▲
- *   ┌────────────────────────────────────────────────────────────┐
- *   │                    HTTP signaling                          │
- *   │  GET /offer  ──> create SDP offer ──> browser              │
- *   │  POST /answer?session=id <── remote SDP <── browser        │
- *   └────────────────────────────────────────────────────────────┘
+ * Architecture: VICAP CHN1 feeds VO layer 2; VICAP CHN2 feeds VENC.
+ * Encoded H.264/H.265 frames are sent to browsers through libpeer.
+ * HTTP GET /offer and POST /answer exchange SDP with the browser.
  *
  * Thread model:
  *   - Main thread:      signal wait loop, then orchestrates shutdown
@@ -944,10 +927,7 @@ int main(int argc, char* argv[]) {
   /* Install SIGINT handler for clean shutdown (Ctrl+C) */
   signal(SIGINT, signal_handler);
 
-  /* ── Initialize MPP pipeline ──
-   * Sets up: VB pools → Display connector → VO layer →
- *          VICAP (CHN0→VO display, CHN1→VENC encode) → VENC H.264/H.265
- * Binds: VICAP-CHN0 → VO, VICAP-CHN1 → VENC */
+  /* Initialize VB, display, VICAP CHN1/CHN2, and VENC. */
   MppPipelineConfig pipeline_config = {
     .csi_num = csi_num,
     .lane_pref = lane_pref,

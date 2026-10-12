@@ -156,6 +156,7 @@ private:
     //   - MIPI、HDMI、LCD 等
     //   - 在 Create() 中根据 setting.h 中的宏选择
     k_connector_type connector_type;
+    k_s32 connector_fd_ = -1;
 
     // ============================
     // VO（Video Output）显示模块

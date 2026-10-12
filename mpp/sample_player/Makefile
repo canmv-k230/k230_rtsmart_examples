@@ -6,6 +6,8 @@ include $(SDK_RTSMART_SRC_DIR)/libs/mk/toolchain_riscv64_musl.mk
 DIR := $(shell basename `pwd`)
 BUILD := $(SDK_RTSMART_BUILD_DIR)/examples/mpp/$(DIR)
 BIN := $(RTT_MPP_EXAMPLES_ELF_INSTALL_PATH)/$(DIR).elf
+SAMPLE_VIDEO := $(RTT_MPP_EXAMPLES_ELF_INSTALL_PATH)/sample_player_h264.mp4
+SAMPLE_VIDEO_SRC := $(SDK_RTSMART_SRC_DIR)/libs/3rd-party/lvgl/lvgl/examples/libs/ffmpeg/birds.mp4
 
 # Source files handling
 C_SRCS    := $(wildcard *.c)
@@ -19,7 +21,7 @@ OBJS      := $(C_OBJS) $(CXX_OBJS)
 DEPS      := $(OBJS:.o=.d)
 
 # Directory creation logic - Captured and sorted
-OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN)))
+OBJ_DIRS  := $(sort $(dir $(OBJS) $(BIN) $(SAMPLE_VIDEO)))
 
 # Library configuration
 include $(SDK_RTSMART_SRC_DIR)/libs/mk/libmpp.mk
@@ -39,8 +41,12 @@ LDFLAGS += $(LIB_LDFLAGS)
 # Phony targets
 .PHONY: all clean distclean
 
-all: $(BIN)
+all: $(BIN) $(SAMPLE_VIDEO)
 	@$(ECHO) [BUILD] examples mpp $(DIR) done.
+
+$(SAMPLE_VIDEO): $(SAMPLE_VIDEO_SRC) | $(OBJ_DIRS)
+	@echo "[INSTALL] $@"
+	$(Q)cp -a $< $@
 
 # Rule to link the final ELF - Order-only dependency on directory
 $(BIN): $(OBJS) | $(OBJ_DIRS)
@@ -63,7 +69,7 @@ $(OBJ_DIRS):
 	$(Q)mkdir -p $@
 
 clean:
-	@rm -rf $(BIN)
+	@rm -f $(BIN) $(SAMPLE_VIDEO)
 
 distclean: clean
 	@rm -rf $(BUILD)

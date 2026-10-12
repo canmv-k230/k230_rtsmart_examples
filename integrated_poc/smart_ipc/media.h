@@ -386,6 +386,10 @@ class KdMedia {
   char *connector_name_{nullptr}; // Connector name
 
   k_u32 venc_attach_pool_id_{VB_INVALID_POOLID};
+  bool venc_fd_acquired_{false};
+  bool venc_chn_requested_{false};
+  bool venc_pool_attached_{false};
+  bool venc_chn_created_{false};
   int rotation_90_{0};
 };
 

@@ -85,6 +85,7 @@ typedef struct
 static k_bool g_exit_requested;
 static k_bool g_enable_audio_codec = K_FALSE;
 static k_bool g_vb_initialized = K_FALSE;
+static k_bool g_vb_owned = K_FALSE;
 static k_u32 g_audio_pool_id = VB_INVALID_POOLID;
 
 static void merge_result(k_s32 *result, k_s32 operation_result,
@@ -786,6 +787,7 @@ k_s32 audio_sample_vb_init(void)
     k_vb_config config;
     k_vb_pool_config pool_config;
     k_u32 block_size;
+    k_s32 ret;
 
     if (g_vb_initialized)
     {
@@ -793,8 +795,27 @@ k_s32 audio_sample_vb_init(void)
     }
     memset(&config, 0, sizeof(config));
     config.max_pool_cnt = 64;
-    if (kd_mpi_vb_set_config(&config) != K_SUCCESS ||
-        kd_mpi_vb_init() != K_SUCCESS)
+    ret = kd_mpi_vb_set_config(&config);
+    if (ret == K_SUCCESS)
+    {
+        if (kd_mpi_vb_init() != K_SUCCESS)
+        {
+            printf("VB initialization failed\n");
+            return K_FAILED;
+        }
+        g_vb_owned = K_TRUE;
+    }
+    else if (ret == K_ERR_VB_BUSY)
+    {
+        if (kd_mpi_vb_get_config(&config) != K_SUCCESS ||
+            config.max_pool_cnt == 0)
+        {
+            printf("existing VB configuration is unavailable\n");
+            return K_FAILED;
+        }
+        g_vb_owned = K_FALSE;
+    }
+    else
     {
         printf("VB initialization failed\n");
         return K_FAILED;
@@ -810,11 +831,12 @@ k_s32 audio_sample_vb_init(void)
     if (g_audio_pool_id == VB_INVALID_POOLID)
     {
         printf("audio VB pool creation failed\n");
-        if (kd_mpi_vb_exit() != K_SUCCESS)
+        if (g_vb_owned && kd_mpi_vb_exit() != K_SUCCESS)
         {
             printf("VB exit failed after pool creation failure\n");
         }
         g_vb_initialized = K_FALSE;
+        g_vb_owned = K_FALSE;
         return K_FAILED;
     }
 
@@ -838,12 +860,13 @@ k_s32 audio_sample_vb_destroy(void)
         }
         g_audio_pool_id = VB_INVALID_POOLID;
     }
-    if (kd_mpi_vb_exit() != K_SUCCESS)
+    if (g_vb_owned && kd_mpi_vb_exit() != K_SUCCESS)
     {
         printf("VB exit failed\n");
         ret = K_FAILED;
     }
     g_vb_initialized = K_FALSE;
+    g_vb_owned = K_FALSE;
     return ret;
 }
 

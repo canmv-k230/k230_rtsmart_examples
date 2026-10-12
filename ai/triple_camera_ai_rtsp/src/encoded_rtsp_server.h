@@ -46,6 +46,10 @@ protected:
 private:
     k_u32 venc_chn_id_{0}; // 编码通道 ID
     k_u32 venc_attach_pool_id_{VB_INVALID_POOLID};
+    bool venc_fd_acquired_{false};
+    bool venc_chn_requested_{false};
+    bool venc_pool_attached_{false};
+    bool venc_chn_created_{false};
 
     int rtsp_port_;          // RTSP 监听端口
     std::string stream_url_; // RTSP 流名称

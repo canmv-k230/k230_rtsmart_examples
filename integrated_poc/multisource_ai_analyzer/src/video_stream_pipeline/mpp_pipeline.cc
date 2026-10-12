@@ -717,8 +717,8 @@ int MppPipeline::deinit(){
 
     kd_mpi_nonai_2d_detach_vb_pool(csc_chn_id_);
     kd_mpi_nonai_2d_destroy_chn(csc_chn_id_);
-    kd_mpi_vdec_detach_vb_pool(vdec_chn_id_);
     kd_mpi_vdec_destroy_chn(vdec_chn_id_);
+    kd_mpi_vdec_detach_vb_pool(vdec_chn_id_);
 
     if (osd_vb_handle_ != VB_INVALID_HANDLE)
     {

@@ -249,6 +249,18 @@ static void free_video_buffer(struct video_buffer* buffer)
     memset(buffer, 0, sizeof(*buffer));
 }
 
+static uint64_t fnv1a64(const void* data, size_t size)
+{
+    const uint8_t* bytes = data;
+    uint64_t hash = UINT64_C(14695981039346656037);
+
+    for (size_t i = 0; i < size; i++) {
+        hash ^= bytes[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
 static int load_input_image(const char* filename, unsigned int input_id, struct video_buffer* buffer)
 {
     if (filename[0] == '\0') {
@@ -268,7 +280,8 @@ static int load_input_image(const char* filename, unsigned int input_id, struct 
         return -1;
     }
 
-    pr_info("loaded input %u from %s (%u bytes)", input_id, filename, buffer->size);
+    pr_info("loaded input %u from %s (%u bytes, fnv1a64=%016llx)", input_id, filename, buffer->size,
+        (unsigned long long)fnv1a64(buffer->virt_addr, buffer->size));
     return 0;
 }
 
@@ -934,7 +947,8 @@ static int save_frame(const char* output_directory, unsigned int output_id, cons
         perror("write output file");
         return -1;
     }
-    pr_info("wrote channel %u to %s (%zu bytes)", output_id, filename, bytes_written);
+    pr_info("wrote channel %u to %s (%zu bytes, fnv1a64=%016llx)", output_id, filename, bytes_written,
+        (unsigned long long)fnv1a64(data, size));
     return 0;
 }
 
@@ -1277,8 +1291,32 @@ static void prepare_load_request(const struct dw200_parameters* params, const st
     request->vb_info.alignment = 4;
 }
 
-static void release_managed_outputs(struct k_dw_load_request* request)
+static int allocate_managed_outputs(const struct k_dw_settings* settings, struct k_dw_load_request* request)
 {
+    for (unsigned int i = 0; i < DW200_VSE_OUTPUT_COUNT; i++) {
+        if (!(settings->output_enable_mask & (1U << i))) {
+            continue;
+        }
+        uint32_t size = managed_output_size(&settings->output[i]);
+        k_vb_blk_handle handle = kd_mpi_vb_get_block(VB_INVALID_POOLID, size, NULL);
+        if (handle == VB_INVALID_HANDLE) {
+            pr_err("allocate output %u failed", i);
+            return -1;
+        }
+        request->output_vb_info[i].phys_addr[0] = kd_mpi_vb_handle_to_phyaddr(handle);
+        if (request->output_vb_info[i].phys_addr[0] == 0) {
+            kd_mpi_vb_release_block(handle);
+            pr_err("resolve output %u physical address failed", i);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int release_managed_outputs(struct k_dw_load_request* request)
+{
+    int result = 0;
+
     for (unsigned int i = 0; i < DW200_VSE_OUTPUT_COUNT; i++) {
         if (request->output_vb_info[i].phys_addr[0] == 0) {
             continue;
@@ -1288,10 +1326,12 @@ static void release_managed_outputs(struct k_dw_load_request* request)
             int error = kd_mpi_vb_release_block(handle);
             if (error != 0) {
                 pr_warn("release output %u failed: %d", i, error);
+                result = -1;
             }
         }
         memset(&request->output_vb_info[i], 0, sizeof(request->output_vb_info[i]));
     }
+    return result;
 }
 
 static int save_managed_outputs(const struct dw200_parameters* params, const struct k_dw_settings* settings,
@@ -1438,13 +1478,14 @@ static int run_managed_api(enum driver_api api, const struct dw200_parameters* p
     for (unsigned int frame = 0; frame < frame_count; frame++) {
         pr_info("%s frame %u/%u", driver_api_name(api), frame + 1, frame_count);
         prepare_load_request(params, input_buffers, input_id, &request);
-        if (call_driver_ioctl(fd, load_command, &request, load_name) < 0
+        if (allocate_managed_outputs(&settings, &request) < 0
+            || call_driver_ioctl(fd, load_command, &request, load_name) < 0
             || save_managed_outputs(params, &settings, output_map, output_count, &request, output_directory,
                    driver_api_name(api))
-                < 0) {
+                < 0
+            || release_managed_outputs(&request) < 0) {
             goto cleanup;
         }
-        release_managed_outputs(&request);
     }
     result = 0;
 

@@ -87,12 +87,6 @@ if RTSMART_ENABLE_MPP_EXAMPLES
       help
         Lightweight media player for MP4 files via LCD or HDMI.
 
-  config RTSMART_MPP_ENABLE_SAMPLE_PM
-      bool "Enable Build sample_pm"
-      default n
-      help
-        Power Management IC PMIC demonstration for EVB boards.
-
   config RTSMART_MPP_ENABLE_SAMPLE_RTSPCLIENT
       bool "Enable Build sample_rtspclient"
       default n
@@ -192,5 +186,12 @@ if RTSMART_ENABLE_MPP_EXAMPLES
       help
         WebRTC demo: Connect to signaling server and stream H.264 video and
         G.711A audio via libpeer DataChannel.
+
+  config RTSMART_MPP_ENABLE_MPP_LIFETIME_TEST
+      bool "Enable Build mpp_lifetime_test"
+      default n
+      help
+        Coverage-only regression harness for MPP resource ownership,
+        invalid handles, invalid user pointers, and cleanup behavior.
 
 endif

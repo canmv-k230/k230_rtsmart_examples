@@ -33,11 +33,8 @@
 #include "mpi_vo_api.h"
 #include "mpi_sys_api.h"
 #include "k_video_comm.h"
-
 #include "k_vo_comm.h"
-
-#include "k_connector_comm.h"
-#include "mpi_connector_api.h"
+#include "kd_display.h"
 
 #define ENABLE_VO_LAYER   1
 
@@ -59,68 +56,40 @@ typedef struct {
 
 static k_s32 sample_vo_init(sample_vo_info* vo_info)
 {
-    k_u32 ret = 0;
-    k_s32 connector_fd;
-    k_connector_type connector_type = vo_info->type;
-    k_connector_info connector_info;
+    k_s32 ret;
+    k_gdma_rotation_e rotate = vo_info->ratation_90 ? GDMA_ROTATE_DEGREE_90 : GDMA_ROTATE_DEGREE_0;
 
-    memset(&connector_info, 0, sizeof(k_connector_info));
-
-    //connector get sensor info
-    ret = kd_mpi_get_connector_info(connector_type, &connector_info);
-    if (ret) {
-        printf("sample_vicap, the sensor type not supported!\n");
+    ret = kd_display_init(vo_info->type, 0, 0, rotate);
+    if (ret != K_SUCCESS) {
+        printf("kd_display_init failed, ret=%d\n", ret);
         return ret;
     }
 
-    connector_fd = kd_mpi_connector_open(connector_info.connector_name);
-    if (connector_fd < 0) {
-        printf("%s, connector open failed.\n", __func__);
-        return K_ERR_VO_NOTREADY;
-    }
-
-    // connector init
-    kd_mpi_connector_init(connector_fd, connector_info);
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
-
-    kd_mpi_vo_disable_layer(vo_info->layer_id);
+    kd_display_layer_disable(vo_info->layer_id);
 
     printf("%s>vo init width %d height %d\n", __func__, vo_info->width, vo_info->height);
 
-    k_vo_layer_attr vo_layer_attr;
-    memset(&vo_layer_attr, 0, sizeof(vo_layer_attr));
-    vo_layer_attr.layer_id           = vo_info->layer_id;
-    vo_layer_attr.position.x         = 0;
-    vo_layer_attr.position.y         = 0;
-    vo_layer_attr.img_size.width     = vo_info->width;
-    vo_layer_attr.img_size.height    = vo_info->height;
-    vo_layer_attr.pixel_format       = PIXEL_FORMAT_YUV_SEMIPLANAR_420; /* NV12 / YUV420SP */
-    vo_layer_attr.func               = (vo_info->ratation_90 == 1) ? GDMA_ROTATE_DEGREE_90 :GDMA_ROTATE_DEGREE_0;
-    vo_layer_attr.rot_buf_nr         = (vo_info->ratation_90 == 1) ? 3:0; /* 旋转时使用少量 GSDMA buffer */
-    vo_layer_attr.global_alpha       = 0xff;
-    vo_layer_attr.rot_buf_bpp        = 0;
-
-    printf("sample_vo_init: layer_id %d, width %d, height %d, pixel_format %d, func %d,buf_nr:%d\n",
-           vo_layer_attr.layer_id, vo_layer_attr.img_size.width, vo_layer_attr.img_size.height,
-           vo_layer_attr.pixel_format, vo_layer_attr.func,vo_layer_attr.rot_buf_nr);
-
-    ret = kd_mpi_vo_set_layer_attr(vo_info->layer_id,&vo_layer_attr);
+    ret = kd_display_layer_configure_ex(vo_info->layer_id, PIXEL_FORMAT_YUV_SEMIPLANAR_420,
+                                        vo_info->width, vo_info->height, 0, 0, 0xff, rotate,
+                                        vo_info->ratation_90 ? 3 : 0, 0);
     if (ret != K_SUCCESS) {
-        printf("ERROR: kd_mpi_vo_set_layer_attr failed, ret=%d\n", ret);
+        printf("ERROR: kd_display_layer_configure failed, ret=%d\n", ret);
+        kd_display_deinit();
         return ret;
     }
 
-    ret = kd_mpi_vo_enable_layer(vo_info->layer_id);
+    ret = kd_display_layer_enable(vo_info->layer_id);
     if (ret != K_SUCCESS) {
-        printf("ERROR: kd_mpi_vo_enable_layer failed, ret=%d\n", ret);
+        printf("ERROR: kd_display_layer_enable failed, ret=%d\n", ret);
+        kd_display_deinit();
         return ret;
     }
-    //exit ;
+
+    printf("enable vo layer:%d\n", vo_info->layer_id);
     return 0;
 }
 
-void display_layer_init(k_u32 width,k_u32 height)
+k_s32 display_layer_init(k_u32 width,k_u32 height)
 {
     sample_vo_info vo_info;
     vo_info.type = g_connector_type;
@@ -138,13 +107,13 @@ void display_layer_init(k_u32 width,k_u32 height)
         vo_info.ratation_90 = 0;
     }
 
-    sample_vo_init(&vo_info);
+    return sample_vo_init(&vo_info);
 
 }
 
 void display_layer_deinit()
 {
-    kd_mpi_vo_disable_layer(ENABLE_VO_LAYER);
+    kd_display_layer_disable(ENABLE_VO_LAYER);
 }
 
 k_s32 vo_init()
@@ -154,5 +123,5 @@ k_s32 vo_init()
 
 k_s32 vo_deinit()
 {
-    return K_SUCCESS;
+    return kd_display_deinit();
 }

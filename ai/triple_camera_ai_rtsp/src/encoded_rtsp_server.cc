@@ -35,19 +35,31 @@ int EncodedRtspServer::init(int width, int height, int bitrate_kbps, const std::
     height_ = height;
     bitrate_kbps_ = bitrate_kbps;
 
+    ret = kd_mpi_venc_acquire_fd();
+    if (ret != K_SUCCESS) {
+        printf("Failed to acquire venc fd, ret=%d\n", ret);
+        return ret;
+    }
+    venc_fd_acquired_ = true;
+
     ret = kd_mpi_venc_request_chn(&venc_chn_id_);
     if (ret != 0) {
         printf("Failed to request venc channel, ret=%d\n", ret);
+        (void)kd_mpi_venc_release_fd();
+        venc_fd_acquired_ = false;
         return ret;
     }
+    venc_chn_requested_ = true;
 
     if (_init_venc() < 0) {
         printf("Failed to init venc\n");
+        _deinit_venc();
         return -1;
     }
 
     if (_init_rtsp_server() < 0) {
         printf("Failed to init rtsp server\n");
+        _deinit_venc();
         return -1;
     }
 
@@ -96,9 +108,7 @@ int EncodedRtspServer::stop()
 int EncodedRtspServer::deinit()
 {
     _deinit_rtsp_server();
-    _deinit_venc();
-
-    return 0;
+    return _deinit_venc();
 }
 
 int EncodedRtspServer::send_raw_frame(k_video_frame_info *frame, k_s32 milli_sec)
@@ -117,7 +127,13 @@ int EncodedRtspServer::_init_venc()
         printf("%s _venc_vb_create_pool failed\n",__func__);
         return -1;
     }
-    kd_mpi_venc_attach_vb_pool(venc_chn_id_,venc_attach_pool_id_);
+    ret = kd_mpi_venc_attach_vb_pool(venc_chn_id_,venc_attach_pool_id_);
+    if (ret != K_SUCCESS)
+    {
+        printf("kd_mpi_venc_attach_vb_pool failed:0x%x\n", ret);
+        return -1;
+    }
+    venc_pool_attached_ = true;
 
     memset(&chn_attr, 0, sizeof(chn_attr));
     k_u64 stream_size = width_ * height_ / 2;
@@ -136,6 +152,7 @@ int EncodedRtspServer::_init_venc()
         printf("kd_mpi_venc_create_chn failed:0x%x\n", ret);
         return -1;
     }
+    venc_chn_created_ = true;
 
     ret = kd_mpi_venc_enable_idr(venc_chn_id, K_TRUE);
     if (ret != K_SUCCESS)
@@ -159,24 +176,64 @@ int EncodedRtspServer::_init_venc()
 
 int EncodedRtspServer::_deinit_venc()
 {
-    k_s32 ret = -1;
+    k_s32 ret;
+    k_s32 result = K_SUCCESS;
 
-    ret = kd_mpi_venc_detach_vb_pool(venc_chn_id_);
-    if (ret != K_SUCCESS)
+    if (venc_pool_attached_)
     {
-        printf("kd_mpi_venc_detach_vb_pool failed:0x%x\n", ret);
+        ret = kd_mpi_venc_detach_vb_pool(venc_chn_id_);
+        if (ret != K_SUCCESS)
+        {
+            printf("kd_mpi_venc_detach_vb_pool failed:0x%x\n", ret);
+            return ret;
+        }
+        venc_pool_attached_ = false;
     }
 
-    ret = kd_mpi_venc_destroy_chn(venc_chn_id_);
-    if (ret != K_SUCCESS)
+    if (venc_chn_created_)
     {
-        printf("kd_mpi_venc_destroy_chn failed:0x%x\n", ret);
-        return -1;
+        ret = kd_mpi_venc_destroy_chn(venc_chn_id_);
+        if (ret != K_SUCCESS)
+        {
+            printf("kd_mpi_venc_destroy_chn failed:0x%x\n", ret);
+            result = ret;
+        }
+        else
+        {
+            venc_chn_created_ = false;
+        }
     }
 
-    kd_mpi_venc_release_chn(venc_chn_id_);
+    if (!venc_chn_created_ && venc_chn_requested_)
+    {
+        ret = kd_mpi_venc_release_chn(venc_chn_id_);
+        if (ret != K_SUCCESS)
+        {
+            printf("kd_mpi_venc_release_chn failed:0x%x\n", ret);
+            result = ret;
+        }
+        else
+        {
+            venc_chn_requested_ = false;
+        }
+    }
 
-    return 0;
+    if (!venc_chn_created_ && venc_attach_pool_id_ != VB_INVALID_POOLID)
+    {
+        ret = kd_mpi_vb_destory_pool(venc_attach_pool_id_);
+        if (ret != K_SUCCESS)
+            return ret;
+        venc_attach_pool_id_ = VB_INVALID_POOLID;
+    }
+    if (!venc_chn_created_ && !venc_chn_requested_ && venc_fd_acquired_)
+    {
+        ret = kd_mpi_venc_release_fd();
+        venc_fd_acquired_ = false;
+        if (ret != K_SUCCESS)
+            result = ret;
+    }
+
+    return result;
 }
 
 int EncodedRtspServer::_init_rtsp_server()
@@ -188,7 +245,7 @@ int EncodedRtspServer::_init_rtsp_server()
 
     // 配置会话属性
     SessionAttr session_attr;
-    session_attr.with_audio = true;
+    session_attr.with_audio = false;
     session_attr.with_audio_backchannel = false;
     session_attr.with_video = true;
     session_attr.video_type = VideoType::kVideoTypeH264;
@@ -196,6 +253,7 @@ int EncodedRtspServer::_init_rtsp_server()
     // 创建RTSP会话
     if (rtsp_server_.CreateSession(stream_url_, session_attr) < 0) {
         printf("RTSP session creation failed\n");
+        rtsp_server_.DeInit();
         return -1;
     }
 
