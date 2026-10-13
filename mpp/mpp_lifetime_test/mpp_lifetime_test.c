@@ -12,17 +12,12 @@
 #include <unistd.h>
 
 #include "hal_syscall.h"
-#include "k_type.h"
 #include "k_module.h"
-#include "k_sys_ioctl.h"
+#include "k_type.h"
 #include "k_vb_comm.h"
-#include "k_vb_ioctl.h"
-#include "k_vicap_ioctl.h"
 #include "k_vdec_comm.h"
-#include "k_vdec_ioctl.h"
 #include "k_venc_comm.h"
-#include "k_venc_ioctl.h"
-#include "k_vpu_test_ioctl.h"
+#include "mpp_lifetime_ioctl.h"
 
 #define VB_DEVICE "/dev/vb_device"
 #define VDEC_DEVICE "/dev/vdec_device"
