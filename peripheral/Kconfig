@@ -69,6 +69,14 @@ if RTSMART_ENABLE_PERIPHERAL_EXAMPLES
         bool "Enable Build netmgmt"
         default y
 
+    config RTSMART_PERIPHERAL_ENABLE_MODEM
+        bool "Enable Build modem (ML307H 4G wake-up)"
+        default y
+        help
+            Build the hal_modem demo (modem.elf) for the K230 + ML307H 4G
+            network wake-up scheme: REQ_READY GPIO handshake, USB AT/ECM
+            bring-up with AT+MDIALUP dial, IMEI read, and PMU shutdown.
+
     config RTSMART_PERIPHERAL_ENABLE_OTA
         bool "Enable Build ota"
         default y
