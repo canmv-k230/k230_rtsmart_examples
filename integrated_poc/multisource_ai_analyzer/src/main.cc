@@ -4,7 +4,9 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <errno.h>
+#include <signal.h>
 #include <string.h>
+#include <sys/select.h>
 #include <iostream>
 #include <thread>
 #include "setting.h"
@@ -28,6 +30,21 @@ using std::endl;
 
 // 全局原子标志，用于安全地停止 ISP / 视频处理线程
 std::atomic<bool> isp_stop(false);
+
+static volatile sig_atomic_t g_stop_requested = 0;
+static struct sigaction g_sig_dfl;
+
+// 处理器里只写 sig_atomic_t。主线程看到后再置 isp_stop，通知工作线程退出。
+// 第二次 Ctrl+C 恢复默认动作。sigaction/raise 在异步信号安全列表里。
+static void on_exit_signal(int signo)
+{
+    if (g_stop_requested) {
+        sigaction(signo, &g_sig_dfl, nullptr);
+        raise(signo);
+        return;
+    }
+    g_stop_requested = 1;
+}
 
 // 视频处理线程函数（定义在下方）
 void video_proc(const AppSettings& settings);
@@ -202,6 +219,25 @@ int main(int argc, char *argv[])
     // 可选：打印配置信息
     settings.print();
 
+    memset(&g_sig_dfl, 0, sizeof(g_sig_dfl));
+    g_sig_dfl.sa_handler = SIG_DFL;
+    sigemptyset(&g_sig_dfl.sa_mask);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_exit_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+
+    // 工作线程屏蔽 SIGINT/SIGTERM，避免打断 nonai_2d_get_frame 的等待。
+    // 信号只交给主线程，由它置 isp_stop。
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGINT);
+    sigaddset(&blocked, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &blocked, nullptr);
+
     // 启动视频处理线程（VICAP/ISP 初始化 + nncase 模型加载调用链深，
     // musl 默认 pthread 栈仅 128KB 会溢出，显式加大到 1MB）
     pthread_attr_t attr;
@@ -210,21 +246,39 @@ int main(int argc, char *argv[])
 
     pthread_t thread_isp;
     if (pthread_create(&thread_isp, &attr, video_proc_entry, &settings) != 0) {
+        pthread_attr_destroy(&attr);
+        pthread_sigmask(SIG_UNBLOCK, &blocked, nullptr);
         std::cerr << "Failed to create video thread" << std::endl;
         return -1;
     }
     pthread_attr_destroy(&attr);
+    pthread_sigmask(SIG_UNBLOCK, &blocked, nullptr);
 
-    // 等待按下 'q' 键退出
-    while (getchar() != 'q')
+    // 按 q、Ctrl+C 或 stdin 关闭退出。Ctrl+C 只置 g_stop_requested，
+    // 离开循环后再通知工作线程。
+    while (!g_stop_requested && !isp_stop.load())
     {
-        usleep(10000);
+        fd_set rfds;
+        struct timeval tv;
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 100 * 1000;
+        int ret = select(STDIN_FILENO + 1, &rfds, nullptr, nullptr, &tv);
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (ret > 0 && FD_ISSET(STDIN_FILENO, &rfds)) {
+            int ch = getchar();
+            // stdin 到 EOF 时 select 会一直可读，不退出就会空转。
+            if (ch == EOF || ch == 'q' || ch == 'Q')
+                break;
+        }
     }
 
-    // 通知处理线程退出
     isp_stop.store(true);
-
-    // 等待线程结束
     pthread_join(thread_isp, nullptr);
 
     return 0;
