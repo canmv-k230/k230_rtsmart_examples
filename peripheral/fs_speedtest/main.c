@@ -90,15 +90,6 @@ static void format_size(size_t bytes, char* buffer, size_t buffer_len)
     snprintf(buffer, buffer_len, "%zu B", bytes);
 }
 
-static void fill_pattern(uint8_t* buffer, size_t size)
-{
-    size_t index;
-
-    for (index = 0; index < size; ++index) {
-        buffer[index] = (uint8_t)((index * 131u) + 17u);
-    }
-}
-
 static int build_permutation(size_t* order, size_t count)
 {
     uint32_t state = 0x12345678u;
@@ -184,12 +175,20 @@ static uint64_t filesystem_free_bytes(const struct statvfs* fs)
 
 static void fill_offset_pattern(uint8_t* buffer, size_t size, uint64_t offset)
 {
-    size_t index;
+    size_t index = 0;
 
-    for (index = 0; index < size; ++index) {
-        uint64_t position = offset + index;
+    /* Mix the full word offset so that distant sectors do not repeat. */
+    while (index < size) {
+        uint64_t     position = offset + index;
+        uint64_t     word = (position / 8U) + UINT64_C(0x9e3779b97f4a7c15);
+        unsigned int byte = (unsigned int)(position % 8U);
 
-        buffer[index] = (uint8_t)(((position * 131U) + 17U) ^ (position >> 8));
+        word = (word ^ (word >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+        word = (word ^ (word >> 27)) * UINT64_C(0x94d049bb133111eb);
+        word ^= word >> 31;
+        for (; byte < 8U && index < size; ++byte, ++index) {
+            buffer[index] = (uint8_t)(word >> (byte * 8U));
+        }
     }
 }
 
@@ -588,138 +587,183 @@ static int open_write_target(const char* path, size_t total_bytes, int prealloca
     return fd;
 }
 
-static int benchmark_seq_write(const char* path, const uint8_t* buffer, size_t block_size, size_t block_count, int preallocate,
-                               uint64_t* prealloc_elapsed_us, uint64_t* elapsed_us)
+/* A NULL order selects sequential I/O; otherwise hash in the shuffled I/O order. */
+static int benchmark_write(const char* path, uint8_t* buffer, size_t block_size, const size_t* order,
+                           size_t block_count, int preallocate, uint64_t pattern_base,
+                           uint64_t* prealloc_elapsed_us, uint64_t* elapsed_us, uint8_t digest[SHA256_SIZE])
 {
-    int      fd;
-    size_t   index;
-    uint64_t start_us;
-    uint64_t end_us;
-    size_t   total_bytes;
+    mbedtls_sha256_context context;
+    int                    fd = -1;
+    int                    result = -1;
+    int                    saved_errno;
+    size_t                 index;
+    uint64_t               start_us;
 
-    total_bytes = block_size * block_count;
-    fd          = open_write_target(path, total_bytes, preallocate, prealloc_elapsed_us);
-    if (fd < 0) {
-        return -1;
+    *elapsed_us = 0;
+    mbedtls_sha256_init(&context);
+    if (mbedtls_sha256_starts(&context, 0) != 0) {
+        errno = EIO;
+        goto cleanup;
     }
 
-    start_us = utils_cpu_ticks_us();
+    fd = open_write_target(path, block_size * block_count, preallocate, prealloc_elapsed_us);
+    if (fd < 0) {
+        goto cleanup;
+    }
+
     for (index = 0; index < block_count; ++index) {
+        size_t block_index = order ? order[index] : index;
+        off_t  offset = (off_t)(block_index * block_size);
+
+        fill_offset_pattern(buffer, block_size, pattern_base + (uint64_t)offset);
+        if (mbedtls_sha256_update(&context, buffer, block_size) != 0) {
+            errno = EIO;
+            goto cleanup;
+        }
+
+        /* Only seek/write time contributes to throughput, not pattern generation or hashing. */
+        start_us = utils_cpu_ticks_us();
+        if (order != NULL && lseek(fd, offset, SEEK_SET) != offset) {
+            goto cleanup;
+        }
         if (write_full(fd, buffer, block_size) != 0) {
-            close(fd);
-            return -1;
+            goto cleanup;
         }
+        *elapsed_us += utils_cpu_ticks_us() - start_us;
     }
 
+    start_us = utils_cpu_ticks_us();
     if (fsync(fd) != 0) {
-        close(fd);
-        return -1;
+        goto cleanup;
     }
+    *elapsed_us += utils_cpu_ticks_us() - start_us;
 
-    end_us = utils_cpu_ticks_us();
-    close(fd);
-    *elapsed_us = (end_us >= start_us) ? (end_us - start_us) : 0;
-    return 0;
+    if (mbedtls_sha256_finish(&context, digest) != 0) {
+        errno = EIO;
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    saved_errno = errno;
+    if (fd >= 0 && close(fd) != 0 && result == 0) {
+        saved_errno = errno;
+        result = -1;
+    }
+    mbedtls_sha256_free(&context);
+    errno = saved_errno;
+    return result;
 }
 
-static int benchmark_seq_read(const char* path, uint8_t* buffer, size_t block_size, size_t block_count, uint64_t* elapsed_us)
+static int benchmark_read(const char* path, uint8_t* buffer, size_t block_size, const size_t* order,
+                          size_t block_count, uint64_t* elapsed_us, uint8_t digest[SHA256_SIZE])
 {
-    int      fd;
-    size_t   index;
-    uint64_t start_us;
-    uint64_t end_us;
+    mbedtls_sha256_context context;
+    struct stat            file_stat;
+    int                    fd = -1;
+    int                    result = -1;
+    int                    saved_errno;
+    size_t                 index;
+    uint64_t               start_us;
 
+    *elapsed_us = 0;
+    mbedtls_sha256_init(&context);
+    if (mbedtls_sha256_starts(&context, 0) != 0) {
+        errno = EIO;
+        goto cleanup;
+    }
+
+    /* Reopen after fsync/close so readback goes through the filesystem again. */
     fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        return -1;
+    if (fd < 0 || fstat(fd, &file_stat) != 0) {
+        goto cleanup;
+    }
+    if ((uint64_t)file_stat.st_size != (uint64_t)block_size * block_count) {
+        errno = EIO;
+        goto cleanup;
     }
 
-    start_us = utils_cpu_ticks_us();
     for (index = 0; index < block_count; ++index) {
+        size_t block_index = order ? order[index] : index;
+        off_t  offset = (off_t)(block_index * block_size);
+
+        /* Do not let a read that leaves the buffer untouched reuse written data. */
+        memset(buffer, 0, block_size);
+        start_us = utils_cpu_ticks_us();
+        if (order != NULL && lseek(fd, offset, SEEK_SET) != offset) {
+            goto cleanup;
+        }
         if (read_full(fd, buffer, block_size) != 0) {
-            close(fd);
-            return -1;
+            goto cleanup;
+        }
+        *elapsed_us += utils_cpu_ticks_us() - start_us;
+
+        if (mbedtls_sha256_update(&context, buffer, block_size) != 0) {
+            errno = EIO;
+            goto cleanup;
         }
     }
 
-    end_us = utils_cpu_ticks_us();
-    close(fd);
-    *elapsed_us = (end_us >= start_us) ? (end_us - start_us) : 0;
-    return 0;
+    if (mbedtls_sha256_finish(&context, digest) != 0) {
+        errno = EIO;
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    saved_errno = errno;
+    if (fd >= 0 && close(fd) != 0 && result == 0) {
+        saved_errno = errno;
+        result = -1;
+    }
+    mbedtls_sha256_free(&context);
+    errno = saved_errno;
+    return result;
 }
 
-static int benchmark_random_write(const char* path, const uint8_t* buffer, size_t block_size, const size_t* order,
-                                  size_t block_count, int preallocate, uint64_t* prealloc_elapsed_us, uint64_t* elapsed_us)
+static int run_benchmark_case(const char* path, uint8_t* buffer, size_t block_size, const size_t* order,
+                             size_t block_count, int preallocate)
 {
-    int      fd;
-    size_t   index;
-    uint64_t start_us;
-    uint64_t end_us;
-    size_t   total_bytes;
+    const char* write_mode = order ? (preallocate ? "nonseq_write_prealloc" : "nonseq_write")
+                                   : (preallocate ? "seq_write_prealloc" : "seq_write");
+    const char* read_mode = order ? (preallocate ? "nonseq_read_prealloc" : "nonseq_read")
+                                 : (preallocate ? "seq_read_prealloc" : "seq_read");
+    uint8_t  write_digest[SHA256_SIZE];
+    uint8_t  read_digest[SHA256_SIZE];
+    uint64_t prealloc_elapsed_us;
+    uint64_t elapsed_us;
+    uint64_t pattern_base = utils_cpu_ticks();
+    size_t   total_bytes = block_size * block_count;
+    int      matches;
 
-    total_bytes = block_size * block_count;
-    fd          = open_write_target(path, total_bytes, preallocate, prealloc_elapsed_us);
-    if (fd < 0) {
+    if (benchmark_write(path, buffer, block_size, order, block_count, preallocate, pattern_base,
+                        &prealloc_elapsed_us, &elapsed_us, write_digest) != 0) {
+        fprintf(stderr, "  %s block=%zu failed: %s\n", write_mode, block_size, strerror(errno));
         return -1;
     }
-
-    start_us = utils_cpu_ticks_us();
-    for (index = 0; index < block_count; ++index) {
-        off_t offset = (off_t)(order[index] * block_size);
-
-        if (lseek(fd, offset, SEEK_SET) < 0) {
-            close(fd);
-            return -1;
-        }
-
-        if (write_full(fd, buffer, block_size) != 0) {
-            close(fd);
-            return -1;
-        }
+    if (preallocate) {
+        print_result("prealloc_time", block_size, total_bytes, prealloc_elapsed_us);
     }
+    print_result(write_mode, block_size, total_bytes, elapsed_us);
 
-    if (fsync(fd) != 0) {
-        close(fd);
+    /* Verify every write case before the next case truncates the file. */
+    if (benchmark_read(path, buffer, block_size, order, block_count, &elapsed_us, read_digest) != 0) {
+        fprintf(stderr, "  %s block=%zu failed: %s\n", read_mode, block_size, strerror(errno));
         return -1;
     }
+    print_result(read_mode, block_size, total_bytes, elapsed_us);
 
-    end_us = utils_cpu_ticks_us();
-    close(fd);
-    *elapsed_us = (end_us >= start_us) ? (end_us - start_us) : 0;
-    return 0;
-}
-
-static int benchmark_random_read(const char* path, uint8_t* buffer, size_t block_size, const size_t* order, size_t block_count,
-                                 uint64_t* elapsed_us)
-{
-    int      fd;
-    size_t   index;
-    uint64_t start_us;
-    uint64_t end_us;
-
-    fd = open(path, O_RDONLY);
-    if (fd < 0) {
+    matches = memcmp(write_digest, read_digest, SHA256_SIZE) == 0;
+    printf("  %s block=%zu SHA-256 %s\n", write_mode, block_size, matches ? "PASS" : "FAIL");
+    printf("    write_sha256=");
+    print_sha256(write_digest);
+    printf("\n    read_sha256=");
+    print_sha256(read_digest);
+    printf("\n");
+    if (!matches) {
+        fprintf(stderr, "  %s block=%zu: SHA-256 verification failed\n", write_mode, block_size);
         return -1;
     }
-
-    start_us = utils_cpu_ticks_us();
-    for (index = 0; index < block_count; ++index) {
-        off_t offset = (off_t)(order[index] * block_size);
-
-        if (lseek(fd, offset, SEEK_SET) < 0) {
-            close(fd);
-            return -1;
-        }
-
-        if (read_full(fd, buffer, block_size) != 0) {
-            close(fd);
-            return -1;
-        }
-    }
-
-    end_us = utils_cpu_ticks_us();
-    close(fd);
-    *elapsed_us = (end_us >= start_us) ? (end_us - start_us) : 0;
     return 0;
 }
 
@@ -763,33 +807,34 @@ static int run_benchmark_for_mount(const char* mount_point)
     char   path[256];
     size_t size_index;
 
+    if (mount_point[0] == '\0' ||
+        snprintf(path, sizeof(path), "%s/helloworld_fsbench.bin", mount_point) >= (int)sizeof(path)) {
+        fprintf(stderr, "Test path is empty or too long\n");
+        return -1;
+    }
+
     // Create directory if it doesn't exist
     if (!is_mount_available(mount_point)) {
         printf("[%s] directory does not exist, attempting to create...\n", mount_point);
         if (create_directory_recursive(mount_point) != 0) {
             printf("[%s] failed to create directory: %s\n", mount_point, strerror(errno));
-            return 0;
+            return -1;
         }
         printf("[%s] directory created successfully.\n", mount_point);
     }
 
-    snprintf(path, sizeof(path), "%s/helloworld_fsbench.bin", mount_point);
     printf("\n[%s]\n", mount_point);
 
     for (size_index = 0; size_index < (sizeof(k_block_sizes) / sizeof(k_block_sizes[0])); ++size_index) {
         size_t   block_size  = k_block_sizes[size_index];
         size_t   block_count = (size_t)(TEST_TOTAL_BYTES / block_size);
-        size_t   total_bytes;
         size_t*  order;
         uint8_t* buffer;
-        uint64_t prealloc_elapsed_us;
-        uint64_t elapsed_us;
 
         if (block_count < MIN_BLOCK_COUNT) {
             block_count = MIN_BLOCK_COUNT;
         }
 
-        total_bytes = block_count * block_size;
         buffer      = (uint8_t*)malloc(block_size);
         order       = (size_t*)malloc(block_count * sizeof(size_t));
         if ((buffer == NULL) || (order == NULL)) {
@@ -800,7 +845,6 @@ static int run_benchmark_for_mount(const char* mount_point)
             return -1;
         }
 
-        fill_pattern(buffer, block_size);
         if (build_permutation(order, block_count) != 0) {
             printf("  failed to prepare shuffled order for block size %zu\n", block_size);
             free(order);
@@ -809,61 +853,15 @@ static int run_benchmark_for_mount(const char* mount_point)
             return -1;
         }
 
-        if (benchmark_seq_write(path, buffer, block_size, block_count, 0, NULL, &elapsed_us) != 0) {
-            printf("  seq_write        failed: %s\n", strerror(errno));
+        if (run_benchmark_case(path, buffer, block_size, NULL, block_count, 0) != 0 ||
+            run_benchmark_case(path, buffer, block_size, NULL, block_count, 1) != 0 ||
+            run_benchmark_case(path, buffer, block_size, order, block_count, 0) != 0 ||
+            run_benchmark_case(path, buffer, block_size, order, block_count, 1) != 0) {
             free(order);
             free(buffer);
             unlink(path);
             return -1;
         }
-        print_result("seq_write", block_size, total_bytes, elapsed_us);
-
-        if (benchmark_seq_write(path, buffer, block_size, block_count, 1, &prealloc_elapsed_us, &elapsed_us) != 0) {
-            printf("  seq_write_prealloc failed: %s\n", strerror(errno));
-            free(order);
-            free(buffer);
-            unlink(path);
-            return -1;
-        }
-        print_result("prealloc_time", block_size, total_bytes, prealloc_elapsed_us);
-        print_result("seq_write_prealloc", block_size, total_bytes, elapsed_us);
-
-        if (benchmark_seq_read(path, buffer, block_size, block_count, &elapsed_us) != 0) {
-            printf("  seq_read         failed: %s\n", strerror(errno));
-            free(order);
-            free(buffer);
-            unlink(path);
-            return -1;
-        }
-        print_result("seq_read", block_size, total_bytes, elapsed_us);
-
-        if (benchmark_random_write(path, buffer, block_size, order, block_count, 0, NULL, &elapsed_us) != 0) {
-            printf("  nonseq_write     failed: %s\n", strerror(errno));
-            free(order);
-            free(buffer);
-            unlink(path);
-            return -1;
-        }
-        print_result("nonseq_write", block_size, total_bytes, elapsed_us);
-
-        if (benchmark_random_write(path, buffer, block_size, order, block_count, 1, &prealloc_elapsed_us, &elapsed_us) != 0) {
-            printf("  nonseq_write_prealloc failed: %s\n", strerror(errno));
-            free(order);
-            free(buffer);
-            unlink(path);
-            return -1;
-        }
-        print_result("prealloc_time", block_size, total_bytes, prealloc_elapsed_us);
-        print_result("nonseq_write_prealloc", block_size, total_bytes, elapsed_us);
-
-        if (benchmark_random_read(path, buffer, block_size, order, block_count, &elapsed_us) != 0) {
-            printf("  nonseq_read      failed: %s\n", strerror(errno));
-            free(order);
-            free(buffer);
-            unlink(path);
-            return -1;
-        }
-        print_result("nonseq_read", block_size, total_bytes, elapsed_us);
 
         free(order);
         free(buffer);
@@ -875,9 +873,11 @@ static int run_benchmark_for_mount(const char* mount_point)
 
 static void print_usage(const char* prog_name)
 {
-    printf("Usage: %s [test_path]\n", prog_name);
+    printf("Usage: %s [test_path ...]\n", prog_name);
     printf("       %s --fill-verify <mount_point> [percent]\n", prog_name);
     printf("       %s --soak <mount_point> <seconds> [file_kib]\n", prog_name);
+    printf("  Each benchmark write is synced, closed and read back with SHA-256 verification.\n");
+    printf("  Pattern generation and hashing are excluded from the reported I/O time.\n");
     printf("  test_path: Directory path where benchmark file will be created\n");
     printf("             If not provided, default paths will be used:\n");
     for (size_t i = 0; i < (sizeof(k_default_mount_points) / sizeof(k_default_mount_points[0])); ++i) {
@@ -936,7 +936,8 @@ int main(int argc, char* argv[])
                         (size_t)file_kib * 1024U);
     }
 
-    printf("Filesystem read/write benchmark\n");
+    printf("Filesystem read/write benchmark with SHA-256 verification\n");
+    printf("Every write case is verified; pattern generation and hashing are excluded from I/O timing.\n");
     printf("Uses utils_cpu_ticks_us() for timing. Read numbers may include filesystem cache effects.\n");
     printf("Total payload per case is at least %.2f MiB.\n\n", (double)TEST_TOTAL_BYTES / (1024.0 * 1024.0));
 
