@@ -30,39 +30,6 @@ extern sample_dv_cfg_t g_vdd_cfg[];
 
 void sample_dv_vicap_config(k_u32 ch, k_s32 sensor_index)
 {
-#ifdef ENABLE_VDSS
-    k_vicap_dev_attr dev_attr;
-    k_vicap_chn_attr chn_attr;
-    sample_venc_conf_t *venc_conf;
-
-    mpi_vdss_rst_all(2);
-
-    venc_conf = &g_venc_conf[ch];
-
-    memset(&dev_attr, 0, sizeof(dev_attr));
-    dev_attr.dev_num = ch;
-    dev_attr.height = venc_conf->chn_height;
-    dev_attr.width = venc_conf->chn_width;
-    dev_attr.sensor_type = 1;
-
-    dev_attr.artr.csi = CSI0;
-    dev_attr.artr.type = CLOSE_3D_MODE;
-    dev_attr.artr.mode = LINERA_MODE;
-    dev_attr.artr.dev_format[0] = RAW10;
-    dev_attr.artr.phy_attr.lan_num = MIPI_1LAN;
-    dev_attr.artr.phy_attr.freq = MIPI_800M;
-    dev_attr.artr.bind_dvp = DVP_CSI1_FLASE_TRIGGER0;
-
-    kd_mpi_vdss_set_dev_attr(&dev_attr);
-
-    memset(&chn_attr, 0, sizeof(chn_attr));
-    chn_attr.format = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
-    chn_attr.height = venc_conf->chn_height;
-    chn_attr.width = venc_conf->chn_width;
-    chn_attr.enable = 1;
-
-    kd_mpi_vdss_set_chn_attr(ch, ch, &chn_attr);
-#else
     sample_dv_cfg_t *vdd_cfg;
     k_s32 ret;
     k_vicap_dev vicap_dev = VICAP_DEV_ID_0;
@@ -143,35 +110,22 @@ void sample_dv_vicap_config(k_u32 ch, k_s32 sensor_index)
 
     ret = kd_mpi_vicap_init(vicap_dev);
     VDD_CHECK_RET(ret, __func__, __LINE__);
-#endif
 }
 
 void sample_dv_vicap_start(k_u32 ch)
 {
-#ifdef ENABLE_VDSS
-    k_s32 ret;
-    ret = kd_mpi_vdss_start_pipe(0, ch);
-    VDD_CHECK_RET(ret, __func__, __LINE__);
-#else
     k_s32 ret;
 
     ret = kd_mpi_vicap_start_stream(VICAP_DEV_ID_0);
     VDD_CHECK_RET(ret, __func__, __LINE__);
-#endif
 }
 
 void sample_dv_vicap_stop(k_u32 ch)
 {
-#ifdef ENABLE_VDSS
-    k_s32 ret;
-    ret = kd_mpi_vdss_stop_pipe(0, ch);
-    CHECK_RET(ret, __func__, __LINE__);
-#else
     k_s32 ret;
 
     ret = kd_mpi_vicap_stop_stream(VICAP_DEV_ID_0);
     VDD_CHECK_RET(ret, __func__, __LINE__);
     ret = kd_mpi_vicap_deinit(VICAP_DEV_ID_0);
     VDD_CHECK_RET(ret, __func__, __LINE__);
-#endif
 }

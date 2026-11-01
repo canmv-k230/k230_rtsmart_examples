@@ -50,13 +50,7 @@
 #define VENC_MAX_IN_FRAMES   30
 #define ENABLE_VENC_DEBUG    1
 
-//#define ENABLE_VDSS 1
-#ifdef ENABLE_VDSS
-    #include "k_vdss_comm.h"
-    #include "mpi_vdss_api.h"
-#else
-    #include "mpi_vicap_api.h"
-#endif
+#include "mpi_vicap_api.h"
 
 #ifdef ENABLE_VENC_DEBUG
     #define venc_debug  printf
@@ -156,36 +150,6 @@ static inline void CHECK_RET(k_s32 ret, const char *func, const int line)
 
 static void sample_vicap_config(k_u32 ch, k_u32 width, k_u32 height, k_vicap_sensor_type sensor_type)
 {
-#ifdef ENABLE_VDSS
-    k_vicap_dev_attr dev_attr;
-    k_vicap_chn_attr chn_attr;
-
-    mpi_vdss_rst_all(2);
-
-    memset(&dev_attr, 0, sizeof(dev_attr));
-    dev_attr.dev_num = ch;
-    dev_attr.height = height;
-    dev_attr.width = width;
-    dev_attr.sensor_type = 1;
-
-    dev_attr.artr.csi = CSI0;
-    dev_attr.artr.type = CLOSE_3D_MODE;
-    dev_attr.artr.mode = LINERA_MODE;
-    dev_attr.artr.dev_format[0] = RAW10;
-    dev_attr.artr.phy_attr.lan_num = MIPI_1LAN;
-    dev_attr.artr.phy_attr.freq = MIPI_800M;
-    dev_attr.artr.bind_dvp = DVP_CSI1_FLASE_TRIGGER0;
-
-    kd_mpi_vdss_set_dev_attr(&dev_attr);
-
-    memset(&chn_attr, 0, sizeof(chn_attr));
-    chn_attr.format = PIXEL_FORMAT_YVU_SEMIPLANAR_420;
-    chn_attr.height = height;
-    chn_attr.width = width;
-    chn_attr.enable = 1;
-
-    kd_mpi_vdss_set_chn_attr(ch, ch, &chn_attr);
-#else
     k_s32 ret;
     k_vicap_dev vicap_dev = VICAP_DEV_ID_0;
     k_vicap_chn vicap_chn = ch;
@@ -238,37 +202,24 @@ static void sample_vicap_config(k_u32 ch, k_u32 width, k_u32 height, k_vicap_sen
 
     ret = kd_mpi_vicap_init(vicap_dev);
     CHECK_RET(ret, __func__, __LINE__);
-#endif
 }
 
 void sample_vicap_start(k_u32 ch)
 {
-#ifdef ENABLE_VDSS
-    k_s32 ret;
-    ret = kd_mpi_vdss_start_pipe(0, ch);
-    CHECK_RET(ret, __func__, __LINE__);
-#else
     k_s32 ret;
 
     ret = kd_mpi_vicap_start_stream(VICAP_DEV_ID_0);
     CHECK_RET(ret, __func__, __LINE__);
-#endif
 }
 
 void sample_vicap_stop(k_u32 ch)
 {
-#ifdef ENABLE_VDSS
-    k_s32 ret;
-    ret = kd_mpi_vdss_stop_pipe(0, ch);
-    CHECK_RET(ret, __func__, __LINE__);
-#else
     k_s32 ret;
 
     ret = kd_mpi_vicap_stop_stream(VICAP_DEV_ID_0);
     CHECK_RET(ret, __func__, __LINE__);
     ret = kd_mpi_vicap_deinit(VICAP_DEV_ID_0);
     CHECK_RET(ret, __func__, __LINE__);
-#endif
 }
 
 static k_s32 sample_vb_init(k_u32 ch_cnt, k_bool osd_enable)
@@ -452,11 +403,7 @@ static void sample_vi_bind_venc(k_u32 chn_id)
     k_mpp_chn vi_mpp_chn;
     k_s32 ret;
 
-#ifdef ENABLE_VDSS
-    vi_mpp_chn.mod_id = K_ID_VICAP;
-#else
     vi_mpp_chn.mod_id = K_ID_VI;
-#endif
 
     venc_mpp_chn.mod_id = K_ID_VENC;
     venc_mpp_chn.dev_id = 0;
@@ -482,11 +429,7 @@ static void sample_vi_unbind_venc(k_u32 chn_id)
     venc_mpp_chn.dev_id = 0;
     venc_mpp_chn.chn_id = chn_id;
 
-#ifdef ENABLE_VDSS
-    vi_mpp_chn.mod_id = K_ID_VICAP;
-#else
     vi_mpp_chn.mod_id = K_ID_VI;
-#endif
     vi_mpp_chn.dev_id = chn_id;
     vi_mpp_chn.chn_id = chn_id;
     kd_mpi_sys_unbind(&vi_mpp_chn, &venc_mpp_chn);
