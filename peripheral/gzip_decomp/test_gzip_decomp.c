@@ -6,6 +6,7 @@
 #include <sys/time.h>
 
 #include "drv_gzip_decomp.h"
+#include "soft_gzip.h"
 #include "mpi_sys_api.h"
 
 #define DMA_NODE_SIZE (128U * 1024U)
@@ -245,6 +246,122 @@ out:
     return failed ? -1 : 0;
 }
 
+/* Payloads generated on the board and compressed with soft_gzip, so sizes and
+ * content are not limited to the fixtures built on the host. */
+enum { PATTERN_TEXT, PATTERN_NOISE, PATTERN_RUNS };
+
+static void fill_pattern(uint8_t *buf, uint32_t len, uint32_t seed, int kind)
+{
+    static const char words[] = "k230 gzip engine dma line sram node crc huffman ";
+    uint32_t x = seed * 2654435761u + 1;
+
+    for (uint32_t i = 0; i < len; ++i) {
+        x = x * 1103515245u + 12345u;
+        switch (kind) {
+        case PATTERN_TEXT:
+            buf[i] = (x >> 24) < 8 ? (uint8_t)(x >> 16) : (uint8_t)words[(i + (x >> 28)) % (sizeof(words) - 1)];
+            break;
+        case PATTERN_NOISE:
+            buf[i] = (uint8_t)(x >> 16);
+            break;
+        default:
+            buf[i] = (uint8_t)((i / (1 + (seed % 7) * 97)) * 31);
+            break;
+        }
+    }
+}
+
+static int run_soft_case(drv_gzip_decomp_inst_t *inst, const char *name, uint32_t len, int kind)
+{
+    const soft_gzip_opt_t opt = { .window = 32768, .max_match = 258, .block_tokens = 16384 };
+    uint8_t *payload = malloc(len);
+    uint8_t *storage = malloc((size_t)len + 2 * GUARD_SIZE);
+    uint8_t *gz = NULL;
+    uint8_t *output;
+    uint32_t gz_len = 0;
+    int ret, failed = 0;
+
+    if (!payload || !storage) {
+        printf("[FAIL] %-12s out of memory\n", name);
+        failed = 1;
+        goto out;
+    }
+    fill_pattern(payload, len, len, kind);
+    gz = soft_gzip_compress(payload, len, &opt, &gz_len);
+    if (!gz) {
+        printf("[FAIL] %-12s soft_gzip_compress failed\n", name);
+        failed = 1;
+        goto out;
+    }
+
+    memset(storage, 0xa5, (size_t)len + 2 * GUARD_SIZE);
+    output = storage + GUARD_SIZE;
+    ret = drv_gzip_decomp_gunzip(inst, gz, gz_len, output, len, 5000);
+    if (ret != 0) {
+        printf("[FAIL] %-12s decompress ret=%d\n", name, ret);
+        failed = 1;
+    } else if (memcmp(output, payload, len) != 0) {
+        printf("[FAIL] %-12s payload mismatch\n", name);
+        failed = 1;
+    } else if (check_fill(storage, GUARD_SIZE, 0xa5) != 0 ||
+               check_fill(output + len, GUARD_SIZE, 0xa5) != 0) {
+        printf("[FAIL] %-12s output guard overwritten\n", name);
+        failed = 1;
+    } else {
+        printf("[PASS] %-12s soft gzip %u -> %u bytes, hardware output matches\n", name, len, gz_len);
+    }
+
+out:
+    free(gz);
+    free(storage);
+    free(payload);
+    return failed ? -1 : 0;
+}
+
+/* The kernel must take only buffers that are allocated while it uses them:
+ * a destination that was freed is refused, not written. */
+static int run_freed_dst_case(drv_gzip_decomp_inst_t *inst, const char *path)
+{
+    uint8_t *input = NULL;
+    void *src_virt = NULL, *dst_virt = NULL;
+    uint64_t src_phys = 0, dst_phys = 0;
+    long input_size = 0;
+    int ret, failed = 0;
+
+    input = read_file_buf(path, &input_size);
+    if (!input)
+        return -1;
+    if (kd_mpi_sys_mmz_alloc_cached(&src_phys, &src_virt, "gzip_fsrc", "anonymous", DMA_NODE_SIZE) != 0 ||
+        kd_mpi_sys_mmz_alloc_cached(&dst_phys, &dst_virt, "gzip_fdst", "anonymous", DMA_NODE_SIZE) != 0) {
+        printf("[FAIL] freed-dst    MMZ allocation\n");
+        failed = 1;
+        goto out;
+    }
+    memset(src_virt, 0, DMA_NODE_SIZE);
+    memcpy(src_virt, input, (size_t)input_size);
+    ((uint8_t *)src_virt)[2] = 0x08;
+    kd_mpi_sys_mmz_flush_cache(src_phys, src_virt, DMA_NODE_SIZE);
+    kd_mpi_sys_mmz_free(dst_phys, dst_virt);
+    dst_virt = NULL;
+
+    ret = drv_gzip_decomp_gunzip_phys(inst, src_phys, (uint32_t)input_size, dst_phys,
+                                      sizeof(small_expected) - 1, 1000);
+    if (ret >= 0) {
+        printf("[FAIL] freed-dst    kernel decompressed into a freed buffer\n");
+        failed = 1;
+    } else {
+        printf("[PASS] freed-dst    rejected ret=%d\n", ret);
+    }
+
+out:
+    if (dst_virt)
+        kd_mpi_sys_mmz_free(dst_phys, dst_virt);
+    if (src_virt)
+        kd_mpi_sys_mmz_free(src_phys, src_virt);
+    free(input);
+    return failed ? -1 : 0;
+}
+
 static int run_selftest(const char *fixture_dir)
 {
     drv_gzip_decomp_inst_t *inst = NULL;
@@ -277,6 +394,14 @@ static int run_selftest(const char *fixture_dir)
     failures += run_invalid_case(inst, "corrupt", small_path, 1, 0) != 0;
     failures += run_invalid_case(inst, "truncated", small_path, 0, 5) != 0;
     failures += run_undersized_ioctl_case(inst, small_path) != 0;
+    failures += run_freed_dst_case(inst, small_path) != 0;
+    failures += run_soft_case(inst, "soft-1B", 1, PATTERN_TEXT) != 0;
+    failures += run_soft_case(inst, "soft-node-1", DMA_NODE_SIZE - 1, PATTERN_TEXT) != 0;
+    failures += run_soft_case(inst, "soft-node", DMA_NODE_SIZE, PATTERN_RUNS) != 0;
+    failures += run_soft_case(inst, "soft-node+1", DMA_NODE_SIZE + 1, PATTERN_TEXT) != 0;
+    failures += run_soft_case(inst, "soft-3node", 3 * DMA_NODE_SIZE + 17, PATTERN_NOISE) != 0;
+    failures += run_soft_case(inst, "soft-1MiB", 1024 * 1024, PATTERN_TEXT) != 0;
+    failures += run_soft_case(inst, "soft-4MiB", 4 * 1024 * 1024, PATTERN_RUNS) != 0;
     failures += run_valid_case(inst, "recovery", small_path,
                                sizeof(small_expected) - 1, small_expected) != 0;
 
