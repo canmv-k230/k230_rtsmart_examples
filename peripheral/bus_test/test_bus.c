@@ -255,7 +255,7 @@ static void test_spi(int loopback)
     invalid_msg.parent.length = 1;
     invalid_msg.parent.cs_take = 1;
     invalid_msg.parent.cs_release = 1;
-    CHECK(drv_spi_transfer_message(inst, &invalid_msg) == 0,
+    CHECK(drv_spi_transfer_message(inst, &invalid_msg) < 0,
           "reject inaccessible transfer buffer without a fault");
 
     CHECK(drv_spi_set_baudrate(inst, 0) != 0,

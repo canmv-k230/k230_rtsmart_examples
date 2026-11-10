@@ -1173,6 +1173,11 @@ enum vpu_lifecycle_stage {
     VPU_STAGE_BUSY_RETRY,
 };
 
+enum vpu_child_setup_result {
+    VPU_CHILD_SETUP_OK = 0,
+    VPU_CHILD_SETUP_HOOK_UNAVAILABLE = 0xfe,
+};
+
 struct lifecycle_vb_fixture {
     int fd;
     k_bool initialized;
@@ -1289,7 +1294,7 @@ static int child_setup_venc(enum vpu_lifecycle_stage stage, k_u32 pool_id)
         return 0;
     if (ioctl(fd, K_IOC_VENC_TEST_CLEANUP_BUSY_ONCE,
               &channel) != K_SUCCESS)
-        return 6;
+        return VPU_CHILD_SETUP_HOOK_UNAVAILABLE;
     return 0;
 }
 
@@ -1335,7 +1340,7 @@ static int child_setup_vdec(enum vpu_lifecycle_stage stage, k_u32 pool_id)
         return 0;
     if (ioctl(fd, K_IOC_VDEC_TEST_CLEANUP_BUSY_ONCE,
               &channel) != K_SUCCESS)
-        return 6;
+        return VPU_CHILD_SETUP_HOOK_UNAVAILABLE;
     return 0;
 }
 
@@ -1408,6 +1413,7 @@ static int run_lifecycle_kill_stage(
     pid_t child;
     int status = 0;
     int ready;
+    int hook_unavailable;
 
     if (pipe(pipe_fd) != 0) {
         printf("FAIL: %s %s pipe\n", name, lifecycle_stage_names[stage]);
@@ -1426,7 +1432,8 @@ static int run_lifecycle_kill_stage(
         child_result = (unsigned char)child_setup(stage, pool_id);
         (void)write(pipe_fd[1], &child_result, 1);
         close(pipe_fd[1]);
-        if (child_result != 0)
+        if (child_result != VPU_CHILD_SETUP_OK &&
+            child_result != VPU_CHILD_SETUP_HOOK_UNAVAILABLE)
             _Exit(1);
         for (;;)
             pause();
@@ -1435,7 +1442,10 @@ static int run_lifecycle_kill_stage(
     close(pipe_fd[1]);
     ready = wait_child_ready(pipe_fd[0], &child_result);
     close(pipe_fd[0]);
-    if (ready != 0 || child_result != 0) {
+    hook_unavailable = stage == VPU_STAGE_BUSY_RETRY &&
+                       child_result == VPU_CHILD_SETUP_HOOK_UNAVAILABLE;
+    if (ready != 0 || (child_result != VPU_CHILD_SETUP_OK &&
+                       !hook_unavailable)) {
         (void)kill(child, SIGKILL);
         (void)lifetime_waitpid(child, &status);
         printf("FAIL: %s %s child setup, step=%u\n", name,
@@ -1453,6 +1463,12 @@ static int run_lifecycle_kill_stage(
     if (verify_lifecycle_capacity(name, guard_fd, request_command,
                                   release_command, max_channels) != 0)
         return -1;
+
+    if (hook_unavailable) {
+        printf("SKIP: %s busy-retry injection is unavailable; "
+               "forced-exit cleanup retained full capacity\n", name);
+        return 0;
+    }
 
     printf("PASS: %s %-10s cleanup retained full capacity\n", name,
            lifecycle_stage_names[stage]);

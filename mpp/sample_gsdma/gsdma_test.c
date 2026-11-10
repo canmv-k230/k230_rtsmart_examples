@@ -1569,7 +1569,8 @@ static void run_negative_and_timeout_tests(k_u32 pool_id)
     transfer_cfg.line_num = 1;
     transfer_cfg.timeout_ms = SDMA_TEST_TIMEOUT_MS;
     record_expected_result("invalid SDMA dimension",
-                           kd_mpi_gsdma_mem_transfer(&transfer_cfg), K_FAILED);
+                           kd_mpi_gsdma_mem_transfer(&transfer_cfg),
+                           K_ERR_DMA_ILLEGAL_PARAM);
 
     k_gdma_chn_cfg_t gdma_cfg;
     k_video_frame_info src_frame;
