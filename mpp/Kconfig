@@ -148,6 +148,12 @@ if RTSMART_ENABLE_MPP_EXAMPLES
       help
         Vicap Bind to Display and Dump to File
 
+  config RTSMART_MPP_ENABLE_SAMPLE_SENSOR_IRCUT
+      bool "Enable Build sample_sensor_ircut"
+      default n
+      help
+        Preview one sensor type and set IMX415 IR-Cut to color or infrared.
+
   config RTSMART_MPP_ENABLE_SAMPLE_VICAP_AE
       bool "Enable Build sample_vicap_ae"
       default n
