@@ -45,6 +45,15 @@ if RTSMART_ENABLE_PERIPHERAL_EXAMPLES
             RT-Smart kernel must enable the WLAN offload framework and userspace
             supplicant interface.
 
+    config RTSMART_PERIPHERAL_ENABLE_AIC8800_RF_TEST
+        bool "Enable Build AIC8800 RF manufacturing test tool"
+        depends on AIC8800_WIFI_RF_TEST_MODE
+        default n
+        help
+            Build wifi_test.elf for the AIC RF-test firmware control
+            device. This tool can transmit continuously and permanently write
+            calibration data, eFuse, or flash.
+
     config RTSMART_PERIPHERAL_ENABLE_GPIO
         bool "Enable Build gpio"
         default y
