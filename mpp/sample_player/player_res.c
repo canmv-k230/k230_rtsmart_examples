@@ -138,16 +138,16 @@ k_s32 sys_deinit(k_bool deinit_vo)
 static k_s32 kd_sample_vdec_bind_vo(k_u32 chn_num, k_u32 vo_dev, k_u32 vo_chn)
 {
     k_mpp_chn vdec_mpp_chn;
-    k_mpp_chn vvo_mpp_chn;
+    k_mpp_chn vo_mpp_chn;
     k_s32 ret;
 
     vdec_mpp_chn.mod_id = K_ID_VDEC;
     vdec_mpp_chn.dev_id = 0;
     vdec_mpp_chn.chn_id = chn_num;
-    vvo_mpp_chn.mod_id = K_ID_VO;
-    vvo_mpp_chn.dev_id = vo_dev;
-    vvo_mpp_chn.chn_id = vo_chn;
-    ret = kd_mpi_sys_bind(&vdec_mpp_chn, &vvo_mpp_chn);
+    vo_mpp_chn.mod_id = K_ID_VO;
+    vo_mpp_chn.dev_id = vo_dev;
+    vo_mpp_chn.chn_id = vo_chn;
+    ret = kd_mpi_sys_bind(&vdec_mpp_chn, &vo_mpp_chn);
     if (ret)
     {
         printf("kd_mpi_sys_bind failed:0x%x\n", ret);
@@ -159,17 +159,17 @@ static k_s32 kd_sample_vdec_bind_vo(k_u32 chn_num, k_u32 vo_dev, k_u32 vo_chn)
 static k_s32 kd_sample_vdec_unbind_vo(k_u32 chn_num, k_u32 vo_dev, k_u32 vo_chn)
 {
     k_mpp_chn vdec_mpp_chn;
-    k_mpp_chn vvo_mpp_chn;
+    k_mpp_chn vo_mpp_chn;
     k_s32 ret;
 
     vdec_mpp_chn.mod_id = K_ID_VDEC;
     vdec_mpp_chn.dev_id = 0;
     vdec_mpp_chn.chn_id = chn_num;
-    vvo_mpp_chn.mod_id = K_ID_VO;
-    vvo_mpp_chn.dev_id = vo_dev;
-    vvo_mpp_chn.chn_id = vo_chn;
+    vo_mpp_chn.mod_id = K_ID_VO;
+    vo_mpp_chn.dev_id = vo_dev;
+    vo_mpp_chn.chn_id = vo_chn;
 
-    ret = kd_mpi_sys_unbind(&vdec_mpp_chn, &vvo_mpp_chn);
+    ret = kd_mpi_sys_unbind(&vdec_mpp_chn, &vo_mpp_chn);
     return ret;
 }
 

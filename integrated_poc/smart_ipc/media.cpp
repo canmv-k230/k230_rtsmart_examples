@@ -18,7 +18,6 @@
 #include "mpi_aenc_api.h"
 #include "mpi_ao_api.h"
 #include "mpi_adec_api.h"
-#include "mpi_vvi_api.h"
 #include "mpi_venc_api.h"
 #include "mpi_vicap_api.h"
 #include "mpi_sensor_api.h"

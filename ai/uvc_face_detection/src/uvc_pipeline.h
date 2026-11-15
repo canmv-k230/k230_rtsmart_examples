@@ -28,7 +28,6 @@
 
 #include "mpi_vb_api.h"
 #include "mpi_vicap_api.h"
-#include "mpi_vvi_api.h"
 #include "mpi_isp_api.h"
 #include "mpi_sys_api.h"
 #include "mpi_vo_api.h"

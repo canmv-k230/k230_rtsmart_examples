@@ -45,7 +45,6 @@
 #include "mpi_sys_api.h"
 #include "mpi_sensor_api.h"
 #include "k_venc_comm.h"
-#include "mpi_vvi_api.h"
 
 #define VENC_MAX_IN_FRAMES   30
 #define ENABLE_VENC_DEBUG    1

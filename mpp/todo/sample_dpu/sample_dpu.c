@@ -29,17 +29,14 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <pthread.h>
 
 #include "k_module.h"
 #include "k_type.h"
 #include "k_vb_comm.h"
 #include "k_dpu_comm.h"
-#include "k_vvi_comm.h"
 #include "k_sys_comm.h"
 #include "mpi_vb_api.h"
 #include "mpi_dpu_api.h"
-#include "mpi_vvi_api.h"
 #include "mpi_sys_api.h"
 
 #define PARAM_PATH          "base_4_param.bin"
@@ -69,12 +66,6 @@ char g_ir_out[MAX_PATH_LENGTH];
 char g_disp_out_x[MAX_PATH_LENGTH];
 char g_disp_out_xy[MAX_PATH_LENGTH];
 
-#define SAMPE_VVI_PIPE_NUMS     2
-#define SAMPLE_VVI_FRAME_RATE   1
-#define DPU_FRAME_COUNT         3
-
-#define VB_BLK_SIZE         (1024 * 1024 * 2)
-
 k_dpu_user_space_t g_lcn_space;
 k_dpu_user_space_t g_ir_space;
 k_dpu_user_space_t g_temp_space;
@@ -85,48 +76,6 @@ k_dpu_user_space_t g_ir_out_space;
 k_dpu_user_space_t g_disp_out_x_space;
 k_dpu_user_space_t g_disp_out_xy_space;
 k_dpu_user_space_t g_qlt_out_space;
-
-k_video_frame_info insert_pic_info[2];
-static k_u32 g_input_pool_id = VB_INVALID_POOLID;
-
-static pthread_t tid1;
-k_bool thread_exit = K_FALSE;
-
-typedef struct {
-    k_u32 dev_num;
-    k_u32 chn_num;
-    k_u32 dev_height;
-    k_u32 dev_width;
-    k_pixel_format dev_format;
-    k_u32 chn_height;
-    k_u32 chn_width;
-    k_pixel_format chn_format;
-} sample_vvi_pipe_conf_t;
-
-sample_vvi_pipe_conf_t g_pipe_conf[SAMPE_VVI_PIPE_NUMS] =
-{
-    {
-        0,
-        0,
-        1920,
-        1080,
-        PIXEL_FORMAT_ARGB_8888,
-        VB_BLK_SIZE / 4,
-        1,
-        PIXEL_FORMAT_ARGB_8888,
-    },
-    {
-        0,
-        1,
-        1920,
-        1080,
-        PIXEL_FORMAT_ARGB_8888,
-        VB_BLK_SIZE / 4,
-        1,
-        PIXEL_FORMAT_ARGB_8888,
-    },
-};
-
 
 static k_s32 sample_dpu_help_argu(int argc, char *argv[], k_dpu_mode_e *dpu_mode, k_bool *use_proc_ref)
 {
@@ -177,12 +126,12 @@ static k_s32 sample_dpu_help_argu(int argc, char *argv[], k_dpu_mode_e *dpu_mode
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0) {
             printf("Please input:\n");
-            printf("\"./sample_dpu.elf file_path BOUND ORIGIN_REF\" or \"./sample_dpu.elf file_path UNBOUND ORIGIN_REF\" or \n \
-                  \r\"./sample_dpu.elf file_path BOUND PROC_REF  \" or \"./sample_dpu.elf file_path UNBOUND PROC_REF  \". \n \
-                  \rThe default mode is UNBOUND, use origin reference image.\n");
+            printf("./sample_dpu.elf file_path UNBOUND [ORIGIN_REF|PROC_REF]\n"
+                   "The default mode is UNBOUND, use origin reference image.\n");
             return K_SUCCESS;
         } else if (strcmp(argv[i], "BOUND") == 0) {
-            *dpu_mode = DPU_BIND;
+            printf("Only UNBOUND mode is supported\n");
+            return K_FAILED;
         } else if (strcmp(argv[i], "UNBOUND") == 0) {
             *dpu_mode = DPU_UNBIND;
         } else if (strcmp(argv[i], "ORIGIN_REF") == 0) {
@@ -216,14 +165,6 @@ static k_s32 dpu_vb_init()
     if(ret)
         printf("vb_init failed ret:%d\n", ret);
 
-    k_vb_pool_config pool_config;
-    memset(&pool_config, 0, sizeof(pool_config));
-    pool_config.blk_cnt = 4;
-    pool_config.blk_size = VB_BLK_SIZE;
-    pool_config.mode = VB_REMAP_MODE_NOCACHE;
-    g_input_pool_id = kd_mpi_vb_create_pool(&pool_config);
-    printf("input_pool_id %d\n", g_input_pool_id);
-
     return ret;
 }
 
@@ -231,82 +172,10 @@ static k_s32 dpu_vb_exit()
 {
     k_s32 ret;
 
-    if (g_input_pool_id != VB_INVALID_POOLID) {
-        ret = kd_mpi_vb_destory_pool(g_input_pool_id);
-        if (ret)
-            printf("destroy input pool failed ret:%d\n", ret);
-        g_input_pool_id = VB_INVALID_POOLID;
-    }
     ret = kd_mpi_vb_exit();
     if (ret)
         printf("vb_exit failed ret:%d\n", ret);
     return ret;
-}
-
-static k_s32 sample_vvi_bind_dpu()
-{
-    k_s32 ret;
-    k_mpp_chn vvi_mpp_chn;
-    k_mpp_chn dpu_mpp_chn;
-
-    vvi_mpp_chn.mod_id = K_ID_V_VI;
-    vvi_mpp_chn.dev_id = 0;
-    vvi_mpp_chn.chn_id = 0;
-    dpu_mpp_chn.mod_id = K_ID_DPU;
-    dpu_mpp_chn.dev_id = 0;
-    dpu_mpp_chn.chn_id = 0;
-    ret = kd_mpi_sys_bind(&vvi_mpp_chn, &dpu_mpp_chn);
-    if (ret) {
-        printf("kd_mpi_sys_bind failed:0x%x\n", ret);
-        return ret;
-    }
-
-    vvi_mpp_chn.mod_id = K_ID_V_VI;
-    vvi_mpp_chn.dev_id = 0;
-    vvi_mpp_chn.chn_id = 1;
-    dpu_mpp_chn.mod_id = K_ID_DPU;
-    dpu_mpp_chn.dev_id = 0;
-    dpu_mpp_chn.chn_id = 1;
-    ret = kd_mpi_sys_bind(&vvi_mpp_chn, &dpu_mpp_chn);
-    if (ret) {
-        printf("kd_mpi_sys_bind failed:0x:%x\n", ret);
-        return ret;
-    }
-
-    return K_SUCCESS;
-}
-
-static k_s32 sample_vvi_unbind_dpu()
-{
-    k_s32 ret;
-    k_mpp_chn vvi_mpp_chn;
-    k_mpp_chn dpu_mpp_chn;
-
-    vvi_mpp_chn.mod_id = K_ID_V_VI;
-    vvi_mpp_chn.dev_id = 0;
-    vvi_mpp_chn.chn_id = 0;
-    dpu_mpp_chn.mod_id = K_ID_DPU;
-    dpu_mpp_chn.dev_id = 0;
-    dpu_mpp_chn.chn_id = 0;
-    ret = kd_mpi_sys_unbind(&vvi_mpp_chn, &dpu_mpp_chn);
-    if (ret) {
-        printf("kd_mpi_sys_bind failed:0x%x\n", ret);
-        return ret;
-    }
-
-    vvi_mpp_chn.mod_id = K_ID_V_VI;
-    vvi_mpp_chn.dev_id = 0;
-    vvi_mpp_chn.chn_id = 1;
-    dpu_mpp_chn.mod_id = K_ID_DPU;
-    dpu_mpp_chn.dev_id = 0;
-    dpu_mpp_chn.chn_id = 1;
-    ret = kd_mpi_sys_unbind(&vvi_mpp_chn, &dpu_mpp_chn);
-    if (ret) {
-        printf("kd_mpi_sys_bind failed:0x:%x\n", ret);
-        return ret;
-    }
-
-    return K_SUCCESS;
 }
 
 static k_s32 dpu_userspace_mmz(k_dpu_user_space_t *data, const char *name, const char *path)
@@ -399,117 +268,6 @@ static k_s32 dpu_golden_data_release()
     kd_mpi_sys_mmz_free(g_qlt_out_space.phys_addr, NULL);
 
     return K_SUCCESS;
-}
-
-static k_s32 dpu_input_data_prepare_bind(k_video_frame_info *vf_info, k_u8 *src_addr, void **dst_vaddr, k_u32 length)
-{
-    k_vb_blk_handle handle;
-    k_s32 pool_id = 0;
-    k_u64 phys_addr = 0;
-    k_u32 *virt_addr;
-    k_s32 size;
-
-    if (vf_info == NULL)
-        return K_FALSE;
-
-    size = vf_info->v_frame.height * vf_info->v_frame.width * 4;
-    printf("%s,%d, size:%x\n", __func__, __LINE__, size);
-    handle = kd_mpi_vb_get_block(g_input_pool_id, size, NULL);
-    if(handle == VB_INVALID_HANDLE) {
-        printf("%s get vb block error\n", __func__);
-        return K_FAILED;
-    }
-
-    pool_id = kd_mpi_vb_handle_to_pool_id(handle);
-    if(pool_id == VB_INVALID_POOLID) {
-        printf("%s get pool id error\n", __func__);
-        return K_FAILED;
-    }
-
-    phys_addr = kd_mpi_vb_handle_to_phyaddr(handle);
-    if(phys_addr == 0) {
-        printf("%s get phys addr error\n", __func__);
-        return K_FAILED;
-    }
-    virt_addr = (k_u32 *)kd_mpi_sys_mmap(phys_addr, size);
-    memcpy(virt_addr, src_addr, length);
-
-    vf_info->mod_id = K_ID_V_VI;
-    vf_info->pool_id = pool_id;
-    vf_info->v_frame.phys_addr[0] = phys_addr;
-    vf_info->v_frame.pixel_format = PIXEL_FORMAT_ARGB_8888;
-    vf_info->v_frame.virt_addr[0] = 0;
-    *dst_vaddr = virt_addr;
-    // printf("%s,%d, pool_id:%d, phys_addr:%lx\n",
-    //     __func__, __LINE__, vf_info->pool_id, vf_info->v_frame.phys_addr[0]);
-
-    return K_SUCCESS;
-}
-
-static k_s32 dpu_input_data_release_bind(k_video_frame_info *vf_info, const void *virt_addr)
-{
-    k_s32 ret;
-    k_s32 size;
-    k_vb_blk_handle handle;
-
-    size = vf_info->v_frame.height * vf_info->v_frame.width * 4;
-    if (vf_info == NULL)
-        return K_FALSE;
-    handle = kd_mpi_vb_phyaddr_to_handle(vf_info->v_frame.phys_addr[0]);
-    if(handle != VB_INVALID_HANDLE) {
-        ret = kd_mpi_vb_release_block(handle);
-    } else {
-        ret = K_FAILED;
-    }
-    if(virt_addr) {
-        kd_mpi_sys_munmap((void *)virt_addr, size);
-        printf("%s,%d\n", __func__, __LINE__);
-    }
-
-    return ret;
-}
-
-static k_s32 sample_vvi_prepare(sample_vvi_pipe_conf_t* pipe_conf)
-{
-    k_s32 i;
-    k_vvi_dev_attr dev_attr;
-    k_vvi_chn_attr chn_attr;
-
-    for(i = 0; i < SAMPE_VVI_PIPE_NUMS; i++) {
-        memset(&chn_attr, 0, sizeof(chn_attr));
-        memset(&dev_attr, 0, sizeof(dev_attr));
-        dev_attr.format = pipe_conf[i].dev_format;
-        dev_attr.height = pipe_conf[i].dev_height;
-        dev_attr.width = pipe_conf[i].dev_width;
-        chn_attr.frame_rate = SAMPLE_VVI_FRAME_RATE;
-        chn_attr.format = pipe_conf[i].chn_format;
-        chn_attr.height = pipe_conf[i].chn_height;
-        chn_attr.width = pipe_conf[i].chn_width;
-        printf("pipe[%d] dev[%d] h:%d w:%d chn[%d] h:%d w:%d \n", i,
-                pipe_conf[i].dev_num, pipe_conf[i].dev_height, pipe_conf[i].dev_width,
-                pipe_conf[i].chn_num, pipe_conf[i].chn_height, pipe_conf[i].chn_width);
-        kd_mpi_vvi_set_dev_attr(pipe_conf[i].dev_num, &dev_attr);
-        kd_mpi_vvi_set_chn_attr(pipe_conf[i].chn_num, &chn_attr);
-    }
-
-    for(i = 0; i < SAMPE_VVI_PIPE_NUMS; i++) {
-        kd_mpi_vvi_start_pipe(pipe_conf[i].dev_num, pipe_conf[i].chn_num);
-    }
-
-    kd_mpi_vvi_chn_insert_pic(g_pipe_conf[0].chn_num, &insert_pic_info[0]);
-    kd_mpi_vvi_chn_insert_pic(g_pipe_conf[1].chn_num, &insert_pic_info[1]);
-
-    return K_SUCCESS;
-}
-
-static void sample_vvi_stop(sample_vvi_pipe_conf_t* pipe_conf)
-{
-    k_s32 i;
-
-    for(i = 0; i < SAMPE_VVI_PIPE_NUMS; i++) {
-        kd_mpi_vvi_chn_remove_pic(pipe_conf[i].chn_num);
-        kd_mpi_vvi_stop_pipe(pipe_conf[i].dev_num, pipe_conf[i].chn_num);
-    }
 }
 
 static k_s32 result_check(k_u8 *data, k_u8 *golden, k_u32 length)
@@ -699,85 +457,6 @@ k_s32 sample_dpu_unbound_mode(k_dpu_dev_attr_t *dev_attr, k_dpu_chn_lcn_attr_t *
     return K_SUCCESS;
 }
 
-static void *bind_mode_get_frame(void *parameter)
-{
-    k_s32 ret;
-    k_dpu_chn_result_u lcn_result = {0};
-    k_dpu_chn_result_u ir_result = {0};
-    k_dpu_chn_result_u lcn_result_save = {0};
-
-    printf("%s,%d\n", __func__, __LINE__);
-
-    while(1) {
-        ret = kd_mpi_dpu_get_frame(0, &lcn_result, 1100);
-        ret = kd_mpi_dpu_get_frame(1, &ir_result, 1100);
-
-        if (SAMPLE_VVI_FRAME_RATE == 1) {
-            /* Save result. If the frame rate is set to 30, please
-            remove this 'if' code, because saving the file will take a long time. */
-            if (ret == K_SUCCESS) {
-                void *depth_virt_addr = NULL;
-                k_char depth_filename[256] = "/sharefs/depthout.bin";
-                depth_virt_addr = kd_mpi_sys_mmap(lcn_result.lcn_result.depth_out.depth_phys_addr, lcn_result.lcn_result.depth_out.length);
-                if (depth_virt_addr) {
-                    FILE *file = fopen(depth_filename, "wb+");
-                    if (file) {
-                        fwrite(depth_virt_addr, 1, lcn_result.lcn_result.depth_out.length, file);
-                        fclose(file);
-                        printf("save depthout file success\n");
-                    } else {
-                        printf("can't create file\n");
-                    }
-                } else {
-                    printf("save depthout file failed\n");
-                }
-            }
-        } else {
-            if (ret == K_SUCCESS) {
-                memcpy(&lcn_result_save, &lcn_result, sizeof(k_dpu_chn_result_u));
-            }
-        }
-
-        if (ret == K_SUCCESS) {
-            printf("Successfully obtained and will release.\n");
-            kd_mpi_dpu_release_frame();
-        }
-
-        if (thread_exit) {
-            while (1) {
-                ret = kd_mpi_dpu_get_frame(0, &lcn_result, 30);
-                ret = kd_mpi_dpu_get_frame(1, &ir_result, 30);
-                if (ret) {
-                    break;
-                }
-                kd_mpi_dpu_release_frame();
-            }
-            break;
-        }
-    }
-
-    if (SAMPLE_VVI_FRAME_RATE > 1) {
-        void *depth_virt_addr = NULL;
-        k_char depth_filename[256] = "/sharefs/depthout.bin";
-        depth_virt_addr = kd_mpi_sys_mmap(lcn_result_save.lcn_result.depth_out.depth_phys_addr, lcn_result_save.lcn_result.depth_out.length);
-        if (depth_virt_addr) {
-            FILE *file = fopen(depth_filename, "wb+");
-            if (file) {
-                fwrite(depth_virt_addr, 1, lcn_result_save.lcn_result.depth_out.length, file);
-                fclose(file);
-                printf("save depthout file success\n");
-            } else {
-                printf("can't create file\n");
-            }
-        } else {
-            printf("save depthout file failed\n");
-        }
-    }
-
-
-    pthread_exit(0);
-}
-
 int main(int argc, char *argv[])
 {
     k_s32 ret;
@@ -787,8 +466,6 @@ int main(int argc, char *argv[])
     k_dpu_chn_ir_attr_t ir_attr;
     k_dpu_mode_e dpu_mode = DPU_UNBIND;
     k_bool use_proc_ref = K_FALSE;
-    void* lcn_vaddr = NULL;
-    void* ir_vaddr = NULL;
 
     printf("dpu sample case test1\n");
 
@@ -801,7 +478,7 @@ int main(int argc, char *argv[])
 
     /************************************************************
      * This part is doing the preparatory work, which includes
-     * the init of the vb pool and whether to bind the pipeline.
+     * the initialization of VB and the input data.
      ***********************************************************/
     ret = dpu_vb_init(argc, argv);
     if (ret) {
@@ -813,33 +490,6 @@ int main(int argc, char *argv[])
     if (ret) {
         printf("dpu_input_data_prepare_unbind failed\n");
         goto err_vb_exit;
-    }
-
-    if (dpu_mode == DPU_BIND) {
-        ret = sample_vvi_bind_dpu();
-        if (ret) {
-            printf("sample_vvi_bind_dpu failed\n");
-            goto err_input_rels;
-        } else {
-            printf("sample_vvi_bind_dpu success\n");
-        }
-
-        for (int i = 0; i < SAMPE_VVI_PIPE_NUMS; i++) {
-            insert_pic_info[i].v_frame.width = g_pipe_conf[i].chn_width;
-            insert_pic_info[i].v_frame.height = g_pipe_conf[i].chn_height;
-            insert_pic_info[i].v_frame.pixel_format = g_pipe_conf[i].chn_format;
-        }
-
-        ret = dpu_input_data_prepare_bind(&insert_pic_info[0], (k_u8 *)g_lcn_space.virt_addr, &lcn_vaddr, g_lcn_space.size);
-        if (ret) {
-            printf("dpu_input_data_prepare_bind failed\n");
-            goto err_unbind;
-        }
-        ret = dpu_input_data_prepare_bind(&insert_pic_info[1], (k_u8 *)g_ir_space.virt_addr, &ir_vaddr, g_ir_space.size);
-        if (ret) {
-            printf("dpu_input_data_prepare_bind failed\n");
-            goto err_unbind;
-        }
     }
 
     /************************************************************
@@ -948,20 +598,8 @@ int main(int argc, char *argv[])
     printf("kd_mpi_dpu_start_chn ir success\n");
 #endif
 
-    if (dpu_mode == DPU_BIND) {
-        /* Config and start the previous module of the dpu, in the case is vvi. */
-        printf("begin bound mode\n");
-        sample_vvi_prepare(g_pipe_conf);
-        ret = pthread_create(&tid1, NULL, bind_mode_get_frame, NULL);
-        while ((char)getchar() != 'q');
-        sample_vvi_stop(g_pipe_conf);
-        thread_exit = K_TRUE;
-        pthread_join(tid1, NULL);
-    } else if (dpu_mode == DPU_UNBIND) {
-        printf("begin unbound mode\n");
-        sample_dpu_unbound_mode(&dev_attr, &lcn_attr, &ir_attr);
-    }
-
+    printf("begin unbound mode\n");
+    sample_dpu_unbound_mode(&dev_attr, &lcn_attr, &ir_attr);
 
     ret = kd_mpi_dpu_stop_chn(1);
     if (ret) {
@@ -989,18 +627,6 @@ err_stop_dev:
 err_delet:
     kd_mpi_dpu_delete();
 
-    if (dpu_mode == DPU_BIND) {
-        dpu_input_data_release_bind(&insert_pic_info[0], lcn_vaddr);
-        dpu_input_data_release_bind(&insert_pic_info[1], ir_vaddr);
-    }
-
-err_unbind:
-    if (dpu_mode == DPU_BIND) {
-        sample_vvi_unbind_dpu();
-        printf("%s,%d\n", __func__, __LINE__);
-    }
-
-err_input_rels:
     dpu_golden_data_release();
     // printf("%s,%d\n", __func__, __LINE__);
 

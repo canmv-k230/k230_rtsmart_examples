@@ -232,31 +232,31 @@ static k_s32 vb_destroy_vdec_pool(k_s32 vdec_poolid)
 static k_s32 sample_vdec_bind_vo(k_u32 chn_id)
 {
     k_mpp_chn vdec_mpp_chn;
-    k_mpp_chn vvo_mpp_chn;
+    k_mpp_chn vo_mpp_chn;
 
     vdec_mpp_chn.mod_id = K_ID_VDEC;
     vdec_mpp_chn.dev_id = 0;
     vdec_mpp_chn.chn_id = 0;
-    vvo_mpp_chn.mod_id = K_ID_VO;
-    vvo_mpp_chn.dev_id = 0;//VVO_DISPLAY_DEV_ID;
-    vvo_mpp_chn.chn_id = chn_id;//VVO_DISPLAY_CHN_ID;
+    vo_mpp_chn.mod_id = K_ID_VO;
+    vo_mpp_chn.dev_id = 0;
+    vo_mpp_chn.chn_id = chn_id;
 
-    return kd_mpi_sys_bind(&vdec_mpp_chn, &vvo_mpp_chn);
+    return kd_mpi_sys_bind(&vdec_mpp_chn, &vo_mpp_chn);
 }
 
 static k_s32 sample_vdec_unbind_vo(k_u32 chn_id)
 {
     k_mpp_chn vdec_mpp_chn;
-    k_mpp_chn vvo_mpp_chn;
+    k_mpp_chn vo_mpp_chn;
 
     vdec_mpp_chn.mod_id = K_ID_VDEC;
     vdec_mpp_chn.dev_id = 0;
     vdec_mpp_chn.chn_id = 0;
-    vvo_mpp_chn.mod_id = K_ID_VO;
-    vvo_mpp_chn.dev_id = 0;//VVO_DISPLAY_DEV_ID;
-    vvo_mpp_chn.chn_id = chn_id;//VVO_DISPLAY_CHN_ID;
+    vo_mpp_chn.mod_id = K_ID_VO;
+    vo_mpp_chn.dev_id = 0;
+    vo_mpp_chn.chn_id = chn_id;
 
-    return kd_mpi_sys_unbind(&vdec_mpp_chn, &vvo_mpp_chn);
+    return kd_mpi_sys_unbind(&vdec_mpp_chn, &vo_mpp_chn);
 }
 
 static volatile sig_atomic_t exit_flag;

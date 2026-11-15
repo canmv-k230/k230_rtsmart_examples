@@ -44,7 +44,6 @@
 #include "mpi_vo_api.h"
 #include "mpi_sys_api.h"
 #include "k_vdec_comm.h"
-#include "k_vvo_comm.h"
 //#include "vo_test_case.h"
 #include "kd_display.h"
 
@@ -373,16 +372,16 @@ static void *output_thread(void *arg)
 static void sample_vdec_bind_vo(k_u32 chn_id)
 {
     k_mpp_chn vdec_mpp_chn;
-    k_mpp_chn vvo_mpp_chn;
+    k_mpp_chn vo_mpp_chn;
     k_s32 ret;
 
     vdec_mpp_chn.mod_id = K_ID_VDEC;
     vdec_mpp_chn.dev_id = 0;
     vdec_mpp_chn.chn_id = 0;
-    vvo_mpp_chn.mod_id = K_ID_VO;
-    vvo_mpp_chn.dev_id = 0;//VVO_DISPLAY_DEV_ID;
-    vvo_mpp_chn.chn_id = chn_id;//VVO_DISPLAY_CHN_ID;
-    ret = kd_mpi_sys_bind(&vdec_mpp_chn, &vvo_mpp_chn);
+    vo_mpp_chn.mod_id = K_ID_VO;
+    vo_mpp_chn.dev_id = 0;
+    vo_mpp_chn.chn_id = chn_id;
+    ret = kd_mpi_sys_bind(&vdec_mpp_chn, &vo_mpp_chn);
     if (ret)
     {
         printf("kd_mpi_sys_bind failed:0x%x\n", ret);
@@ -394,15 +393,15 @@ static void sample_vdec_bind_vo(k_u32 chn_id)
 static void sample_vdec_unbind_vo(k_u32 chn_id)
 {
     k_mpp_chn vdec_mpp_chn;
-    k_mpp_chn vvo_mpp_chn;
+    k_mpp_chn vo_mpp_chn;
 
     vdec_mpp_chn.mod_id = K_ID_VDEC;
     vdec_mpp_chn.dev_id = 0;
     vdec_mpp_chn.chn_id = 0;
-    vvo_mpp_chn.mod_id = K_ID_VO;
-    vvo_mpp_chn.dev_id = 0;//VVO_DISPLAY_DEV_ID;
-    vvo_mpp_chn.chn_id = chn_id;//VVO_DISPLAY_CHN_ID;
-    kd_mpi_sys_unbind(&vdec_mpp_chn, &vvo_mpp_chn);
+    vo_mpp_chn.mod_id = K_ID_VO;
+    vo_mpp_chn.dev_id = 0;
+    vo_mpp_chn.chn_id = chn_id;
+    kd_mpi_sys_unbind(&vdec_mpp_chn, &vo_mpp_chn);
 
     return;
 }

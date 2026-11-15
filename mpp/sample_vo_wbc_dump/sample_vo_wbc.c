@@ -659,18 +659,18 @@ static k_s32 sample_vicap_bind_vo(void)
 
 static k_s32 sample_vicap_unbind_vo(void)
 {
-    k_mpp_chn vvi_mpp_chn;
-    k_mpp_chn vvo_mpp_chn;
+    k_mpp_chn vi_mpp_chn;
+    k_mpp_chn vo_mpp_chn;
 
-    vvi_mpp_chn.mod_id = K_ID_VI;
-    vvi_mpp_chn.dev_id = VICAP_DEV_ID_0;
-    vvi_mpp_chn.chn_id = PREVIEW_CHN;
+    vi_mpp_chn.mod_id = K_ID_VI;
+    vi_mpp_chn.dev_id = VICAP_DEV_ID_0;
+    vi_mpp_chn.chn_id = PREVIEW_CHN;
 
-    vvo_mpp_chn.mod_id = K_ID_VO;
-    vvo_mpp_chn.dev_id = K_VO_DISPLAY_DEV_ID;
-    vvo_mpp_chn.chn_id = K_VO_LAYER_VIDEO2;
+    vo_mpp_chn.mod_id = K_ID_VO;
+    vo_mpp_chn.dev_id = K_VO_DISPLAY_DEV_ID;
+    vo_mpp_chn.chn_id = K_VO_LAYER_VIDEO2;
 
-    return kd_mpi_sys_unbind(&vvi_mpp_chn, &vvo_mpp_chn);
+    return kd_mpi_sys_unbind(&vi_mpp_chn, &vo_mpp_chn);
 }
 
 // ============================================================================
