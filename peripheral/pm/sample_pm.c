@@ -251,7 +251,7 @@ static void show_help(void)
     printf("  %s profiles cpu\n", prog_name);
     printf("  %s governor set cpu auto\n", prog_name);
     printf("  %s thermal protect cpu 85 -1\n", prog_name);
-    printf("  %s thermal shutdown 100\n", prog_name);
+    printf("  %s thermal shutdown 105\n", prog_name);
 }
 
 static int cmd_help(int argc, char **argv)

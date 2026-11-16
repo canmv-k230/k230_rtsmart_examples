@@ -38,6 +38,17 @@ menuconfig RTSMART_ENABLE_BUILD_EXAMPLES
             endif
 
 
+        config RTSMART_ENABLE_THERMAL_STRESS_TEST
+            bool "Enable thermal_stress power-domain load and thermal test"
+            default n
+            help
+                Build test/thermal_stress: loads the CPU, KPU (bundled
+                yolov8n_640 kmodel) and AI2D, VPU encode and decode, the
+                display, the VGLite GPU, GSDMA, nonai_2d and, when fitted, the
+                camera ISP together, logging temperature, clocks, power-domain
+                state and per-module performance with pass/fail criteria.
+                Absent hardware is skipped.
+
         menuconfig RTSMART_ENABLE_BUILD_INTEGRATED_EXAMPLES
             bool "Enable build integrated examples"
             default n
