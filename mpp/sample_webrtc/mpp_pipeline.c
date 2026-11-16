@@ -50,6 +50,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "k_vo_comm.h"
 #include "mpi_sensor_api.h"
 #include "mpi_sys_api.h"
 #include "mpi_vb_api.h"
@@ -72,7 +73,7 @@ static k_vicap_dev g_vicap_dev = VICAP_DEV_ID_0;       /* VICAP device 0 */
 static k_vicap_chn g_vicap_chn_vo = VICAP_CHN_ID_1;    /* CHN1 -> VO display */
 static k_vicap_chn g_vicap_chn_venc = VICAP_CHN_ID_2;  /* CHN2 -> VENC encode */
 
-static k_vo_layer_id g_vo_layer = K_VO_LAYER_VIDEO2;   /* VO overlay layer */
+static k_vo_layer_id g_vo_layer = K_VO_LAYER_VIDEO0;   /* VO overlay layer */
 
 static k_u32 g_venc_chn = 0;                            /* Allocated VENC channel ID */
 static k_u32 g_venc_attach_pool_id = VB_INVALID_POOLID; /* VENC's dedicated VB pool */

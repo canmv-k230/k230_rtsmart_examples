@@ -36,7 +36,7 @@
 #include "k_vo_comm.h"
 #include "kd_display.h"
 
-#define ENABLE_VO_LAYER   1
+#define VO_LAYER_ID   K_VO_LAYER_VIDEO0
 
 static k_connector_type g_connector_type = HX8377_V2_MIPI_4LAN_1080X1920_30FPS;
 
@@ -93,7 +93,7 @@ k_s32 display_layer_init(k_u32 width,k_u32 height)
 {
     sample_vo_info vo_info;
     vo_info.type = g_connector_type;
-    vo_info.layer_id = ENABLE_VO_LAYER;
+    vo_info.layer_id = VO_LAYER_ID;
     vo_info.width = width;
     vo_info.height = height;
     vo_info.ratation_90 = 0;
@@ -113,7 +113,7 @@ k_s32 display_layer_init(k_u32 width,k_u32 height)
 
 void display_layer_deinit()
 {
-    kd_display_layer_disable(ENABLE_VO_LAYER);
+    kd_display_layer_disable(VO_LAYER_ID);
 }
 
 k_s32 vo_init()

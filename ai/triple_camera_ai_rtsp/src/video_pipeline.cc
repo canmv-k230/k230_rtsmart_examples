@@ -26,17 +26,17 @@ PipeLine::PipeLine(int debug_mode)
     // ------------------------ VO（视频输出）相关 ID ------------------------
     vo_dev_id = K_VO_DISPLAY_DEV_ID;        // VO 设备 ID
 
-    vi_vo_id_0  = K_VO_LAYER_VIDEO1;          // 用于显示摄像头0 视频的 VO layer
-    osd_vo_id_0 = K_VO_LAYER_OSD1;            // 用于摄像头0 叠加 OSD 的 VO layer
+    vi_vo_id_0  = K_VO_LAYER_VIDEO0;          // 用于显示摄像头0 视频的 VO layer
+    osd_vo_id_0 = K_VO_LAYER_OSD0;            // 用于摄像头0 叠加 OSD 的 VO layer
     osd_pool_id_0 = VB_INVALID_POOLID;        // OSD 所使用的 VB 内存池，初始化为无效
 
 
-    vi_vo_id_1  = K_VO_LAYER_VIDEO2;          // 用于显示摄像头1 视频的 VO layer
-    osd_vo_id_1 = K_VO_LAYER_OSD2;            // 用于摄像头1 叠加 OSD 的 VO layer
+    vi_vo_id_1  = K_VO_LAYER_VIDEO1;          // 用于显示摄像头1 视频的 VO layer
+    osd_vo_id_1 = K_VO_LAYER_OSD1;            // 用于摄像头1 叠加 OSD 的 VO layer
     osd_pool_id_1 = VB_INVALID_POOLID;        // OSD 所使用的 VB 内存池，初始化为无效
 
-    vi_vo_id_2  = K_VO_LAYER_VIDEO3;          // 用于显示摄像头2 视频的 VO layer
-    osd_vo_id_2 = K_VO_LAYER_OSD3;            // 用于摄像头2 叠加 OSD 的 VO layer
+    vi_vo_id_2  = K_VO_LAYER_VIDEO2;          // 用于显示摄像头2 视频的 VO layer
+    osd_vo_id_2 = K_VO_LAYER_OSD2;            // 用于摄像头2 叠加 OSD 的 VO layer
     osd_pool_id_2 = VB_INVALID_POOLID;        // OSD 所使用的 VB 内存池，初始化为无效
 
     // ------------------------ Sensor / VICAP 默认配置 ------------------------
@@ -179,7 +179,7 @@ int PipeLine::Create()
     // 4. 配置三个摄像头的绑定 VO层（视频输出层：用于显示摄像头画面）
     // =============================================================================================
 
-    //******************************摄像头0的CHN0的绑定层，使用K_VO_LAYER_VIDEO1***********************
+    //******************************摄像头0的CHN0的绑定层，使用K_VO_LAYER_VIDEO0***********************
     kd_mpi_vo_disable_layer(vi_vo_id_0);  // 先关闭 layer，避免旧配置干扰
     memset(&vi_vo_attr_0, 0, sizeof(vi_vo_attr_0));
     vi_vo_attr_0.layer_id        = vi_vo_id_0;
@@ -227,7 +227,7 @@ int PipeLine::Create()
         return ret;
     }
 
-    //******************************摄像头2的CHN0的绑定层，使用K_VO_LAYER_VIDEO1***********************
+    //******************************摄像头2的CHN0的绑定层，使用K_VO_LAYER_VIDEO2***********************
     kd_mpi_vo_disable_layer(vi_vo_id_2);  // 先关闭 layer，避免旧配置干扰
     memset(&vi_vo_attr_2, 0, sizeof(vi_vo_attr_2));
     vi_vo_attr_2.layer_id        = vi_vo_id_2;
@@ -257,7 +257,7 @@ int PipeLine::Create()
     // 5. 配置 OSD 层（ARGB8888 叠加图层）
     // =============================================================================================
     if(USE_OSD == 1){
-        //******************************摄像头0 AI推理效果叠加层，使用K_VO_LAYER_OSD1***********************
+        //******************************摄像头0 AI推理效果叠加层，使用K_VO_LAYER_OSD0***********************
         kd_mpi_vo_disable_layer(osd_vo_id_0);
         memset(&osd_vo_attr_0, 0, sizeof(osd_vo_attr_0));
         osd_vo_attr_0.layer_id        = osd_vo_id_0;
@@ -321,7 +321,7 @@ int PipeLine::Create()
         insert_osd_vaddr_0 = virt_addr_0;
         printf("camera0 osd video frame: phys_addr is %lx g_pool_id is %d \n", phys_addr_0, osd_pool_id_0);
 
-        //******************************摄像头1 AI推理效果叠加层，使用K_VO_LAYER_OSD2***********************
+        //******************************摄像头1 AI推理效果叠加层，使用K_VO_LAYER_OSD1***********************
         kd_mpi_vo_disable_layer(osd_vo_id_1);
         memset(&osd_vo_attr_1, 0, sizeof(osd_vo_attr_1));
         osd_vo_attr_1.layer_id        = osd_vo_id_1;
@@ -388,7 +388,7 @@ int PipeLine::Create()
         insert_osd_vaddr_1 = virt_addr_1;
         printf("camera1 osd video frame: phys_addr is %lx g_pool_id is %d \n", phys_addr_1, osd_pool_id_1);
 
-        //******************************摄像头2 AI推理效果叠加层，使用K_VO_LAYER_OSD3***********************
+        //******************************摄像头2 AI推理效果叠加层，使用K_VO_LAYER_OSD2***********************
         kd_mpi_vo_disable_layer(osd_vo_id_2);
         memset(&osd_vo_attr_2, 0, sizeof(osd_vo_attr_2));
         osd_vo_attr_2.layer_id        = osd_vo_id_2;

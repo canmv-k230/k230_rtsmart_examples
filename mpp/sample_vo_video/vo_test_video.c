@@ -124,7 +124,7 @@ static void print_usage(const char *prog)
     printf("  -c <type>   Connector type. Use list_connector to view supported types\n");
     printf("  -w <width>  Width (multiple of 8) [default: panel width]\n");
     printf("  -h <height> Height [default: panel height]\n");
-    printf("  -l <layer>  VO Layer ID (0-3 for Video)\n");
+    printf("  -l <layer>  VO Layer ID (0-2 for Video; 3 is unsupported)\n");
     printf("  -r <degree> Rotation (0, 90, 180, 270)\n");
     printf("  -x <offset> X offset\n");
     printf("  -y <offset> Y offset\n");
@@ -132,7 +132,7 @@ static void print_usage(const char *prog)
     printf("  -L <2|4>    MIPI lane preference [default: ANY]\n");
     printf("\nExample:\n");
     printf("  list_connector\n");
-    printf("  %s -c <connector_type> -l 2 -x 10 -y 10\n", prog);
+    printf("  %s -c <connector_type> -l 0 -x 10 -y 10\n", prog);
 }
 
 // ---------------------------------------------------------------------------
@@ -323,7 +323,7 @@ int main(int argc, char **argv)
     k_s32 ret;
     k_connector_type connector_type = 0;
     k_u32 width = 0, height = 0;
-    k_vo_layer_id layer_id = 2;
+    k_vo_layer_id layer_id = K_VO_LAYER_VIDEO0;
     int rot_val = 0;
     k_s32 offset_x = 0, offset_y = 0;
     int csi_idx = 2; // Default CSI 2

@@ -28,7 +28,7 @@ static k_handle g_adec_hdl = 0;
 #define FRAME_BUF_SIZE VDEC_MAX_WIDTH *VDEC_MAX_HEIGHT * 2
 
 
-#define BIND_VO_LAYER 1
+#define BIND_VO_LAYER K_VO_LAYER_VIDEO0
 static k_u32 g_max_sample_rate = 48000;
 
 static k_audio_stream g_audio_stream;

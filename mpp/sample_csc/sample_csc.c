@@ -439,7 +439,7 @@ static k_s32 sample_vo_init(k_connector_type type)
 
     sample_vo_info vo_info;
     vo_info.type = type;
-    vo_info.layer_id = K_VO_LAYER1;
+    vo_info.layer_id = K_VO_LAYER_VIDEO0;
     vo_info.width = width;
     vo_info.height = height;
     vo_info.ratation_90 = ratation_90;
@@ -875,7 +875,7 @@ static void sample_bind()
     k_mpp_chn vo_mpp_chn;
     vo_mpp_chn.mod_id = K_ID_VO;
     vo_mpp_chn.dev_id = 0;
-    vo_mpp_chn.chn_id = 1;
+    vo_mpp_chn.chn_id = K_VO_LAYER_VIDEO0;
     ret = kd_mpi_sys_bind(&nonai_2d_mpp_chn, &vo_mpp_chn);
     CHECK_RET(ret, __func__, __LINE__);
 
@@ -910,7 +910,7 @@ static void sample_unbind()
     k_mpp_chn vo_mpp_chn;
     vo_mpp_chn.mod_id = K_ID_VO;
     vo_mpp_chn.dev_id = 0;
-    vo_mpp_chn.chn_id = 1;
+    vo_mpp_chn.chn_id = K_VO_LAYER_VIDEO0;
     ret = kd_mpi_sys_unbind(&nonai_2d_mpp_chn, &vo_mpp_chn);
     CHECK_RET(ret, __func__, __LINE__);
     return;
@@ -933,7 +933,7 @@ k_s32 sample_exit()
         pthread_join(g_nonai_2d_conf.output_tid, NULL);
     }
 
-    kd_display_layer_disable(K_VO_LAYER1);
+    kd_display_layer_disable(K_VO_LAYER_VIDEO0);
 
     kd_mpi_nonai_2d_stop_chn(NONAI_2D_RGB888_CH);
     kd_mpi_nonai_2d_destroy_chn(NONAI_2D_RGB888_CH);

@@ -138,7 +138,7 @@ static k_s32 sample_display_init(k_connector_type type, bool rotation, sample_uv
 
 static int sample_vo_layer_start(k_vo_layer_id layer_id, int width, int height, bool rotation)
 {
-    if (layer_id < K_VO_LAYER_VIDEO1 || layer_id > K_VO_LAYER_VIDEO3) {
+    if (layer_id < K_VO_LAYER_VIDEO0 || layer_id >= K_VO_LAYER_VIDEO3) {
         printf("input layer id %d not supported\n", layer_id);
         return -1;
     }
@@ -473,7 +473,7 @@ int main(int argc, char **argv)
     k_video_frame_info vf_info;
     sample_uvc_runtime rt = {
         .ch = 0,
-        .chn_id = K_VO_LAYER_VIDEO1,
+        .chn_id = K_VO_LAYER_VIDEO0,
         .vo_poolid = VB_INVALID_POOLID,
         .vdec_poolid = VB_INVALID_POOLID,
         .vo_block = VB_INVALID_HANDLE,

@@ -982,7 +982,7 @@ int main(int argc, char **argv)
     sample_params_t params;
     k_s32 ret;
     k_u32 width = 0, height = 0;
-    k_vo_layer_id layer_id = 1;
+    k_vo_layer_id layer_id = K_VO_LAYER_VIDEO0;
     k_vo_size display_resolution;
     k_gdma_rotation_e rotate = GDMA_ROTATE_DEGREE_0;
 

@@ -42,7 +42,7 @@
 
 #define CAPTURE_DEV       VICAP_DEV_ID_0
 #define PREVIEW_CHN       VICAP_CHN_ID_0
-#define PREVIEW_LAYER     ((k_vo_layer_id)1)
+#define PREVIEW_LAYER     K_VO_LAYER_VIDEO0
 #define OSD_LAYER         K_VO_LAYER_OSD0
 #define OSD_BUFFER_COUNT  2
 #define RECT_COLOR        0xFFFF0000U

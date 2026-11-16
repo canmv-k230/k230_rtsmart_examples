@@ -25,7 +25,7 @@ UVC_PipeLine::UVC_PipeLine(int debug_mode)
     }
 
     // 视频输出层 ID（使用 Layer1）
-    uvc_vo_id = K_VO_LAYER_VIDEO1;
+    uvc_vo_id = K_VO_LAYER_VIDEO0;
     // 视频输出设备 ID（通常是 0）
     vo_dev_id = K_VO_DISPLAY_DEV_ID;
     

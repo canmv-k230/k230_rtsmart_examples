@@ -18,7 +18,7 @@ PipeLine::PipeLine(int debug_mode, k_u32 csi_num, k_connector_type connector,
 
     // ------------------------ VO（视频输出）相关 ID ------------------------
     vo_dev_id = K_VO_DISPLAY_DEV_ID;        // VO 设备 ID
-    vi_vo_id  = K_VO_LAYER_VIDEO1;          // 用于显示摄像头视频的 VO layer
+    vi_vo_id  = K_VO_LAYER_VIDEO0;          // 用于显示摄像头视频的 VO layer
     osd_vo_id = K_VO_LAYER_OSD0;            // 用于叠加 OSD 的 VO layer
 
     // ------------------------ Sensor / VICAP 默认配置 ------------------------

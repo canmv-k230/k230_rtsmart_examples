@@ -48,7 +48,7 @@
 #include "kd_display.h"
 
 #define ENABLE_VDEC_DEBUG    1
-#define BIND_VO_LAYER   1
+#define BIND_VO_LAYER   K_VO_LAYER_VIDEO0
 
 #ifdef ENABLE_VDEC_DEBUG
     #define vdec_debug  printf

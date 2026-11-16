@@ -572,7 +572,7 @@ static k_s32 sample_vicap_init(k_vicap_dev dev_chn)
  */
 static k_s32 sample_vo_init(k_connector_type type)
 {
-    const k_vo_layer_id target_layer  = K_VO_LAYER_VIDEO2;
+    const k_vo_layer_id target_layer  = K_VO_LAYER_VIDEO0;
     const k_u32         target_width  = g_output_width;
     const k_u32         target_height = g_output_height;
     k_u32               display_width;
@@ -652,7 +652,7 @@ static k_s32 sample_vicap_bind_vo(void)
 
     vo_mpp_chn.mod_id = K_ID_VO;
     vo_mpp_chn.dev_id = K_VO_DISPLAY_DEV_ID;
-    vo_mpp_chn.chn_id = K_VO_LAYER_VIDEO2;
+    vo_mpp_chn.chn_id = K_VO_LAYER_VIDEO0;
 
     return kd_mpi_sys_bind(&vi_mpp_chn, &vo_mpp_chn);
 }
@@ -668,7 +668,7 @@ static k_s32 sample_vicap_unbind_vo(void)
 
     vo_mpp_chn.mod_id = K_ID_VO;
     vo_mpp_chn.dev_id = K_VO_DISPLAY_DEV_ID;
-    vo_mpp_chn.chn_id = K_VO_LAYER_VIDEO2;
+    vo_mpp_chn.chn_id = K_VO_LAYER_VIDEO0;
 
     return kd_mpi_sys_unbind(&vi_mpp_chn, &vo_mpp_chn);
 }

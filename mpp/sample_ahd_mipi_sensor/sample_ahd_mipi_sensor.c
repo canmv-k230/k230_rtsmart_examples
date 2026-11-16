@@ -31,8 +31,8 @@
 #define MODULE_BUFFER_COUNT 6
 #define NONAI_2D_CHANNEL    0
 #define DEWARP_DEVICE       0
-#define MIPI_LAYER           K_VO_LAYER_VIDEO1
-#define MCM_LAYER            K_VO_LAYER_VIDEO2
+#define MIPI_LAYER           K_VO_LAYER_VIDEO0
+#define MCM_LAYER            K_VO_LAYER_VIDEO1
 #define DEFAULT_MIPI_CSI    VICAP_DEV_ID_2
 #define DEFAULT_MCM_CSI     VICAP_DEV_ID_0
 #define SENSOR_FPS          30

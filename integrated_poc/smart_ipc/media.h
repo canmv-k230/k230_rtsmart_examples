@@ -341,7 +341,7 @@ class KdMedia {
 
   k_u32 osd_vb_handle_{VB_INVALID_HANDLE}; // OSD video buffer handle
   int osd_pool_id_{-1}; // OSD pool ID
-  k_vo_layer_id vo_layer_chn_id_{K_VO_LAYER_VIDEO1}; // Video output layer channel ID
+  k_vo_layer_id vo_layer_chn_id_{K_VO_LAYER_VIDEO0}; // Video output layer channel ID
   k_vo_layer_id osd_id_{K_VO_LAYER_OSD3}; // OSD ID
   k_pixel_format osd_format_{PIXEL_FORMAT_ARGB_8888}; // OSD pixel format
   k_video_frame_info osd_vf_info_; // OSD video frame information

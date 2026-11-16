@@ -112,7 +112,7 @@ private:
     k_u32 vdec_chn_id_{0};
     k_u32 csc_chn_id_{0};
     MppVoType connector_type_;
-    k_vo_layer_id vo_layer_chn_id_{K_VO_LAYER_VIDEO1};
+    k_vo_layer_id vo_layer_chn_id_{K_VO_LAYER_VIDEO0};
     k_vo_layer_id osd_id_{K_VO_LAYER_OSD3}; // OSD ID
     k_u32 osd_pool_id_{VB_INVALID_POOLID}; // OSD pool ID
     k_u32 osd_vb_handle_{VB_INVALID_HANDLE}; // OSD video buffer handle
