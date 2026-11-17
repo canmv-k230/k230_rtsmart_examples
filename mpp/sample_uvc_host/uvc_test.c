@@ -59,7 +59,7 @@ typedef struct
     bool is_mjpeg;
 
     bool vb_inited;
-    bool uvc_started;
+    bool uvc_inited;
     bool vo_layer_enabled;
     bool vo_pool_created;
     bool vo_block_created;
@@ -224,11 +224,6 @@ static k_s32 vb_create_vdec_pool(int width, int height)
     return kd_mpi_vb_create_pool(&pool_config);
 }
 
-static k_s32 vb_destroy_vdec_pool(k_s32 vdec_poolid)
-{
-    return kd_mpi_vb_destory_pool(vdec_poolid);
-}
-
 static k_s32 sample_vdec_bind_vo(k_u32 chn_id)
 {
     k_mpp_chn vdec_mpp_chn;
@@ -343,7 +338,7 @@ static const char *fourcc_to_str(unsigned int fourcc, char text[5])
 
 static void print_usage(void)
 {
-    printf("Usage: ./sample_uvc [connector_type] [rotation] [fourcc] [width] [height] [total_frame]\n");
+    printf("Usage: ./sample_uvc [connector_type] [rotation] [fourcc] [width] [height] [total_frame] [device=0]\n");
     printf("  [fourcc] supports: YUY2 UYVY NV12 I420 MJPEG (or numeric, e.g. 0x47504a4d)\n");
 }
 
@@ -396,65 +391,136 @@ static int sample_vdec_start(sample_uvc_runtime *rt, int width, int height)
     return 0;
 }
 
-static void sample_cleanup(sample_uvc_runtime *rt)
+static void sample_note_error(int *first_err, int ret)
 {
+    if (ret && !*first_err) {
+        *first_err = ret;
+    }
+}
+
+static int sample_destroy_pool(k_s32 *pool_id, const char *name)
+{
+    int ret = kd_mpi_vb_destory_pool(*pool_id);
+
+    if (ret) {
+        printf("destroy %s pool %d failed, ret = 0x%x\n", name, *pool_id, ret);
+        return ret;
+    }
+    *pool_id = VB_INVALID_POOLID;
+    return 0;
+}
+
+/* Undo main() in reverse order. Every step is attempted even if an earlier
+ * one failed; a flag is cleared only when its resource is really gone.
+ * Returns the first error. */
+static int sample_cleanup(sample_uvc_runtime *rt)
+{
+    int first_err = 0;
+    int ret;
+
+    if (rt->vdec_started) {
+        ret = kd_mpi_vdec_stop_chn(rt->ch);
+        if (ret) {
+            printf("kd_mpi_vdec_stop_chn fail, ret = 0x%x\n", ret);
+        }
+        sample_note_error(&first_err, ret);
+        rt->vdec_started = false;
+    }
     if (rt->vdec_bound) {
-        sample_vdec_unbind_vo(rt->chn_id);
+        ret = sample_vdec_unbind_vo(rt->chn_id);
+        if (ret) {
+            printf("sample_vdec_unbind_vo fail, ret = 0x%x\n", ret);
+        }
+        sample_note_error(&first_err, ret);
         rt->vdec_bound = false;
     }
     if (rt->vo_layer_enabled) {
-        kd_display_layer_disable(rt->chn_id);
+        ret = kd_display_layer_disable(rt->chn_id);
+        if (ret) {
+            printf("kd_display_layer_disable fail, ret = 0x%x\n", ret);
+        }
+        sample_note_error(&first_err, ret);
         rt->vo_layer_enabled = false;
     }
-    if (rt->vdec_started) {
-        kd_mpi_vdec_stop_chn(rt->ch);
-        rt->vdec_started = false;
-    }
     if (rt->vdec_created) {
-        kd_mpi_vdec_destroy_chn(rt->ch);
+        ret = kd_mpi_vdec_destroy_chn(rt->ch);
+        if (ret) {
+            printf("kd_mpi_vdec_destroy_chn fail, ret = 0x%x\n", ret);
+        }
+        sample_note_error(&first_err, ret);
         rt->vdec_created = false;
     }
     if (rt->vdec_attached) {
-        kd_mpi_vdec_detach_vb_pool(rt->ch);
+        ret = kd_mpi_vdec_detach_vb_pool(rt->ch);
+        if (ret) {
+            printf("kd_mpi_vdec_detach_vb_pool fail, ret = 0x%x\n", ret);
+        }
+        sample_note_error(&first_err, ret);
         rt->vdec_attached = false;
-    }
-    if (rt->vdec_pool_created) {
-        vb_destroy_vdec_pool(rt->vdec_poolid);
-        rt->vdec_pool_created = false;
-        rt->vdec_poolid = VB_INVALID_POOLID;
-    }
-
-    if (rt->uvc_started) {
-        uvc_host_exit();
-        rt->uvc_started = false;
     }
 
     if (rt->vo_mapped) {
-        kd_mpi_sys_munmap(rt->vo_vaddr, rt->vo_map_size);
+        ret = kd_mpi_sys_munmap(rt->vo_vaddr, rt->vo_map_size);
+        if (ret) {
+            printf("kd_mpi_sys_munmap fail, ret = 0x%x\n", ret);
+        }
+        sample_note_error(&first_err, ret);
         rt->vo_mapped = false;
         rt->vo_vaddr = NULL;
         rt->vo_map_size = 0;
     }
     if (rt->vo_block_created) {
-        kd_mpi_vb_release_block(rt->vo_block);
+        ret = kd_mpi_vb_release_block(rt->vo_block);
+        if (ret) {
+            printf("kd_mpi_vb_release_block fail, ret = 0x%x\n", ret);
+        }
+        sample_note_error(&first_err, ret);
         rt->vo_block_created = false;
         rt->vo_block = VB_INVALID_HANDLE;
     }
+
+    /* Close capture after the decoder has released its input buffers. */
+    if (rt->uvc_inited) {
+        uvc_host_exit();
+        rt->uvc_inited = false;
+    }
+    if (rt->vdec_pool_created) {
+        ret = sample_destroy_pool(&rt->vdec_poolid, "vdec");
+        sample_note_error(&first_err, ret);
+        if (!ret) {
+            rt->vdec_pool_created = false;
+        }
+    }
     if (rt->vo_pool_created) {
-        kd_mpi_vb_destory_pool(rt->vo_poolid);
-        rt->vo_pool_created = false;
-        rt->vo_poolid = VB_INVALID_POOLID;
+        ret = sample_destroy_pool(&rt->vo_poolid, "vo");
+        sample_note_error(&first_err, ret);
+        if (!ret) {
+            rt->vo_pool_created = false;
+        }
     }
 
+    /* Powers the panel off and disables every VO layer. */
     if (rt->display_initialized) {
-        kd_display_deinit();
+        ret = kd_display_deinit();
+        if (ret) {
+            printf("kd_display_deinit fail, ret = 0x%x\n", ret);
+        }
+        sample_note_error(&first_err, ret);
         rt->display_initialized = false;
     }
 
     if (rt->vb_inited) {
-        kd_mpi_vb_exit();
+        ret = kd_mpi_vb_exit();
+        if (ret) {
+            printf("kd_mpi_vb_exit fail, ret = 0x%x\n", ret);
+        }
+        sample_note_error(&first_err, ret);
         rt->vb_inited = false;
+        rt->vdec_pool_created = false;
+        rt->vo_pool_created = false;
     }
+
+    return first_err;
 }
 
 int main(int argc, char **argv)
@@ -463,6 +529,7 @@ int main(int argc, char **argv)
     int width, height;
     int total_frame;
     int frame_num = 0;
+    int device_index = 0;
     char input_fourcc_text[5];
     char negotiated_fourcc_text[5];
     uint64_t fps_last_ms = 0;
@@ -479,7 +546,7 @@ int main(int argc, char **argv)
         .vo_block = VB_INVALID_HANDLE,
     };
 
-    if (argc != 7) {
+    if (argc != 7 && argc != 8) {
         print_usage();
         return -1;
     }
@@ -507,10 +574,24 @@ int main(int argc, char **argv)
         return -1;
     }
 
+    if (argc == 8 && parse_int_arg(argv[7], &device_index)) {
+        printf("invalid UVC device index '%s': expected an integer\n", argv[7]);
+        return -1;
+    }
+    if (device_index < 0 || (unsigned int)device_index >= UVC_HOST_MAX_DEVICES) {
+        printf("UVC device index %d out of range (expected 0..%u)\n",
+               device_index, UVC_HOST_MAX_DEVICES - 1);
+        return -1;
+    }
+    ret = uvc_host_select_device(device_index);
+    if (ret) {
+        printf("failed to select UVC device %d: %d\n", device_index, ret);
+        return -1;
+    }
+
     printf("type = %d, rotation = %d, fourcc = %s (0x%08x), (%d X %d) = %d frame\n",
            type, rotation, fourcc_to_str(format.fourcc, input_fourcc_text),
            format.fourcc, width, height, total_frame);
-    rt.is_mjpeg = (format.fourcc == USBH_VIDEO_FOURCC_MJPEG);
 
     exit_flag = 0;
     signal(SIGINT, sig_handler);
@@ -529,13 +610,16 @@ int main(int argc, char **argv)
         printf("uvc_host_init fail\n");
         goto cleanup;
     }
+    /* Set before streaming: the fd and the UVC driver's VB pool exist from
+     * here on, so a start failure must still reach uvc_host_exit(). */
+    rt.uvc_inited = true;
+    rt.is_mjpeg = (format.fourcc == USBH_VIDEO_FOURCC_MJPEG);
 
     ret = uvc_host_start_stream();
     if (ret) {
         printf("uvc start stream fail\n");
         goto cleanup;
     }
-    rt.uvc_started = true;
 
     width = format.width;
     height = format.height;
@@ -582,7 +666,9 @@ int main(int argc, char **argv)
         ret = uvc_host_get_frame(&frame, 5000);
         if (ret) {
             if (!exit_flag) {
-                printf("uvc_host_get_frame fail\n");
+                /* -ENODEV: camera unplugged; returned at once, not after the timeout. */
+                printf("uvc_host_get_frame fail, ret = %d%s\n", ret,
+                       (ret == -ENODEV) ? " (camera disconnected)" : "");
             } else {
                 ret = 0;
             }
@@ -634,7 +720,13 @@ int main(int argc, char **argv)
     }
 
 cleanup:
-    sample_cleanup(&rt);
+    {
+        int cleanup_ret = sample_cleanup(&rt);
+
+        if (!ret) {
+            ret = cleanup_ret;
+        }
+    }
 
     if (ret) {
         return ret;
