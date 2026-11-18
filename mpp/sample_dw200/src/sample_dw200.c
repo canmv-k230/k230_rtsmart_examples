@@ -231,6 +231,20 @@ static int parse_command_line(int argc, char* argv[], struct command_line_option
     return options->config_filename != NULL ? 0 : -1;
 }
 
+/* RVV libc copies cannot access the uncached MMZ mapping reliably. Keep
+ * stdio and map generation in ordinary RAM and cross that mapping scalarly.
+ * If this becomes a hot path, aligned scalar word copies can improve throughput. */
+static void copy_mmz(void *dst, const void *src, size_t size)
+{
+    volatile uint8_t *d = dst;
+    const volatile uint8_t *p = src;
+    while (size--) *d++ = *p++;
+}
+
+static bool compare_outputs;
+static bool output_hash_valid[DW200_OUTPUT_COUNT];
+static uint64_t output_hash[DW200_OUTPUT_COUNT];
+
 static int allocate_video_buffer(struct video_buffer* buffer, uint32_t size)
 {
     buffer->size = size;
@@ -273,8 +287,17 @@ static int load_input_image(const char* filename, unsigned int input_id, struct 
         return -1;
     }
 
-    size_t bytes_read = fread(buffer->virt_addr, 1, buffer->size, file);
+    void *cached = malloc(buffer->size);
+    if (!cached) { fclose(file); return -1; }
+    size_t bytes_read = fread(cached, 1, buffer->size, file);
+    int read_error = ferror(file);
     fclose(file);
+    if (!read_error && bytes_read == buffer->size) copy_mmz(buffer->virt_addr, cached, buffer->size);
+    free(cached);
+    if (read_error) {
+        pr_err("I/O error reading input image %s", filename);
+        return -1;
+    }
     if (bytes_read != buffer->size) {
         pr_err("input image is smaller than the configured frame size");
         return -1;
@@ -779,7 +802,7 @@ static void create_bypass_map(unsigned int* map, int map_width, int map_height, 
     }
 }
 
-static int build_dewarp_map(const struct dewarp_distortion_map* distortion_map, const struct dw200_parameters* params,
+static int build_dewarp_map_cached(const struct dewarp_distortion_map* distortion_map, const struct dw200_parameters* params,
     struct k_dwe_hw_info* dwe_info, const char* user_map_filename, unsigned int* map_buffer)
 {
     if (user_map_filename[0] != '\0') {
@@ -845,6 +868,18 @@ static int build_dewarp_map(const struct dewarp_distortion_map* distortion_map, 
         dwe_info->map_h = tmp;
     }
     return 0;
+}
+
+static int build_dewarp_map(const struct dewarp_distortion_map *distortion_map,
+    const struct dw200_parameters *params, struct k_dwe_hw_info *dwe_info,
+    const char *user_map_filename, unsigned int *map_buffer)
+{
+    unsigned int *cached = calloc(1, MAX_MAP_SIZE);
+    if (!cached) return -1;
+    int ret = build_dewarp_map_cached(distortion_map, params, dwe_info, user_map_filename, cached);
+    if (!ret) copy_mmz(map_buffer, cached, MAX_MAP_SIZE);
+    free(cached);
+    return ret;
 }
 
 static int consume_dwe_irq(bool* frame_done)
@@ -941,14 +976,32 @@ static int save_frame(const char* output_directory, unsigned int output_id, cons
         perror("open output file");
         return -1;
     }
-    size_t bytes_written = fwrite(data, 1, size, file);
+    /* Keep an empty output valid even when malloc(0) would return NULL. */
+    void *cached = malloc(size ? size : 1);
+    if (!cached) { fclose(file); return -1; }
+    copy_mmz(cached, data, size);
+    uint64_t hash = fnv1a64(cached, size);
+    size_t bytes_written = fwrite(cached, 1, size, file);
+    free(cached);
     int close_result = fclose(file);
     if (bytes_written != size || close_result != 0) {
         perror("write output file");
         return -1;
     }
     pr_info("wrote channel %u to %s (%zu bytes, fnv1a64=%016llx)", output_id, filename, bytes_written,
-        (unsigned long long)fnv1a64(data, size));
+        (unsigned long long)hash);
+    if (compare_outputs)
+    {
+        if (output_hash_valid[output_id] && output_hash[output_id] != hash)
+        {
+            pr_err("DW200_HASH_FAIL output %u: expected %016llx, got %016llx", output_id,
+                (unsigned long long)output_hash[output_id], (unsigned long long)hash);
+            return -1;
+        }
+        output_hash_valid[output_id] = true;
+        output_hash[output_id] = hash;
+        pr_info("DW200_HASH_PASS output %u api %s", output_id, api_suffix ? api_suffix : "low-level");
+    }
     return 0;
 }
 
@@ -1509,6 +1562,7 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
+    compare_outputs = options.api == DRIVER_API_ALL;
     struct dw200_parameters params = { 0 };
     struct dewarp_distortion_map distortion_map = { 0 };
     struct k_dwe_hw_info dwe_info = { 0 };
