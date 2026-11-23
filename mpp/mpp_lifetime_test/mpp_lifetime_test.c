@@ -346,15 +346,34 @@ static int cleanup_vb_fixture(struct vb_fixture *fixture)
     return failures == 0 ? 0 : -1;
 }
 
+/* VB block handles: pool id (8 bits), the pool's generation (16 bits, never
+ * 0 or 0xffff), block id (8 bits). */
+#define TEST_HANDLE(pool, gen, blk) \
+    (((k_u32)(pool) << 24) | ((k_u32)(gen) << 8) | (k_u32)(blk))
+#define TEST_HANDLE_GEN_MASK 0x00ffff00U
+#define TEST_HANDLE_BLK_MASK 0x000000ffU
+
 static int run_vb_invalid_handles(void)
 {
-    static const k_vb_blk_handle invalid_handles[] = {
-        (TEST_MAX_POOL_CNT << 16),
-        ((TEST_MAX_POOL_CNT + 1U) << 16),
-        (TEST_MAX_POOL_CNT << 16) | UINT16_MAX,
-        0x7fff0000U,
-        0xffff0000U,
+    /* Handles that name no block:
+     * - a pool id at or past max_pool_cnt, whatever the generation and
+     *   block id: VB hands out no such pool;
+     * - the fixture's own handle with generation 0 or 0xffff, which VB never
+     *   hands out;
+     * - the fixture's own handle with a block id past the pool's
+     *   TEST_BLOCK_COUNT blocks: the first one and the largest.
+     * The last four are made from control_handle below. */
+    k_vb_blk_handle invalid_handles[] = {
+        TEST_HANDLE(TEST_MAX_POOL_CNT, 1, 0),
+        TEST_HANDLE(TEST_MAX_POOL_CNT + 1U, 1, 0),
+        TEST_HANDLE(TEST_MAX_POOL_CNT, 0xfffe, 0xff),
+        TEST_HANDLE(0x7f, 0x1234, 0),
+        TEST_HANDLE(0xff, 1, 0),
         UINT32_MAX,
+        0, /* control handle, generation 0 */
+        0, /* control handle, generation 0xffff */
+        0, /* control handle, block id TEST_BLOCK_COUNT */
+        0, /* control handle, block id 0xff */
     };
     static const k_u32 invalid_pool_ids[] = {
         TEST_MAX_POOL_CNT,
@@ -379,11 +398,17 @@ static int run_vb_invalid_handles(void)
         failures++;
         goto out;
     }
+    invalid_handles[6] = fixture.control_handle & ~TEST_HANDLE_GEN_MASK;
+    invalid_handles[7] = fixture.control_handle | TEST_HANDLE_GEN_MASK;
+    invalid_handles[8] = (fixture.control_handle & ~TEST_HANDLE_BLK_MASK) |
+                         TEST_BLOCK_COUNT;
+    invalid_handles[9] = fixture.control_handle | TEST_HANDLE_BLK_MASK;
 
     for (i = 0; i < sizeof(invalid_handles) / sizeof(invalid_handles[0]); i++) {
-        printf("forged handle[%u]=0x%08x pool=%u block=%u\n",
-               (unsigned int)i, invalid_handles[i],
-               invalid_handles[i] >> 16, invalid_handles[i] & UINT16_MAX);
+        printf("forged handle[%u]=0x%08x pool=%u gen=%u block=%u\n",
+               (unsigned int)i, invalid_handles[i], invalid_handles[i] >> 24,
+               (invalid_handles[i] & TEST_HANDLE_GEN_MASK) >> 8,
+               invalid_handles[i] & TEST_HANDLE_BLK_MASK);
         failures += test_handle_requests(fixture.owner_a, "A",
                                          invalid_handles[i]) != 0;
         failures += test_handle_requests(fixture.owner_b, "B",
