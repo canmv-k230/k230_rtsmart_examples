@@ -10,6 +10,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <sys/random.h>
 #include <errno.h>
 #include <time.h>
 
@@ -2440,6 +2442,102 @@ static int test_key_import_export_roundtrip(void)
     return 0;
 }
 
+static int test_wrapped_key_io(void)
+{
+    static const uint8_t kek[16] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    };
+    static const uint8_t plaintext[16] = { 0 };
+    static const uint8_t ciphertext[16] = {
+        0xfd, 0xe4, 0xfb, 0xae, 0x4a, 0x09, 0xe0, 0x20,
+        0xef, 0xf7, 0x22, 0x96, 0x9f, 0x83, 0x83, 0x2b,
+    };
+    /* The same 128-bit key (00 11 ... ff) wrapped with KW and KWP. */
+    static const struct {
+        pufs_keywrap_t mode;
+        const char *name;
+        uint8_t blob[24];
+    } cases[] = {
+        { KW_AES_KW, "AES-KW", {
+            0x1f, 0xa6, 0x8b, 0x0a, 0x81, 0x12, 0xb4, 0x47, 0xae, 0xf3, 0x4b, 0xd8,
+            0xfb, 0x5a, 0x7b, 0x82, 0x9d, 0x3e, 0x86, 0x23, 0x71, 0xd2, 0xcf, 0xe5,
+        } },
+        { KW_AES_KWP, "AES-KWP", {
+            0x2c, 0xef, 0x0c, 0x9e, 0x30, 0xde, 0x26, 0x01, 0x6c, 0x23, 0x0c, 0xb7,
+            0x8b, 0xc6, 0x0d, 0x51, 0xb1, 0xfe, 0x08, 0x3b, 0xa0, 0xc7, 0x9c, 0xd5,
+        } },
+    };
+    drv_pufs_inst dev;
+    pufs_key_io_t op = {
+        .keytype = KT_SSKEY, .keyslot = KS_SK128_1, .keybits = 128,
+        .kwslot = KS_SK128_0, .kwbits = 128,
+    };
+    uint8_t blob[sizeof(cases[0].blob) + 1];
+    bool null_ok = true, import_ok = true, export_ok = true;
+
+    TEST_START("Wrapped Key I/O");
+    TEST_ASSERT(drv_pufs_open(&dev) == 0, "Open device");
+    for (op.mode = KM_IMPORT_PT; op.mode <= KM_EXPORT_WRAP; op.mode++)
+        null_ok &= drv_pufs_ioctl(dev.fd, PUFS_KEY_INOUT_STATUS, &op) == -EFAULT;
+
+    int ret = drv_pufs_key_import_plaintext(&dev, KT_SSKEY, KS_SK128_0, kek, 128);
+    for (size_t i = 0; ret == 0 && i < sizeof(cases) / sizeof(cases[0]); i++) {
+        memcpy(blob, cases[i].blob, sizeof(cases[i].blob));
+        op.mode = KM_IMPORT_WRAP;
+        op.keywrap = cases[i].mode;
+        op.keyaddr = blob;
+        int import_ret = drv_pufs_ioctl(dev.fd, PUFS_KEY_INOUT_STATUS, &op);
+        if (import_ret == PUFS_STATUS_UNSUPPORT) {
+            printf("  %s import unavailable, skipping\n", cases[i].name);
+            test_skipped++;
+            continue;
+        }
+        if (import_ret != 0) {
+            printf("  %s import failed: %d\n", cases[i].name, import_ret);
+            import_ok = false;
+            continue;
+        }
+
+        drv_pufs_cipher_inst cipher;
+        uint8_t ct[48];
+        uint32_t len = 0, tail = 0;
+        bool key_ok = drv_pufs_cipher_init(&cipher, &dev, SK_AES, MODE_ECB, 1,
+                                           KT_SSKEY, PUFS_CIPHER_SLOT(KS_SK128_1),
+                                           128, NULL, 0) == 0 &&
+                      drv_pufs_cipher_update(&cipher, ct, &len, plaintext, sizeof(plaintext)) == 0 &&
+                      drv_pufs_cipher_final(&cipher, ct + len, &tail, NULL, 0) == 0 &&
+                      len + tail == sizeof(ciphertext) &&
+                      memcmp(ct, ciphertext, sizeof(ciphertext)) == 0;
+        printf("  %s imported key AES known-answer check: %s\n", cases[i].name,
+               key_ok ? "PASS" : "FAIL");
+        import_ok &= key_ok;
+
+        op.mode = KM_EXPORT_WRAP;
+        memset(blob, 0xa5, sizeof(blob));
+        int export_ret = drv_pufs_ioctl(dev.fd, PUFS_KEY_INOUT_STATUS, &op);
+        drv_pufs_key_clear(&dev, KT_SSKEY, KS_SK128_1, 128);
+        if (export_ret == PUFS_STATUS_UNSUPPORT || export_ret == PUFS_STATUS_DENY) {
+            printf("  %s export unavailable (ret=%d), skipping export check\n",
+                   cases[i].name, export_ret);
+            test_skipped++;
+        } else {
+            bool match = export_ret == 0 &&
+                         memcmp(blob, cases[i].blob, sizeof(cases[i].blob)) == 0 &&
+                         blob[sizeof(blob) - 1] == 0xa5;
+            printf("  %s export=%d, complete blob matches=%d\n", cases[i].name, export_ret, match);
+            export_ok &= match;
+        }
+    }
+    drv_pufs_key_clear(&dev, KT_SSKEY, KS_SK128_0, 128);
+    drv_pufs_close(&dev);
+    TEST_ASSERT(null_ok, "Key import/export rejects NULL buffers");
+    TEST_ASSERT(ret == 0, "Import test wrapping key");
+    TEST_ASSERT(import_ok, "Wrapped imports produce the expected AES key");
+    TEST_ASSERT(export_ok, "Wrapped exports match the fixture when permitted");
+    return 0;
+}
+
 static int test_key_clear(void)
 {
     TEST_START("Key Import then Clear");
@@ -3005,10 +3103,146 @@ static void run_test(int (*fn)(void), const char *name)
         printf(">>> %s: HAD FAILURES <<<\n", name);
 }
 
+int test_otp_cipher_fixture(void);
+int test_hmac_long_keys(void);
+int test_pkc_timing(void);
+int test_ccm_incomplete_aad(void);
+int test_mac_cipher_slot(void);
+
+static void *rng_reader(void *arg)
+{
+    uintptr_t mode = (uintptr_t)arg;
+    uint8_t buf[1024];
+    int fd = -1;
+    drv_pufs_inst dev;
+    if (mode == 0 && (fd = open("/dev/hwrng", O_RDONLY)) < 0)
+        return (void *)1;
+    if (mode == 1 && drv_pufs_open(&dev) != 0)
+        return (void *)1;
+    int failed = 0;
+    for (unsigned i = 0; i < 1024 && !failed; ++i) {
+        if (mode == 0)
+            failed = read(fd, buf, sizeof(buf)) != sizeof(buf);
+        else if (mode == 1)
+            failed = drv_pufs_rng_read(&dev, buf, sizeof(buf)) != 0;
+        else
+            failed = getrandom(buf, sizeof(buf), mode == 2 ? 0 : GRND_RANDOM) != sizeof(buf);
+    }
+    if (fd >= 0)
+        close(fd);
+    if (mode == 1)
+        drv_pufs_close(&dev);
+    return (void *)(uintptr_t)failed;
+}
+
+static int test_concurrent_rng(void)
+{
+    pthread_t threads[4];
+    unsigned started = 0;
+    int failed = 0;
+    for (; started < 4; ++started)
+        if (pthread_create(&threads[started], NULL, rng_reader, (void *)(uintptr_t)started) != 0)
+            break;
+    for (unsigned i = 0; i < started; ++i) {
+        void *result = NULL;
+        failed |= pthread_join(threads[i], &result) != 0 || result != NULL;
+    }
+    failed |= started != 4;
+    printf("CONCURRENT_RNG: %s (%u workers)\n", failed ? "FAIL" : "PASS", started);
+    return failed;
+}
+
+/* RFC 4231 case 1 through the raw ioctl and a pre-slot-ABI HAL context. */
+static int test_hmac_kernel_abi(void)
+{
+    static const uint8_t msg[] = "Hi There";
+    static const uint8_t sha256[] = {
+        0xb0,0x34,0x4c,0x61,0xd8,0xdb,0x38,0x53,0x5c,0xa8,0xaf,0xce,0xaf,0x0b,0xf1,0x2b,
+        0x88,0x1d,0xc2,0x00,0xc9,0x83,0x3d,0xa7,0x26,0xe9,0x37,0x6c,0x2e,0x32,0xcf,0xf7,
+    };
+    static const uint8_t sha512[] = {
+        0x87,0xaa,0x7c,0xde,0xa5,0xef,0x61,0x9d,0x4f,0xf0,0xb4,0x24,0x1a,0x1d,0x6c,0xb0,
+        0x23,0x79,0xf4,0xe2,0xce,0x4e,0xc2,0x78,0x7a,0xd0,0xb3,0x05,0x45,0xe1,0x7c,0xde,
+        0xda,0xa8,0x33,0xb7,0xd6,0xb8,0xa7,0x02,0x03,0x8b,0x27,0x4e,0xae,0xa3,0xf4,0xe4,
+        0xbe,0x9d,0x91,0x4e,0xeb,0x61,0xf1,0x70,0x2e,0x69,0x6c,0x20,0x3a,0x12,0x68,0x54,
+    };
+    uint8_t key[20], digest[64];
+    uint32_t len = 0;
+    drv_pufs_inst dev;
+    drv_pufs_hash_inst legacy;
+    pufs_hmac_op_t op = {.op = PUFS_OP_INIT, .hash = HASH_SHA_256, .keytype = KT_SWKEY,
+                         .keybits = sizeof(key) * 8};
+    if (drv_pufs_open(&dev) != 0)
+        return -1;
+    memset(key, 0x0b, sizeof(key));
+    memcpy(op.ctx.key, key, sizeof(key));
+    int rc = drv_pufs_ioctl(dev.fd, PUFS_HMAC_OP, &op);
+    op.op = PUFS_OP_UPDATE;
+    op.msg_phys = (uintptr_t)msg;
+    op.msglen = sizeof(msg) - 1;
+    if (!rc)
+        rc = drv_pufs_ioctl(dev.fd, PUFS_HMAC_OP, &op);
+    op.op = PUFS_OP_FINAL;
+    op.dgst_phys = (uintptr_t)digest;
+    if (!rc)
+        rc = drv_pufs_ioctl(dev.fd, PUFS_HMAC_OP, &op);
+    bool raw_ok = !rc && op.dlen == sizeof(sha256) && !memcmp(digest, sha256, sizeof(sha256));
+
+    rc = drv_pufs_hmac_init(&legacy, &dev, HASH_SHA_512, KT_SWKEY, key, sizeof(key) * 8);
+    if (!rc) {
+        legacy.ctx.minlen = 128;
+        rc = drv_pufs_hmac_update(&legacy, msg, sizeof(msg) - 1);
+    }
+    if (!rc)
+        rc = drv_pufs_hmac_final(&legacy, digest, &len);
+    bool legacy_ok = !rc && len == sizeof(sha512) && !memcmp(digest, sha512, sizeof(sha512));
+    drv_pufs_close(&dev);
+    printf("HMAC_KERNEL_ABI raw=%s legacy=%s\n", raw_ok ? "PASS" : "FAIL", legacy_ok ? "PASS" : "FAIL");
+    return raw_ok && legacy_ok ? 0 : -1;
+}
+
+static int test_hmac_long_keys_suite(void)
+{
+    TEST_ASSERT(test_hmac_long_keys() == 0, "HMAC long keys and engine boundaries");
+    return 0;
+}
+
+static int test_ccm_incomplete_aad_suite(void)
+{
+    TEST_ASSERT(test_ccm_incomplete_aad() == 0, "CCM refuses text and final with incomplete AAD");
+    return 0;
+}
+
+static int test_mac_cipher_slot_suite(void)
+{
+    TEST_ASSERT(test_mac_cipher_slot() == 0, "HMAC/CMAC accept PUFS_CIPHER_SLOT and raw slots");
+    return 0;
+}
+
+static int test_pkc_suite(void)
+{
+    TEST_ASSERT(test_pkc_timing() == 0, "RSA-1024..4096 and ECDSA P-256/384/521");
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
+    if (argc == 2 && strcmp(argv[1], "--rng-concurrent") == 0)
+        return test_concurrent_rng();
+    if (argc == 2 && strcmp(argv[1], "--hmac-kernel-abi") == 0)
+        return test_hmac_kernel_abi() != 0;
+    if (argc == 2 && strcmp(argv[1], "--otp-slot10-fixture") == 0)
+        return test_otp_cipher_fixture();
+    if (argc == 2 && strcmp(argv[1], "--hmac-long-keys") == 0)
+        return test_hmac_long_keys() != 0;
+    if (argc == 2 && strcmp(argv[1], "--pkc-timing") == 0)
+        return test_pkc_timing() != 0;
+    if (argc == 2 && strcmp(argv[1], "--ccm-incomplete-aad") == 0)
+        return test_ccm_incomplete_aad() != 0;
+    if (argc == 2 && strcmp(argv[1], "--mac-cipher-slot") == 0)
+        return test_mac_cipher_slot() != 0;
+    if (argc == 2 && strcmp(argv[1], "--wrapped-key-io") == 0)
+        return test_wrapped_key_io() != 0;
 
     printf("========================================\n");
     printf("  PUF Secure Engine HAL Test Suite\n");
@@ -3031,6 +3265,7 @@ int main(int argc, char *argv[])
     /* Section 3: HMAC */
     run_test(test_hmac_sha256, "hmac_sha256");
     run_test(test_hmac_streaming, "hmac_streaming");
+    run_test(test_hmac_long_keys_suite, "hmac_long_keys");
 
     /* Section 4: CMAC */
     run_test(test_cmac_aes128, "cmac_aes128");
@@ -3087,6 +3322,7 @@ int main(int argc, char *argv[])
 
     /* Section 12: Key management */
     run_test(test_key_import_export_roundtrip, "key_import_export_roundtrip");
+    run_test(test_wrapped_key_io, "wrapped_key_io");
     run_test(test_key_clear, "key_clear");
 
     /* Section 13: ECC / ECDSA */
@@ -3103,6 +3339,11 @@ int main(int argc, char *argv[])
     /* Section 16: AEAD tag tamper */
     run_test(test_gcm_tag_tamper, "gcm_tag_tamper");
     run_test(test_ccm_tag_tamper, "ccm_tag_tamper");
+    run_test(test_ccm_incomplete_aad_suite, "ccm_incomplete_aad");
+    run_test(test_mac_cipher_slot_suite, "mac_cipher_slot");
+    /* The preceding P-256 ECDH plus this RSA-to-ECC sequence checks that
+     * RSA invalidates the hardware curve cache. */
+    run_test(test_pkc_suite, "pkc_rsa_ecdsa");
 
     /* Section 17: DMA boundary */
     run_test(test_cipher_dma_boundary, "cipher_dma_boundary");
