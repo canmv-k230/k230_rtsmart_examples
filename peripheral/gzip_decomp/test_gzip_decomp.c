@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,9 +10,9 @@
 #include <unistd.h>
 
 #include "drv_gzip_decomp.h"
-#include "soft_gzip.h"
 #include "mpi_gsdma_api.h"
 #include "mpi_sys_api.h"
+#include "soft_gzip.h"
 
 #define DMA_NODE_SIZE (128U * 1024U)
 #define GUARD_SIZE 64U
@@ -19,6 +20,9 @@
 #define MAX_FIXTURE_SIZE (16U * 1024U * 1024U)
 
 static const uint8_t small_expected[] = "K230 gzip decompression small fixture\n";
+
+/* soft_gzip settings for streams generated on the board */
+static const soft_gzip_opt_t gen_opt = { .window = 32768, .max_match = 258, .block_tokens = 16384 };
 
 /* Monotonic: NTP may set the wall clock while a test runs. */
 static long get_time_us(void)
@@ -68,6 +72,12 @@ static void usage(const char *prog)
     fprintf(stderr, "  input.gz      - gzip compressed input file\n");
     fprintf(stderr, "  original_file - original uncompressed file for verification\n");
     fprintf(stderr, "  output_file   - optional file to write decompressed data\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "--selftest runs the fixture streams, then streams generated on the board\n");
+    fprintf(stderr, "by a small dynamic-Huffman encoder (soft_gzip.c), then decompression while\n");
+    fprintf(stderr, "ordinary SDMA copies keep the channels gzip borrows busy. It needs about\n");
+    fprintf(stderr, "115 MB of MMZ (96 MB for three SDMA load threads) and 20 MB of heap.\n");
+    fprintf(stderr, "--sdma-contention needs 8 x copy_KiB plus about 2 x gzip_KiB of MMZ.\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Note: the K230 engine only supports dynamic-Huffman streams.\n");
     fprintf(stderr, "Create a marked, hardware-compatible stream on the host with:\n");
@@ -292,7 +302,6 @@ static void fill_pattern(uint8_t *buf, uint32_t len, uint32_t seed, int kind)
 
 static int run_soft_case(drv_gzip_decomp_inst_t *inst, const char *name, uint32_t len, int kind)
 {
-    const soft_gzip_opt_t opt = { .window = 32768, .max_match = 258, .block_tokens = 16384 };
     uint8_t *payload = malloc(len);
     uint8_t *storage = malloc((size_t)len + 2 * GUARD_SIZE);
     uint8_t *gz = NULL;
@@ -306,7 +315,7 @@ static int run_soft_case(drv_gzip_decomp_inst_t *inst, const char *name, uint32_
         goto out;
     }
     fill_pattern(payload, len, len, kind);
-    gz = soft_gzip_compress(payload, len, &opt, &gz_len);
+    gz = soft_gzip_compress(payload, len, &gen_opt, &gz_len);
     if (!gz) {
         printf("[FAIL] %-12s soft_gzip_compress failed\n", name);
         failed = 1;
@@ -384,6 +393,320 @@ out:
     return failed ? -1 : 0;
 }
 
+/* ---- Streams generated on the board ---- */
+
+enum gen_pattern { GEN_ZERO, GEN_RANDOM, GEN_TEXT, GEN_RUNS, GEN_MIX };
+
+static uint32_t xorshift32(uint32_t *state)
+{
+    uint32_t x = *state;
+
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+static void gen_data(uint8_t *buf, uint32_t len, enum gen_pattern pattern, uint32_t seed)
+{
+    static const char *const words[] = { "kendryte ", "k230 ", "gzip ", "deflate ", "huffman ",
+                                         "window ", "sram ", "sdma ", "canmv ", "\n" };
+    uint32_t state = seed ? seed : 1;
+    uint32_t i = 0;
+
+    while (i < len) {
+        enum gen_pattern p = pattern;
+        uint32_t n;
+
+        if (p == GEN_MIX)
+            p = (enum gen_pattern)(xorshift32(&state) % GEN_MIX);
+        n = 1 + xorshift32(&state) % 4096;
+        if (n > len - i)
+            n = len - i;
+        switch (p) {
+        case GEN_ZERO:
+            memset(buf + i, 0, n);
+            break;
+        case GEN_RANDOM:
+            for (uint32_t k = 0; k < n; k++)
+                buf[i + k] = (uint8_t)xorshift32(&state);
+            break;
+        case GEN_TEXT:
+            for (uint32_t k = 0; k < n;) {
+                const char *w = words[xorshift32(&state) % 10];
+
+                while (*w && k < n)
+                    buf[i + k++] = (uint8_t)*w++;
+            }
+            break;
+        case GEN_RUNS:
+        default:
+            /* Byte runs and copies from far back, up to the 32 KB window. */
+            if (i > 0 && (xorshift32(&state) & 1)) {
+                uint32_t back = 1 + xorshift32(&state) % (i < 32768 ? i : 32768);
+
+                for (uint32_t k = 0; k < n; k++)
+                    buf[i + k] = buf[i + k - back];
+            } else {
+                memset(buf + i, (uint8_t)xorshift32(&state), n);
+            }
+            break;
+        }
+        i += n;
+    }
+}
+
+/* Decompress input and compare with expected, with guard bytes around the
+ * output to catch writes past its end. */
+static int check_gunzip(drv_gzip_decomp_inst_t *inst, const char *name, const uint8_t *input,
+                        uint32_t input_len, const uint8_t *expected, uint32_t expected_size)
+{
+    uint8_t *storage = malloc((size_t)expected_size + 2 * GUARD_SIZE);
+    uint8_t *output;
+    int ret, failed = 0;
+
+    if (!storage) {
+        printf("[FAIL] %-12s out of memory\n", name);
+        return -1;
+    }
+    memset(storage, 0xa5, (size_t)expected_size + 2 * GUARD_SIZE);
+    output = storage + GUARD_SIZE;
+
+    ret = drv_gzip_decomp_gunzip(inst, input, input_len, output, expected_size, 5000);
+    if (ret != 0) {
+        printf("[FAIL] %-12s decompress ret=%d\n", name, ret);
+        failed = 1;
+    } else if (memcmp(output, expected, expected_size) != 0) {
+        printf("[FAIL] %-12s payload mismatch\n", name);
+        failed = 1;
+    } else if (check_fill(storage, GUARD_SIZE, 0xa5) != 0 ||
+               check_fill(output + expected_size, GUARD_SIZE, 0xa5) != 0) {
+        printf("[FAIL] %-12s output guard overwritten\n", name);
+        failed = 1;
+    }
+    free(storage);
+    return failed ? -1 : 0;
+}
+
+static uint8_t *gen_stream(uint32_t len, enum gen_pattern pattern, uint32_t seed,
+                           const soft_gzip_opt_t *opt, uint8_t **plain, uint32_t *stream_len)
+{
+    uint8_t *data = malloc(len);
+    uint8_t *stream;
+
+    if (!data)
+        return NULL;
+    gen_data(data, len, pattern, seed);
+    stream = soft_gzip_compress(data, len, opt, stream_len);
+    if (!stream) {
+        free(data);
+        return NULL;
+    }
+    *plain = data;
+    return stream;
+}
+
+/* The first deflate block (byte 10, right after soft_gzip's plain header)
+ * gets the reserved block type 3. The engine drops back to IDLE within
+ * microseconds, before the driver first looks, and the driver must still
+ * report EBADMSG well before the timeout instead of waiting it out. The intact
+ * stream runs first: it must decode, and the bad one then follows a good run
+ * with no engine reset in between. */
+static int run_bad_block_case(drv_gzip_decomp_inst_t *inst)
+{
+    uint32_t stream_len = 0, len = 64 * 1024;
+    uint8_t *plain = NULL, *output = malloc(len), *stream;
+    int ret, failed = 0;
+    long t;
+
+    stream = gen_stream(len, GEN_MIX, 7, &gen_opt, &plain, &stream_len);
+    if (!stream || !output) {
+        printf("[FAIL] %-12s setup failed\n", "bad-block");
+        free(stream);
+        free(plain);
+        free(output);
+        return -1;
+    }
+    ret = drv_gzip_decomp_gunzip(inst, stream, stream_len, output, len, 1000);
+    if (ret != 0 || memcmp(output, plain, len) != 0) {
+        printf("[FAIL] %-12s intact stream ret=%d\n", "bad-block", ret);
+        failed = 1;
+        goto out;
+    }
+    stream[10] |= 0x06; /* BTYPE 11 */
+
+    t = get_time_us();
+    ret = drv_gzip_decomp_gunzip(inst, stream, stream_len, output, len, 1000);
+    t = get_time_us() - t;
+    if (ret != -EBADMSG || t >= 500 * 1000) {
+        printf("[FAIL] %-12s ret=%d after %ld ms, expected %d well before the 1000 ms timeout\n", "bad-block",
+               ret, t / 1000, -EBADMSG);
+        failed = 1;
+    } else {
+        printf("[PASS] %-12s rejected ret=%d in %ld ms\n", "bad-block", ret, t / 1000);
+    }
+out:
+    free(stream);
+    free(plain);
+    free(output);
+    return failed ? -1 : 0;
+}
+
+static int run_generated_case(drv_gzip_decomp_inst_t *inst, const char *name, uint32_t len,
+                              enum gen_pattern pattern, const soft_gzip_opt_t *opt, uint32_t seed)
+{
+    uint8_t *plain = NULL, *stream;
+    uint32_t stream_len = 0;
+    int ret;
+
+    stream = gen_stream(len, pattern, seed, opt, &plain, &stream_len);
+    if (!stream) {
+        printf("[FAIL] %-12s compressing %u bytes failed\n", name, len);
+        return -1;
+    }
+    ret = check_gunzip(inst, name, stream, stream_len, plain, len);
+    if (ret == 0)
+        printf("[PASS] %-12s input=%u output=%u\n", name, stream_len, len);
+    free(stream);
+    free(plain);
+    return ret;
+}
+
+static int run_generated_cases(drv_gzip_decomp_inst_t *inst, uint32_t seed)
+{
+    static const soft_gzip_opt_t small_window = { .window = 4096, .max_match = 258, .block_tokens = 16384 };
+    static const soft_gzip_opt_t short_blocks = { .window = 32768, .max_match = 258, .block_tokens = 300 };
+    static const struct {
+        const char *name;
+        uint32_t len;
+        enum gen_pattern pattern;
+        const soft_gzip_opt_t *opt;
+    } cases[] = {
+        { "gen-1B",      1,                     GEN_RANDOM, &gen_opt },
+        { "gen-text",    4095,                  GEN_TEXT,   &gen_opt },
+        { "gen-random",  65536,                 GEN_RANDOM, &gen_opt },
+        { "gen-node-1",  DMA_NODE_SIZE - 1,     GEN_MIX,    &gen_opt },
+        { "gen-node",    DMA_NODE_SIZE,         GEN_MIX,    &gen_opt },
+        { "gen-node+1",  DMA_NODE_SIZE + 1,     GEN_MIX,    &gen_opt },
+        { "gen-runs",    1024 * 1024,           GEN_RUNS,   &gen_opt },
+        { "gen-zeros",   2 * 1024 * 1024,       GEN_ZERO,   &gen_opt },
+        { "gen-window",  256 * 1024,            GEN_MIX,    &small_window },
+        { "gen-blocks",  256 * 1024,            GEN_MIX,    &short_blocks },
+        { "gen-mix-4M",  4 * 1024 * 1024,       GEN_MIX,    &gen_opt },
+    };
+    int failures = 0;
+
+    printf("generated streams, seed %u\n", seed);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        failures += run_generated_case(inst, cases[i].name, cases[i].len, cases[i].pattern,
+                                       cases[i].opt, seed + (uint32_t)i) != 0;
+    return failures;
+}
+
+/* ---- Decompression while ordinary SDMA transfers run ---- */
+
+#define LOAD_THREADS   3
+#define LOAD_COPY_SIZE (16U * 1024U * 1024U)
+#define CONTENTION_RUNS 10
+
+struct sdma_load {
+    pthread_t thread;
+    atomic_int *stop;
+    unsigned copies;
+    unsigned failed;    /* copies that failed */
+    int alloc_failed;   /* no MMZ for its buffers: never copied */
+    int started;
+};
+
+/* Back-to-back SDMA copies keep the SDMA channels gzip borrows (0 and 1)
+ * busy, so every decompression has to wait for them. */
+static void *sdma_load_thread(void *arg)
+{
+    struct sdma_load *load = arg;
+    k_sdma_memcpy_t cfg;
+    uint64_t phys;
+    void *virt;
+
+    if (kd_mpi_sys_mmz_alloc(&phys, &virt, "gzip_load", "anonymous", LOAD_COPY_SIZE * 2) != 0) {
+        load->alloc_failed = 1;
+        return NULL;
+    }
+    while (!atomic_load(load->stop)) {
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.src_phys_addr = phys;
+        cfg.dst_phys_addr = phys + LOAD_COPY_SIZE;
+        cfg.size = LOAD_COPY_SIZE;
+        cfg.timeout_ms = 2000;
+        if (kd_mpi_gsdma_sdma_memcpy(&cfg) == 0)
+            load->copies++;
+        else
+            load->failed++;
+    }
+    kd_mpi_sys_mmz_free(phys, virt);
+    return NULL;
+}
+
+static int run_contention_case(drv_gzip_decomp_inst_t *inst, uint32_t seed)
+{
+    struct sdma_load load[LOAD_THREADS];
+    atomic_int stop = 0;
+    uint8_t *plain = NULL, *stream;
+    uint32_t stream_len = 0, len = 512 * 1024;
+    unsigned copies = 0, load_failed = 0, not_started = 0, no_mmz = 0;
+    long worst = 0;
+    int failed = 0, i;
+
+    stream = gen_stream(len, GEN_MIX, seed, &gen_opt, &plain, &stream_len);
+    if (!stream || kd_mpi_gsdma_init() != 0) {
+        printf("[FAIL] contention  setup failed\n");
+        free(stream);
+        free(plain);
+        return -1;
+    }
+
+    memset(load, 0, sizeof(load));
+    for (i = 0; i < LOAD_THREADS; i++) {
+        load[i].stop = &stop;
+        load[i].started = pthread_create(&load[i].thread, NULL, sdma_load_thread, &load[i]) == 0;
+    }
+    usleep(100 * 1000);
+
+    for (i = 0; i < CONTENTION_RUNS && !failed; i++) {
+        long t = get_time_us();
+
+        failed = check_gunzip(inst, "contention", stream, stream_len, plain, len) != 0;
+        t = get_time_us() - t;
+        if (t > worst)
+            worst = t;
+    }
+
+    atomic_store(&stop, 1);
+    for (i = 0; i < LOAD_THREADS; i++) {
+        if (load[i].started)
+            pthread_join(load[i].thread, NULL);
+        else
+            not_started++;
+        copies += load[i].copies;
+        load_failed += load[i].failed;
+        no_mmz += load[i].alloc_failed;
+    }
+    kd_mpi_gsdma_deinit();
+
+    if (!failed && (not_started || no_mmz || load_failed || !copies)) {
+        printf("[FAIL] contention  SDMA load: %u copies ok, %u failed; %u of %d threads not started, "
+               "%u without their %u MiB of MMZ\n", copies, load_failed, not_started, LOAD_THREADS, no_mmz,
+               2 * LOAD_COPY_SIZE >> 20);
+        failed = 1;
+    }
+    if (!failed)
+        printf("[PASS] contention  %d runs under %u SDMA copies, worst %ld ms\n",
+               CONTENTION_RUNS, copies, worst / 1000);
+    free(stream);
+    free(plain);
+    return failed ? -1 : 0;
+}
+
 static int run_selftest(const char *fixture_dir)
 {
     drv_gzip_decomp_inst_t *inst = NULL;
@@ -413,7 +736,8 @@ static int run_selftest(const char *fixture_dir)
                                MULTI_FIXTURE_SIZE, NULL) != 0;
     failures += run_valid_case(inst, "max-16MiB", max_path,
                                MAX_FIXTURE_SIZE, NULL) != 0;
-    failures += run_invalid_case(inst, "corrupt", small_path, 1, 0, -EIO, -ETIMEDOUT) != 0;
+    failures += run_invalid_case(inst, "corrupt", small_path, 1, 0, -EBADMSG, 0) != 0;
+    failures += run_bad_block_case(inst) != 0;
     failures += run_invalid_case(inst, "truncated", small_path, 0, 5, -EINVAL, 0) != 0;
     failures += run_undersized_ioctl_case(inst, small_path) != 0;
     failures += run_freed_dst_case(inst, small_path) != 0;
@@ -426,6 +750,8 @@ static int run_selftest(const char *fixture_dir)
     failures += run_soft_case(inst, "soft-4MiB", 4 * 1024 * 1024, PATTERN_RUNS) != 0;
     failures += run_valid_case(inst, "recovery", small_path,
                                sizeof(small_expected) - 1, small_expected) != 0;
+    failures += run_generated_cases(inst, 1);
+    failures += run_contention_case(inst, 100);
 
     drv_gzip_decomp_close(&inst);
     printf("D-01 selftest: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
@@ -439,8 +765,9 @@ static int run_selftest(const char *fixture_dir)
  *
  * gzip reserves its channels some time into the ioctl (after its debug log),
  * so the copies start after a delay that sweeps min_ms..max_ms. In rounds
- * where they come too early, gzip's reserve fails with EBUSY: counted, not
- * an error. A PASS needs rounds where gzip ran while copies waited. */
+ * where they come too early, gzip may time out reserving the channels and
+ * return EBUSY: counted, not an error. A PASS needs rounds where gzip ran
+ * while copies waited. */
 #define CONT_WORKERS 4
 #define CONT_SAMPLES 512
 #define CONT_COPY_TIMEOUT_MS 2000
@@ -566,7 +893,7 @@ static int cont_gzip_once(cont_gzip_t *g)
     if (dt > g->max_us)
         g->max_us = dt;
     if (ret == -EBUSY) {
-        g->busy++; /* a copy held channel 0 or 1 first */
+        g->busy++; /* could not reserve both channels */
     } else if (ret != 0) {
         if (!g->fail++)
             g->first_ret = ret;
@@ -605,7 +932,6 @@ static uint32_t round_up_node(uint32_t len)
 static int run_sdma_contention(unsigned rounds, uint32_t gz_kib, uint32_t copy_kib,
                                unsigned min_ms, unsigned max_ms)
 {
-    const soft_gzip_opt_t opt = { .window = 32768, .max_match = 258, .block_tokens = 16384 };
     cont_copy_t copies[CONT_WORKERS];
     cont_gzip_t gz;
     pthread_t copy_threads[CONT_WORKERS], gz_thread;
@@ -632,7 +958,7 @@ static int run_sdma_contention(unsigned rounds, uint32_t gz_kib, uint32_t copy_k
         goto out;
     }
     fill_pattern(payload, gz.len, gz.len, PATTERN_TEXT);
-    stream = soft_gzip_compress(payload, gz.len, &opt, &gz.gz_len);
+    stream = soft_gzip_compress(payload, gz.len, &gen_opt, &gz.gz_len);
     if (!stream) {
         printf("[FAIL] contention  soft_gzip_compress failed\n");
         goto out;
