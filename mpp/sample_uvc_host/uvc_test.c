@@ -398,10 +398,19 @@ static void sample_note_error(int *first_err, int ret)
     }
 }
 
+/* VO keeps the frames it scanned out for a couple of VSYNCs after the layer
+ * is disabled, and VDEC a stream block until the firmware returns it, so the
+ * destroy may find the pool busy. kd_mpi_vb_exit() waits up to 1 s for the
+ * blocks to return, then returns K_ERR_VB_BUSY if they are still held.
+ * Process exit gives up the busy pool; VB frees it when the blocks return. */
 static int sample_destroy_pool(k_s32 *pool_id, const char *name)
 {
     int ret = kd_mpi_vb_destory_pool(*pool_id);
 
+    if (ret == K_ERR_VB_BUSY) {
+        printf("%s pool %d still in use; process exit will give it up if still busy\n", name, *pool_id);
+        return ret;
+    }
     if (ret) {
         printf("destroy %s pool %d failed, ret = 0x%x\n", name, *pool_id, ret);
         return ret;
@@ -479,21 +488,27 @@ static int sample_cleanup(sample_uvc_runtime *rt)
         rt->vo_block = VB_INVALID_HANDLE;
     }
 
-    /* Close capture after the decoder has released its input buffers. */
+    /* In any order relative to VDEC: closing /dev/video0 gives the UVC
+     * driver's pool up, and a stream block VDEC still holds keeps only that
+     * block until the firmware returns it. */
     if (rt->uvc_inited) {
         uvc_host_exit();
         rt->uvc_inited = false;
     }
     if (rt->vdec_pool_created) {
         ret = sample_destroy_pool(&rt->vdec_poolid, "vdec");
-        sample_note_error(&first_err, ret);
+        if (ret != K_ERR_VB_BUSY) {
+            sample_note_error(&first_err, ret);
+        }
         if (!ret) {
             rt->vdec_pool_created = false;
         }
     }
     if (rt->vo_pool_created) {
         ret = sample_destroy_pool(&rt->vo_poolid, "vo");
-        sample_note_error(&first_err, ret);
+        if (ret != K_ERR_VB_BUSY) {
+            sample_note_error(&first_err, ret);
+        }
         if (!ret) {
             rt->vo_pool_created = false;
         }
@@ -509,15 +524,20 @@ static int sample_cleanup(sample_uvc_runtime *rt)
         rt->display_initialized = false;
     }
 
+    /* Keep exit errors: BUSY here can also mean another member or a pool
+     * outside this session, not just a transient reference to our pools. */
     if (rt->vb_inited) {
         ret = kd_mpi_vb_exit();
         if (ret) {
             printf("kd_mpi_vb_exit fail, ret = 0x%x\n", ret);
+        } else {
+            rt->vb_inited = false;
+            rt->vdec_pool_created = false;
+            rt->vo_pool_created = false;
+            rt->vdec_poolid = VB_INVALID_POOLID;
+            rt->vo_poolid = VB_INVALID_POOLID;
         }
         sample_note_error(&first_err, ret);
-        rt->vb_inited = false;
-        rt->vdec_pool_created = false;
-        rt->vo_pool_created = false;
     }
 
     return first_err;
