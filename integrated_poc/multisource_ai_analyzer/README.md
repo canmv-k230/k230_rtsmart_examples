@@ -118,7 +118,7 @@ cd /sdcard/app/examples/integrated_poc
 | 参数 | 含义 | 默认值 | 说明 |
 |------|------|--------|------|
 | -s, --csi <num> | Sensor 所在 CSI 口 | 编译配置默认值 (0-2) | realtime 模式下指定摄像头所接的 CSI 口 |
-| -c, --connector <type> | 显示器连接器类型（数值） | 编译配置默认值 | 605274512=LCD 屏 (ST7701 480x800)，757006876=HDMI 屏 (LT9611 1920x1080@30fps)，可用 list_connector 查看全部类型 |
+| -c, --connector <type> | 显示器连接器类型（数值） | 编译配置默认值 | 605274512=LCD 屏 (ST7701 480x800)，757006876=HDMI 屏 (LT9611 1920x1080@30fps)，758055452=HDMI 屏 (LT9611 1920x1080@60fps)，可用 list_connector 查看全部类型 |
 | --det-model <path> | YOLOv8 检测模型路径 | yolov8n_320.kmodel | YOLOv8 目标检测的 kmodel 文件路径 |
 | --score-thres <float> | 目标检测置信度阈值 | 0.4 | 低于该阈值的检测结果将被过滤 |
 | --nms-thres <float> | 目标检测 NMS 阈值 | 0.6 | 非极大值抑制阈值，用于去除重复检测框 |
@@ -212,6 +212,7 @@ Optional:
   -c, --connector <type>    显示器连接器类型，数值 (默认：605274512，随编译配置 DISPLAY_TYPE 变化)
                               605274512  = LCD 屏 (ST7701 480x800)
                               757006876  = HDMI 屏 (LT9611 1920x1080@30fps)
+                              758055452  = HDMI 屏 (LT9611 1920x1080@60fps)
                               可运行 list_connector 查看全部可选类型
   --det-model <path>        YOLOv8 检测模型路径 (默认：yolov8n_320.kmodel)
   --score-thres <float>     检测置信度阈值 (默认：0.4)

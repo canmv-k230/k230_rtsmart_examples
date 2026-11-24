@@ -80,22 +80,33 @@ static k_vicap_mipi_lane_pref g_lane_pref = VICAP_MIPI_LANE_PREF_ANY;
 /* Ctrl+C 退出标志 */
 static volatile bool g_app_run = true;
 
-static int resolve_connector_size(k_connector_type *connector_type, k_u32 *width, k_u32 *height)
+/* A width or height not given defaults to the panel's. Rotated by 90 or 270
+ * degrees, the image is shown on its side, so it takes the panel's height as
+ * its width and the panel's width as its height. */
+static int resolve_connector_size(k_connector_type *connector_type, int rot_val, k_u32 *width, k_u32 *height)
 {
     k_connector_info info;
+    k_u32 panel_w = 0, panel_h = 0;
 
     memset(&info, 0, sizeof(info));
     if (kd_mpi_get_connector_info(*connector_type, &info) == K_SUCCESS) {
-        if (*width == 0)
-            *width = info.resolution.hactive;
-        if (*height == 0)
-            *height = info.resolution.vactive;
+        panel_w = info.resolution.hactive;
+        panel_h = info.resolution.vactive;
     }
+    if (panel_w == 0)
+        panel_w = K_CONN_WIDTH(*connector_type);
+    if (panel_h == 0)
+        panel_h = K_CONN_HEIGHT(*connector_type);
 
+    if (rot_val == 90 || rot_val == 270) {
+        k_u32 t = panel_w;
+        panel_w = panel_h;
+        panel_h = t;
+    }
     if (*width == 0)
-        *width = K_CONN_WIDTH(*connector_type);
+        *width = panel_w;
     if (*height == 0)
-        *height = K_CONN_HEIGHT(*connector_type);
+        *height = panel_h;
 
     if (*width == 0 || *height == 0) {
         printf("ERROR: unable to resolve display size for connector type %u, please pass -w/-h\n", *connector_type);
@@ -122,8 +133,8 @@ static void print_usage(const char *prog)
     printf("Usage: %s [options]\n", prog);
     printf("Options:\n");
     printf("  -c <type>   Connector type. Use list_connector to view supported types\n");
-    printf("  -w <width>  Width (multiple of 8) [default: panel width]\n");
-    printf("  -h <height> Height [default: panel height]\n");
+    printf("  -w <width>  Width (multiple of 8) [default: panel width; panel height with -r 90/270]\n");
+    printf("  -h <height> Height [default: panel height; panel width with -r 90/270]\n");
     printf("  -l <layer>  VO Layer ID (0-2 for Video; 3 is unsupported)\n");
     printf("  -r <degree> Rotation (0, 90, 180, 270)\n");
     printf("  -x <offset> X offset\n");
@@ -364,7 +375,7 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    if (resolve_connector_size(&connector_type, &width, &height) != 0) {
+    if (resolve_connector_size(&connector_type, rot_val, &width, &height) != 0) {
         print_usage(argv[0]);
         return -1;
     }

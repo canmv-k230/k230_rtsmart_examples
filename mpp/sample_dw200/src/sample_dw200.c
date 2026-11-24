@@ -241,15 +241,13 @@ static void copy_mmz(void *dst, const void *src, size_t size)
     while (size--) *d++ = *p++;
 }
 
-static bool compare_outputs;
-static bool output_hash_valid[DW200_OUTPUT_COUNT];
-static uint64_t output_hash[DW200_OUTPUT_COUNT];
-
 static int allocate_video_buffer(struct video_buffer* buffer, uint32_t size)
 {
     buffer->size = size;
-    /* Keep CPU and DW200 coherent without cache maintenance in this sample. */
-    RETURN_IF_ERROR(kd_mpi_sys_mmz_alloc(&buffer->phy_addr, &buffer->virt_addr, MMB_NAME, MMZ_NAME, buffer->size));
+    /* File I/O copies through a cached kernel alias. Use cached mappings and
+     * explicitly transfer ownership at DMA boundaries, including reused RAM. */
+    RETURN_IF_ERROR(kd_mpi_sys_mmz_alloc_cached(&buffer->phy_addr, &buffer->virt_addr, MMB_NAME, MMZ_NAME, buffer->size));
+    RETURN_IF_ERROR(kd_mpi_sys_mmz_flush_cache(buffer->phy_addr, buffer->virt_addr, buffer->size));
     return 0;
 }
 
@@ -958,11 +956,44 @@ static int wait_for_frame(bool expect_dwe, uint32_t enabled_vse_output_mask)
 static const char* const format_suffixes[]
     = { "yuv422sp", "yuv422i", "yuv420sp", "yuv444", "rgb888", "rgb888p", "raw8", "raw12" };
 
+/* --api all verifies every frame, including the very first, against the
+ * first completed output on each channel. Do not accept a warm-up mismatch. */
+static bool compare_outputs;
+static bool hash_seen[DW200_OUTPUT_COUNT];
+static uint64_t reference_hash[DW200_OUTPUT_COUNT];
+static unsigned int compared_frames;
+
+static int check_output(unsigned int output_id, uint64_t hash)
+{
+    if (!compare_outputs)
+        return 0;
+    if (hash_seen[output_id] && reference_hash[output_id] != hash) {
+        pr_err("DW200_HASH_FAIL output %u: expected %016llx, got %016llx", output_id,
+            (unsigned long long)reference_hash[output_id], (unsigned long long)hash);
+        return -1;
+    }
+    hash_seen[output_id] = true;
+    reference_hash[output_id] = hash;
+    compared_frames++;
+    return 0;
+}
+
 static int save_frame(const char* output_directory, unsigned int output_id, const struct dw200_resolution* resolution,
     const char* api_suffix, const void* data, size_t size)
 {
     if (resolution->format >= ARRAY_SIZE(format_suffixes)) {
         pr_err("unsupported output format %u", resolution->format);
+        return -1;
+    }
+
+    /* Keep an empty output valid even when malloc(0) would return NULL. */
+    void *cached = malloc(size ? size : 1);
+    if (!cached)
+        return -1;
+    copy_mmz(cached, data, size);
+    uint64_t hash = fnv1a64(cached, size);
+    if (check_output(output_id, hash) < 0) {
+        free(cached);
         return -1;
     }
 
@@ -974,13 +1005,9 @@ static int save_frame(const char* output_directory, unsigned int output_id, cons
     FILE* file = fopen(filename, "wb");
     if (file == NULL) {
         perror("open output file");
+        free(cached);
         return -1;
     }
-    /* Keep an empty output valid even when malloc(0) would return NULL. */
-    void *cached = malloc(size ? size : 1);
-    if (!cached) { fclose(file); return -1; }
-    copy_mmz(cached, data, size);
-    uint64_t hash = fnv1a64(cached, size);
     size_t bytes_written = fwrite(cached, 1, size, file);
     free(cached);
     int close_result = fclose(file);
@@ -991,17 +1018,7 @@ static int save_frame(const char* output_directory, unsigned int output_id, cons
     pr_info("wrote channel %u to %s (%zu bytes, fnv1a64=%016llx)", output_id, filename, bytes_written,
         (unsigned long long)hash);
     if (compare_outputs)
-    {
-        if (output_hash_valid[output_id] && output_hash[output_id] != hash)
-        {
-            pr_err("DW200_HASH_FAIL output %u: expected %016llx, got %016llx", output_id,
-                (unsigned long long)output_hash[output_id], (unsigned long long)hash);
-            return -1;
-        }
-        output_hash_valid[output_id] = true;
-        output_hash[output_id] = hash;
         pr_info("DW200_HASH_PASS output %u api %s", output_id, api_suffix ? api_suffix : "low-level");
-    }
     return 0;
 }
 
@@ -1012,6 +1029,9 @@ static int save_low_level_outputs(const struct dw200_parameters* params, const s
         if (!params->output_res[i].enable || output_buffers[i].virt_addr == NULL) {
             continue;
         }
+        if (kd_mpi_sys_mmz_invalidate_cache(output_buffers[i].phy_addr,
+                                           output_buffers[i].virt_addr, output_buffers[i].size))
+            return -1;
         if (save_frame(output_directory, i, &params->output_res[i], NULL, output_buffers[i].virt_addr, output_buffers[i].size)
             < 0) {
             return -1;
@@ -1144,6 +1164,8 @@ static int run_low_level_api(const struct dw200_parameters* params, struct k_dwe
         if (wait_for_frame(dwe_enabled, vse_enabled_mask) < 0) {
             goto cleanup;
         }
+        if (save_low_level_outputs(params, output_buffers, output_directory) < 0)
+            goto cleanup;
     }
 
     if (vse_enabled) {
@@ -1154,9 +1176,6 @@ static int run_low_level_api(const struct dw200_parameters* params, struct k_dwe
         CHECK_ERROR(kd_mpi_dewarp_disable_irq());
         CHECK_ERROR(kd_mpi_dewarp_disable_bus());
         dwe_bus_enabled = false;
-    }
-    if (save_low_level_outputs(params, output_buffers, output_directory) < 0) {
-        goto cleanup;
     }
     result = 0;
 
@@ -1362,6 +1381,13 @@ static int allocate_managed_outputs(const struct k_dw_settings* settings, struct
             pr_err("resolve output %u physical address failed", i);
             return -1;
         }
+        void *mapped = kd_mpi_sys_mmap_cached(request->output_vb_info[i].phys_addr[0], size);
+        if (!mapped)
+            return -1;
+        int ret = kd_mpi_sys_mmz_flush_cache(request->output_vb_info[i].phys_addr[0], mapped, size);
+        int unmap_ret = kd_mpi_sys_munmap(mapped, size);
+        if (ret || unmap_ret)
+            return -1;
     }
     return 0;
 }
@@ -1401,9 +1427,13 @@ static int save_managed_outputs(const struct dw200_parameters* params, const str
             return -1;
         }
 
-        void* data = kd_mpi_sys_mmap(physical_address, size);
+        void* data = kd_mpi_sys_mmap_cached(physical_address, size);
         if (data == NULL) {
             pr_err("map output %u failed", driver_output);
+            return -1;
+        }
+        if (kd_mpi_sys_mmz_invalidate_cache(physical_address, data, size)) {
+            kd_mpi_sys_munmap(data, size);
             return -1;
         }
         int result = save_frame(output_directory, sample_output, &params->output_res[sample_output], api_suffix, data, size);
@@ -1629,6 +1659,14 @@ int main(int argc, char* argv[])
             input_buffers[i].size);
     }
 
+    if (lut_map.virt_addr && kd_mpi_sys_mmz_flush_cache(lut_map.phy_addr, lut_map.virt_addr, lut_map.size))
+        goto cleanup;
+    for (unsigned int i = 0; i < DW200_INPUT_COUNT; i++) {
+        if (input_buffers[i].virt_addr && kd_mpi_sys_mmz_flush_cache(input_buffers[i].phy_addr,
+                input_buffers[i].virt_addr, input_buffers[i].size))
+            goto cleanup;
+    }
+
     if ((options.api == DRIVER_API_LOW_LEVEL || options.api == DRIVER_API_ALL)
         && run_low_level_api(&params, &dwe_info, &vse_info, input_buffers, &lut_map, output_directory, options.frame_count)
             < 0) {
@@ -1645,6 +1683,8 @@ int main(int argc, char* argv[])
             < 0) {
         goto cleanup;
     }
+    if (compare_outputs)
+        pr_info("PASS cross-API comparison: %u outputs match", compared_frames);
     result = EXIT_SUCCESS;
 
 cleanup:

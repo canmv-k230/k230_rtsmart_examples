@@ -71,6 +71,7 @@ void CmdLineParser::print_usage(const char* name)
          << "  -c, --connector <type>    显示器连接器类型，数值 (默认：" << DEFAULT_CONNECTOR_TYPE << ")" << endl
          << "                              605274512  = LCD 屏 (ST7701 480x800)" << endl
          << "                              757006876  = HDMI 屏 (LT9611 1920x1080@30fps)" << endl
+         << "                              758055452  = HDMI 屏 (LT9611 1920x1080@60fps)" << endl
          << "                              可运行 list_connector 查看全部可选类型" << endl
          << "  --det-model <path>        YOLOv8 检测模型路径 (默认：yolov8n_320.kmodel)" << endl
          << "  --score-thres <float>     检测置信度阈值 (默认：0.4)" << endl

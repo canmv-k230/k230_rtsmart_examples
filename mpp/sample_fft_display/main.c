@@ -346,10 +346,19 @@ static k_gdma_rotation_e rotation_from_degrees(int degrees)
 
 static int rotation_swaps_axes(int degrees) { return degrees == 90 || degrees == 270; }
 
+/* The panel size from the driver, which knows the mode a connector resolves
+ * to (LT9611_HDMI_AUTO's comes from the sink's EDID and is not in the ID),
+ * else the size in the connector ID, else the 01studio's 480x800. */
 static void connector_dimensions(k_connector_type conn_type, k_u32* width, k_u32* height)
 {
-    k_u32 conn_w = K_CONN_WIDTH(conn_type);
-    k_u32 conn_h = K_CONN_HEIGHT(conn_type);
+    k_connector_info info;
+    k_u32            conn_w = K_CONN_WIDTH(conn_type);
+    k_u32            conn_h = K_CONN_HEIGHT(conn_type);
+
+    if (kd_mpi_get_connector_info(conn_type, &info) == 0 && info.resolution.hactive && info.resolution.vactive) {
+        conn_w = info.resolution.hactive;
+        conn_h = info.resolution.vactive;
+    }
 
     if (conn_w == 0 || conn_h == 0) {
         *width  = 480;

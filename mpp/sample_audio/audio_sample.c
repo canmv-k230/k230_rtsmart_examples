@@ -1328,6 +1328,12 @@ k_s32 audio_sample_ai_encode(k_audio_dev ai_dev, k_bool use_sysbind,
                          "kd_mpi_aenc_release_stream");
             if (queue_result == AUDIO_IO_STOPPED)
             {
+                /* The frame goes back first, not at the AI file's close. */
+                if (frame_acquired)
+                {
+                    merge_result(&ret, kd_mpi_ai_release_frame(ai_dev, 0, &frame),
+                                 "kd_mpi_ai_release_frame");
+                }
                 break;
             }
         }

@@ -50,3 +50,22 @@ camera-distorted image.
 The output is a raw frame.  For the included 640x480 NV12 configs, compare it
 with an NV12 viewer or convert it using the same width, height, and pixel
 format; opening it as RGB or YUV422 will make a correct result look corrupted.
+
+For the cache/first-frame regression, cold boot and repeat:
+
+```text
+./sample_dw200.elf --api all --frames 5 sample_dw200_identity_640x480.json
+```
+
+Every frame is hashed, including the first frame of each API. `--api all`
+compares each output channel across frames and APIs and returns failure on a
+mismatch. Expect `PASS cross-API comparison: 15 outputs match` for this
+single-output configuration. On the tested hardware the identity output FNV-1a
+hash is `e3412c29f64522e5`. Repeat after camera/display use as well as immediately
+after boot; warm retries alone can hide stale cache lines.
+
+Host cache ownership and mismatch detection regression:
+
+```sh
+python3 -B tests/test_cache_and_hash.py
+```
