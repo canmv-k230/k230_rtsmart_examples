@@ -62,7 +62,7 @@ void CmdLineParser::print_usage(const char* name)
          << "  <video_path>              视频源路径，支持以下类型：" << endl
          << "                            - \"realtime\"   实时摄像头采集" << endl
          << "                            - \"*.mp4\"      MP4 视频文件" << endl
-         << "                            - \"UVC\"        UVC 摄像头" << endl
+         << "                            - \"uvc\"        UVC 摄像头" << endl
          << "                            - \"rtsp://*\"   RTSP 网络视频流" << endl
          << endl
          << "Optional:" << endl

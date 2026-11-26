@@ -30,7 +30,6 @@ private:
 
     int m_width{0};                    // 视频宽度
     int m_height{0};                   // 视频高度
-    int m_fps{0};
     bool m_isOpened{false};            // 是否已打开
     bool m_isJpeg{false};
 

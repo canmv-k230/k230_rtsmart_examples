@@ -48,7 +48,6 @@ public:
     int ai_fps_;
     k_video_frame_info dump_res_;
     int frame_index_{0};
-    bool is_uvc_{false};
 
     // Callbacks as member functions (or static with user_data)
     static void on_stream_cb(const EncStream& stream, void* user_data, bool is_end);
@@ -99,43 +98,45 @@ int VideoStreamPipeline::Create() {
     int stream_width;
     int stream_height;
     DataSourceCallbacks cbs;
+    std::unique_ptr<IDataSource> data_source;
+    bool is_uvc = false;
 
     if (is_mp4_file_by_extension(pl->video_path_)) {
-        pl->data_source_ = new MP4DataSource();
-    } else if (pl->video_path_.rfind("rtsp://", 0) == 0) {
-        pl->data_source_ = new RTSPDataSource(pimpl_->rtsp_rtp_over_tcp);
+        data_source = std::make_unique<MP4DataSource>();
+    } else if (is_rtsp_stream(pl->video_path_)) {
+        data_source = std::make_unique<RTSPDataSource>(pimpl_->rtsp_rtp_over_tcp);
     }
-    else if (pl->video_path_.rfind("uvc", 0) == 0) {
-        pl->data_source_ = new UVCDataSource(pimpl_->out_width_,pimpl_->out_height_);
-        pl->is_uvc_ = true;
+    else if (pl->video_path_ == "uvc") {
+        data_source = std::make_unique<UVCDataSource>(pimpl_->out_width_,pimpl_->out_height_);
+        is_uvc = true;
     }
     else {
-        printf("Invalid video path (not MP4 or RTSP or realtime or UVC): %s\n", pl->video_path_.c_str());
+        printf("Invalid stream video path (expected MP4, RTSP, or UVC): %s\n", pl->video_path_.c_str());
         return -1;
     }
 
-    if (!pl->data_source_) {
+    if (!data_source) {
         std::cerr << "Failed to create DataSource instance" << std::endl;
         return -1;
     }
 
     cbs.user_data = pl;
-    if (pl->is_uvc_){
+    if (is_uvc){
         cbs.mpp_cb = VideoStreamPipelineImpl::on_mpp_stream_cb;
     }
     else{
         cbs.stream_cb = VideoStreamPipelineImpl::on_stream_cb;
     }
 
-    int open_success = pl->data_source_->open(pl->video_path_, pl->stream_fps_, cbs);
+    int open_success = data_source->open(pl->video_path_, pl->stream_fps_, cbs);
     if (open_success) {
         std::cerr << "Failed to open url: " << pl->video_path_ << std::endl;
         return -1;
     }
 
-    stream_width = pl->data_source_->get_width();
-    stream_height = pl->data_source_->get_height();
-    EncType enc_type = pl->data_source_->get_stream_type();
+    stream_width = data_source->get_width();
+    stream_height = data_source->get_height();
+    EncType enc_type = data_source->get_stream_type();
 
     if (stream_width <= 0 || stream_height <= 0) {
         std::cerr << "Invalid video resolution: " << stream_width << "x" << stream_height << std::endl;
@@ -180,7 +181,13 @@ int VideoStreamPipeline::Create() {
         return -1;
     }
 
-    pl->data_source_->start();
+    if (data_source->start() != 0) {
+        std::cerr << "Failed to start data source" << std::endl;
+        pl->m_isRunning.store(false);
+        return -1;
+    }
+
+    pl->data_source_ = data_source.release();
     return 0;
 }
 

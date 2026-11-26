@@ -2,6 +2,11 @@
 #include "mpi_uvc_api.h"
 #include <cstdio>
 
+namespace {
+constexpr unsigned int kFallbackWidth = 1920;
+constexpr unsigned int kFallbackHeight = 1080;
+}
+
 UVCDataSource::UVCDataSource(int width,int height)
 {
     m_width = width;
@@ -16,33 +21,39 @@ UVCDataSource::~UVCDataSource() {
 int UVCDataSource::open(const std::string& url,int fps, const DataSourceCallbacks& callbacks) {
     int ret = -1;
     if (m_isOpened) {
-        return false; // 已打开状态下不重复打开
+        return -1; // 已打开状态下不重复打开
     }
 
+    if (m_width <= 0 || m_height <= 0) {
+        printf("UVCDataSource: Invalid target resolution %dx%d\n", m_width, m_height);
+        return -1;
+    }
+
+    static_cast<void>(fps);
     m_isJpeg = true;
-    m_fps = fps;
+
     // Store the original expected resolution from constructor
-    int origin_w = m_width;
-    int origin_h = m_height;
+    const unsigned int origin_w = static_cast<unsigned int>(m_width);
+    const unsigned int origin_h = static_cast<unsigned int>(m_height);
 
     struct uvc_format format = {
-        m_width,
-        m_height,
+        origin_w,
+        origin_h,
         m_isJpeg ? USBH_VIDEO_FOURCC_MJPEG : USBH_VIDEO_FOURCC_YUY2,
         0
     };
     //Initial attempt to initialize UVC
     ret = uvc_host_init(&format);
     if (ret == 0 && (format.width < origin_w || format.height < origin_h)) {
-        printf("UVCDataSource: Resolution %dx%d < target %dx%d. Retrying...\n",
+        printf("UVCDataSource: Resolution %ux%u < target %ux%u. Retrying...\n",
                format.width, format.height, origin_w, origin_h);
 
         // Release resources from the failed attempt
         uvc_host_exit();
 
         // Force reset to standard 1080P as requested and retry
-        format.width = 1920;
-        format.height = 1080;
+        format.width = kFallbackWidth;
+        format.height = kFallbackHeight;
         ret = uvc_host_init(&format);
     }
 
@@ -51,7 +62,7 @@ int UVCDataSource::open(const std::string& url,int fps, const DataSourceCallback
         return -1;
     }
 
-    printf("UVC camera resolution (init/actual) - %dx%d/%dx%d\n",
+    printf("UVC camera resolution (init/actual) - %dx%d/%ux%u\n",
        m_width, m_height, format.width, format.height);
 
     // 更新实际协商的宽高

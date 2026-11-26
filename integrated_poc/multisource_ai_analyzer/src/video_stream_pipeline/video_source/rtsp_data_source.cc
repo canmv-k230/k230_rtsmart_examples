@@ -54,9 +54,12 @@ RTSPDataSource::RTSPDataSource(bool enable_rtp_over_tcp) : m_impl(std::make_uniq
 }
 
 RTSPDataSource::~RTSPDataSource() {
+    stop();
+    close();
 }
 
 int RTSPDataSource::open(const std::string& url, int fps,const DataSourceCallbacks& callbacks) {
+    static_cast<void>(fps);
     if (m_impl->isOpened) return -1;
 
     m_impl->url = url;
@@ -102,7 +105,6 @@ int RTSPDataSource::start() {
 }
 
 int RTSPDataSource::stop() {
-    if (!m_impl->isOpened) return -1;
     m_impl->isDelivering.store(false);
     if (m_impl->pullThread.joinable()) {
         m_impl->pullThread.join();

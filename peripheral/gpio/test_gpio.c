@@ -276,8 +276,14 @@ static int test_value_operations(void)
     ret = drv_gpio_value_set(NULL, GPIO_PV_HIGH);
     TEST_ASSERT(ret != 0, "Set value with NULL should fail");
 
+    ret = drv_gpio_value_set(gpio, GPIO_PV_INVALID);
+    TEST_ASSERT(ret != 0, "Set invalid value should fail");
+
+    value = drv_gpio_value_get(gpio);
+    TEST_ASSERT(value == GPIO_PV_LOW, "Invalid value should not change GPIO state");
+
     value = drv_gpio_value_get(NULL);
-    TEST_ASSERT(value == GPIO_PV_LOW, "Get value with NULL returns LOW");
+    TEST_ASSERT(value == GPIO_PV_INVALID, "Get value with NULL returns invalid");
 
     ret = drv_gpio_toggle(NULL);
     TEST_ASSERT(ret != 0, "Toggle with NULL should fail");

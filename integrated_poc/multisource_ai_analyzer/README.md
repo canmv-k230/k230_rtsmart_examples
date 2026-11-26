@@ -204,7 +204,7 @@ Required:
   <video_path>              视频源路径，支持以下类型:
                             - "realtime"   实时摄像头采集
                             - "*.mp4"      MP4 视频文件
-                            - "UVC"        UVC 摄像头
+                            - "uvc"        UVC 摄像头
                             - "rtsp://*"   RTSP 网络视频流
 
 Optional:
